@@ -1,0 +1,581 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>DB Studio</title>
+    <link rel="icon" href="src/assets/db-studio-icon.png" />
+    <link rel="stylesheet" href="src/styles.css" />
+    <link rel="stylesheet" href="src/result-grid.css" />
+    <link rel="stylesheet" href="src/themes.css" />
+    <link rel="stylesheet" href="src/workspace.css" />
+    <link rel="stylesheet" href="src/command-palette.css" />
+    <link rel="stylesheet" href="src/query-library.css" />
+    <link rel="stylesheet" href="src/scrollbars.css" />
+    <link rel="stylesheet" href="src/selection.css" />
+  </head>
+  <body>
+    <div class="app-shell" id="appShell">
+      <header class="app-header">
+        <div class="brand">
+          <img class="brand-icon" src="src/assets/db-studio-icon.png" alt="" />
+          DB Studio
+          <span class="version">WORKSPACE</span>
+        </div>
+        <div class="header-context" id="headerContext">数据库工作区</div>
+        <div class="header-actions">
+          <button class="command-trigger" id="openCommands" type="button" title="快速操作 (⌘ P)" aria-label="快速操作">
+            <svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4.5 4.5"/></svg><span>快速操作</span><kbd>⌘ P</kbd>
+          </button>
+          <button
+            class="read-only-badge"
+            id="modeBadge"
+            type="button"
+            aria-pressed="false"
+            title="安全模式：只允许执行 SELECT、WITH、EXPLAIN、SHOW、VALUES，不会执行写入或 DDL"
+            >只读 SQL</button
+          ><div class="theme-picker" id="themePicker">
+            <button class="theme-button" id="themeButton" type="button" aria-expanded="false" aria-controls="themeMenu" title="选择界面主题">
+              <span class="theme-swatch" id="themeButtonSwatch"></span><span id="themeButtonLabel">暗黑</span><span class="theme-chevron" aria-hidden="true"></span>
+            </button>
+            <div class="theme-menu" id="themeMenu" role="menu" aria-label="界面主题" hidden>
+              <div class="theme-menu-title">界面主题</div>
+              <button class="theme-option" role="menuitemradio" type="button" data-theme-option="dark"><span class="theme-option-swatch theme-dark"></span><span><strong>暗黑</strong><small>默认深色工作区</small></span></button>
+              <button class="theme-option" role="menuitemradio" type="button" data-theme-option="light"><span class="theme-option-swatch theme-light"></span><span><strong>白天</strong><small>明亮清晰</small></span></button>
+              <button class="theme-option" role="menuitemradio" type="button" data-theme-option="ocean"><span class="theme-option-swatch theme-ocean"></span><span><strong>海蓝</strong><small>冷静专注</small></span></button>
+              <button class="theme-option" role="menuitemradio" type="button" data-theme-option="forest"><span class="theme-option-swatch theme-forest"></span><span><strong>森林</strong><small>柔和低刺激</small></span></button>
+              <button class="theme-option" role="menuitemradio" type="button" data-theme-option="contrast"><span class="theme-option-swatch theme-contrast"></span><span><strong>高对比</strong><small>适合长时间阅读</small></span></button>
+            </div>
+          </div>
+        </div>
+      </header>
+      <div class="workspace-body" id="workspaceBody">
+        <div class="pane-rail" id="connectionsRail" hidden>
+          <button class="pane-restore" id="toggleConnections" type="button" aria-label="展开连接与最近查询" aria-expanded="false" aria-controls="connectionsPane" title="展开连接与最近查询">
+            <svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16m4-11 3 3-3 3"/></svg>
+            <span>连接</span>
+          </button>
+        </div>
+        <aside
+          class="connections-pane"
+          id="connectionsPane"
+          aria-label="连接与查询历史"
+        >
+          <div class="pane-heading">
+            <span>连接 <small class="pane-count" id="connectionCount">0</small></span>
+            <div><button class="icon-btn pane-hide" type="button" data-hide-pane="connections" title="隐藏连接与最近查询" aria-label="隐藏连接与最近查询">‹</button><button
+              class="icon-btn"
+              id="newConnection" aria-label="新建连接"
+              title="新建数据库连接"
+            >
+              ＋
+            </button></div>
+          </div>
+          <label class="sidebar-search"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4.5 4.5"/></svg><input id="connectionSearch" type="search" placeholder="查找连接…" aria-label="查找连接" autocomplete="off" /></label>
+          <div class="connection-list scroll-area" id="connectionList"></div>
+          <div class="pane-heading history-heading query-collection-heading">
+            <div class="query-collection-switch" role="group" aria-label="查询集合">
+              <button id="showQueryHistory" type="button" aria-pressed="true" aria-controls="recentQueries">最近 <small class="pane-count" id="historyCount">0</small></button>
+              <button id="showQueryLibrary" type="button" aria-pressed="false" aria-controls="queryLibraryPanel">收藏 <small class="pane-count" id="queryLibraryCount">0</small></button>
+            </div><button class="quiet-btn" id="clearHistory">清空</button>
+          </div>
+          <label class="sidebar-search history-search"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4.5 4.5"/></svg><input id="historySearch" type="search" placeholder="搜索 SQL 或连接…" aria-label="搜索最近查询" autocomplete="off" /></label>
+          <div class="recent-queries scroll-area" id="recentQueries"></div>
+          <section id="queryLibraryPanel" class="query-library-panel" aria-label="查询收藏" hidden>
+            <label class="sidebar-search"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4.5 4.5"/></svg><input id="queryLibrarySearch" type="search" placeholder="搜索名称、SQL 或连接…" aria-label="搜索查询收藏" autocomplete="off" /></label>
+            <div class="query-library-list scroll-area" id="queryLibraryList"></div>
+            <div class="query-library-toolbar"><span id="queryLibraryMatchCount" role="status" aria-live="polite"></span><button id="importQueryLibrary" class="quiet-btn" type="button">导入</button><button id="exportQueryLibrary" class="quiet-btn" type="button">导出</button></div>
+            <input id="queryLibraryFile" type="file" accept=".json,application/json" hidden />
+          </section>
+          <div class="pane-footnote"><span class="save-indicator" aria-hidden="true"></span> SQL 草稿自动保存</div>
+        </aside>
+        <div
+          class="splitter vertical"
+          id="connectionsSplitter"
+          role="separator"
+          tabindex="0"
+          aria-label="调整连接栏宽度"
+          aria-orientation="vertical"
+        ></div>
+        <div class="pane-rail" id="objectsRail" hidden>
+          <button class="pane-restore" id="toggleObjects" type="button" aria-label="展开数据库对象" aria-expanded="false" aria-controls="objectsPane" title="展开数据库对象">
+            <svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16m4-11 3 3-3 3"/></svg>
+            <span>对象</span>
+          </button>
+        </div>
+        <aside
+          class="objects-pane"
+          id="objectsPane"
+          aria-label="数据库对象浏览器"
+        >
+          <div class="pane-heading">
+            <span>数据库对象</span>
+            <div>
+              <button class="icon-btn pane-hide" type="button" data-hide-pane="objects" title="隐藏数据库对象" aria-label="隐藏数据库对象">‹</button>
+              <button
+                class="icon-btn"
+                id="collapseTree"
+                title="收起所有数据库和 Schema"
+                aria-label="收起所有数据库和 Schema"
+              >
+                <svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m7 4 5 5 5-5M7 20l5-5 5 5M5 12h14"/></svg></button
+              ><button
+                class="icon-btn"
+                id="refreshSchema"
+                title="刷新数据库对象"
+              >
+                ↻
+              </button>
+            </div>
+          </div>
+          <label class="object-search"
+            ><span>⌕</span
+            ><input
+              id="objectSearch"
+              aria-label="搜索表、字段或 schema"
+              type="search"
+              placeholder="搜索表、字段或 schema…"
+              autocomplete="off"
+            /><kbd>⌘ K</kbd></label
+          >
+          <div class="tree scroll-area" id="objectTree"></div>
+          <div class="object-selection" id="objectSelection">
+            展开数据库和 schema，浏览对象
+          </div>
+        </aside>
+        <div
+          class="splitter vertical"
+          id="objectsSplitter"
+          role="separator"
+          tabindex="0"
+          aria-label="调整对象栏宽度"
+          aria-orientation="vertical"
+        ></div>
+        <main class="main-pane" id="mainPane">
+          <div class="tabbar">
+            <div
+              class="query-tabs"
+              id="queryTabs"
+              role="tablist"
+              aria-label="SQL 查询标签"
+            ></div>
+            <button
+              class="icon-btn add-tab"
+              id="addQueryTab" aria-label="新建查询"
+              title="新建查询 (⌘ T)"
+            >
+              ＋
+            </button>
+          </div>
+          <div class="query-toolbar" id="queryToolbar">
+            <div class="query-schema-control" id="queryTargetBar" hidden>
+              <button id="querySchema" class="schema-select-trigger" type="button" aria-label="查询 Schema" aria-haspopup="listbox" aria-expanded="false" aria-controls="querySchemaList">
+                <svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3 7 4v10l-7 4-7-4V7l7-4Z M5 7l7 4 7-4 M12 11v10"/></svg>
+                <span id="querySchemaLabel"></span><span class="theme-chevron" aria-hidden="true"></span>
+              </button>
+              <div id="querySchemaMenu" class="schema-select-menu" hidden>
+                <div class="schema-select-search"><input id="querySchemaSearch" type="text" placeholder="搜索 Schema…" aria-label="搜索 Schema" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="querySchemaList" autocomplete="off" spellcheck="false" /></div>
+                <div id="querySchemaList" class="schema-select-list" role="listbox" aria-label="查询 Schema"></div>
+                <div id="querySchemaEmpty" class="schema-select-empty" role="status" hidden>没有匹配的 Schema</div>
+                <div class="schema-select-footer"><span id="querySchemaCount"></span><span aria-hidden="true">↑↓ 选择 · ↵ 确认</span></div>
+              </div>
+              <span id="queryTargetContext" class="query-target-context" hidden></span>
+              <button id="refreshQueryTarget" class="icon-btn" type="button" title="刷新 Schema 列表" aria-label="刷新 Schema 列表">↻</button>
+            </div>
+            <button class="primary-btn" id="runQuery">
+              <span>▶</span><span id="runLabel">执行</span
+              ><kbd>⌘ ↵</kbd></button
+            ><button class="icon-btn" id="stopQuery" aria-label="停止执行" disabled title="停止执行">
+              ■</button
+            ><button class="quiet-btn" id="beginTransaction" type="button" title="开始一个可提交或回滚的写入事务">开始事务</button
+            ><button class="quiet-btn" id="commitTransaction" type="button" title="提交当前写入事务" disabled>提交</button
+            ><button class="quiet-btn" id="rollbackTransaction" type="button" title="回滚当前写入事务" disabled>回滚</button
+            ><span class="toolbar-spacer"></span
+            ><button class="quiet-btn" id="formatQuery">格式化</button
+            ><button class="quiet-btn" id="importSql">打开</button
+            ><button class="quiet-btn" id="saveSql">保存</button
+            ><button class="quiet-btn" id="saveQueryFavorite" type="button" title="收藏当前 SQL 或选中部分">收藏</button
+            ><input type="file" id="sqlFile" accept=".sql,.txt" hidden />
+          </div>
+          <div class="query-target-feedback" id="queryTargetDetail" role="status" hidden></div>
+          <div class="table-toolbar" id="tableToolbar" hidden>
+            <div class="table-toolbar-title"><span class="database-icon">▦</span><strong id="tableToolbarTitle">表数据</strong><small id="tableToolbarMeta"></small></div>
+            <span class="toolbar-spacer"></span>
+            <button class="quiet-btn" id="openTableSql" type="button">打开 SQL 编辑器</button>
+            <button class="quiet-btn" id="openTableDdl" type="button">表结构</button>
+            <button class="quiet-btn" id="refreshTableData" type="button">刷新</button>
+          </div>
+          <div class="editor-result" id="editorResult">
+            <section
+              class="editor-pane"
+              id="editorPane"
+              aria-label="SQL 编辑区"
+            >
+              <div id="sqlEditor"></div>
+              <div class="editor-footer">
+                <span id="editorHint">PostgreSQL · 选中 SQL 可单独执行</span
+                ><span id="cursorPosition">Ln 1, Col 1</span>
+              </div>
+            </section>
+            <div
+              class="splitter horizontal"
+              id="editorSplitter"
+              role="separator"
+              tabindex="0"
+              aria-label="调整编辑器高度"
+              aria-orientation="horizontal"
+            ></div>
+            <section class="results-pane" aria-label="查询结果区">
+              <div class="result-heading">
+                <div class="result-tabs" role="tablist" aria-label="查询输出">
+                  <button class="result-tab active" id="resultTab" role="tab">
+                    数据 <span id="resultCount">—</span></button
+                  ><button class="result-tab" id="structureTab" role="tab" title="查看表结构">
+                    结构</button
+                  ><button class="result-tab" id="messageTab" role="tab">
+                    消息
+                  </button>
+                </div>
+                <div id="queryStructureMenu" class="schema-select-menu" hidden>
+                  <div class="schema-select-search"><input id="queryStructureSearch" type="text" placeholder="搜索表名或 Schema…" aria-label="选择要查看结构的表" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="queryStructureList" autocomplete="off" spellcheck="false" /></div>
+                  <div id="queryStructureList" class="schema-select-list" role="listbox" aria-label="表与视图"></div>
+                  <div id="queryStructureEmpty" class="schema-select-empty" hidden>没有匹配的表或视图</div>
+                  <div class="schema-select-footer"><span id="queryStructureCount"></span><span>↑↓ 选择 · Enter 查看结构</span></div>
+                </div>
+                <span class="toolbar-spacer"></span
+                ><input
+                  class="result-filter"
+                  id="resultFilter"
+                  placeholder="过滤当前结果…"
+                  aria-label="过滤当前结果"
+                  hidden
+                /><span class="selection-count" id="selectionCount"></span
+                ><span class="page-controls" id="pageControls" hidden
+                  ><button class="quiet-btn" id="previousPage" disabled>
+                    上一页</button
+                  ><span id="pageLabel">第 1 页</span
+                  ><button class="quiet-btn" id="nextPage" disabled>
+                    下一页
+                  </button></span
+                ><button class="quiet-btn" id="copyResults" disabled>
+                  复制</button
+                ><button class="quiet-btn" id="exportResults" disabled>
+                  导出 CSV
+                </button><button class="quiet-btn" id="newRow" hidden>新增行</button
+                ><button class="quiet-btn" id="editRow" hidden disabled>编辑选中</button
+                ><button class="quiet-btn" id="deleteRows" hidden disabled>删除选中</button>
+              </div>
+              <div class="result-context" id="resultMeta">尚未执行查询</div>
+              <div class="result-content" id="resultContent">
+                <div class="empty-state" id="resultEmpty">
+                  <div class="empty-symbol" aria-hidden="true"><svg viewBox="0 0 48 48"><ellipse cx="24" cy="12" rx="13" ry="6"/><path d="M11 12v12c0 3.3 5.8 6 13 6s13-2.7 13-6V12M11 24v12c0 3.3 5.8 6 13 6s13-2.7 13-6V24"/></svg></div>
+                  <div class="welcome-eyebrow">YOUR DATA, IN FOCUS</div>
+                  <h2>从一个查询开始</h2>
+                  <p>连接数据库，或从对象树打开一张表。</p>
+                  <div class="empty-actions" id="emptyActions"><button class="primary-btn" id="welcomeConnect" type="button">＋ 新建连接</button><button class="secondary-btn" id="welcomeQuery" type="button">新建查询 <kbd>⌘ T</kbd></button></div>
+                  <div class="welcome-features" id="welcomeFeatures"><span>PostgreSQL</span><span>MySQL</span><span>Redis</span></div>
+                  <button class="quiet-btn empty-next" id="emptyNextAction" type="button" hidden>开始编写 SQL</button>
+                  <span class="empty-shortcuts"
+                    ><kbd>⌘ T</kbd> 新建查询 <kbd>⌘ ↵</kbd> 执行</span
+                  >
+                </div>
+                <div id="resultGrid" hidden></div>
+                <div
+                  id="structurePanel"
+                  class="structure-panel scroll-area"
+                  hidden
+                ></div>
+                <pre
+                  id="messagePanel"
+                  class="message-panel scroll-area"
+                  hidden
+                ></pre>
+              </div>
+            </section>
+          </div>
+          <div class="redis-console" id="redisConsolePanel" hidden>
+            <div class="redis-console-header"><span>Redis 控制台</span><span class="redis-console-header-actions"><span id="redisConsoleContext">DB 0</span><button class="icon-btn" id="closeRedisConsole" type="button" title="关闭控制台">×</button></span></div>
+            <div class="redis-console-output" id="redisConsoleOutput"></div>
+            <form class="redis-console-input-row" id="redisConsoleForm">
+              <span class="redis-console-prompt" id="redisConsolePrompt">redis[0]&gt;</span>
+              <textarea id="redisConsoleInput" rows="1" spellcheck="false" autocomplete="off" placeholder="输入 Redis 命令，例如 GET key 或 INFO"></textarea>
+              <button class="primary-btn" id="redisConsoleRun" type="submit">执行</button>
+            </form>
+          </div>
+        </main>
+      </div>
+      <footer class="statusbar">
+        <span class="status-dot" id="statusDot"></span
+        ><span id="connectionMode" role="status" aria-live="polite" aria-atomic="true">未连接</span><span id="serverInfo"></span
+        ><span class="toolbar-spacer"></span
+        ><span class="preview-label" id="previewLabel" hidden>浏览器预览</span><button class="quiet-btn" id="showShortcuts" type="button" title="键盘快捷键">快捷键 <kbd>?</kbd></button><button class="quiet-btn" id="resetLayout" type="button" title="恢复默认面板宽度和展开状态">重置布局</button
+        ><span id="workspaceStats">PostgreSQL</span
+        ><button class="quiet-btn" id="disconnectConnection" disabled>
+          断开
+        </button>
+      </footer>
+    </div>
+    <dialog id="connectionModal" class="connection-dialog" aria-labelledby="connectionTitle">
+      <form id="connectionForm">
+        <div class="dialog-header">
+          <div>
+            <div class="eyebrow">DATABASE CONNECTION</div>
+            <h2 id="connectionTitle">新建连接</h2>
+          </div>
+          <button class="icon-btn" id="closeConnection" aria-label="关闭连接设置" type="button">×</button>
+        </div>
+        <div class="connection-form">
+          <label
+            >连接名称<input
+              id="connectionName"
+              required
+              placeholder="例如：开发环境"
+          /></label>
+          <div class="driver-field">
+            <span class="driver-label" id="connectionDriverLabel">驱动</span>
+            <div class="driver-picker" id="connectionDriverPicker">
+              <input id="connectionDriver" type="hidden" name="driver" value="postgres" />
+              <button class="driver-picker-trigger" id="connectionDriverTrigger" type="button" aria-haspopup="listbox" aria-expanded="false" aria-labelledby="connectionDriverLabel connectionDriverValue">
+                <span class="driver-picker-icon" id="connectionDriverIcon" aria-hidden="true">PG</span>
+                <span class="driver-picker-value" id="connectionDriverValue">PostgreSQL</span>
+                <span class="driver-picker-chevron" aria-hidden="true"></span>
+              </button>
+              <div class="driver-picker-menu" id="connectionDriverMenu" role="listbox" aria-labelledby="connectionDriverLabel" hidden>
+                <button class="driver-option" type="button" role="option" data-driver="postgres" aria-selected="true">
+                  <span class="driver-picker-icon" aria-hidden="true">PG</span><span><strong>PostgreSQL</strong><small>关系型数据库</small></span><span class="driver-choice-check" aria-hidden="true">✓</span>
+                </button>
+                <button class="driver-option" type="button" role="option" data-driver="redis" aria-selected="false">
+                  <span class="driver-picker-icon" aria-hidden="true">R</span><span><strong>Redis</strong><small>键值数据库</small></span><span class="driver-choice-check" aria-hidden="true">✓</span>
+                </button>
+                <button class="driver-option" type="button" role="option" data-driver="mysql" aria-selected="false">
+                  <span class="driver-picker-icon" aria-hidden="true">M</span><span><strong>MySQL</strong><small>关系型数据库</small></span><span class="driver-choice-check" aria-hidden="true">✓</span>
+                </button>
+              </div>
+            </div>
+          </div>
+          <div class="form-grid host-grid">
+            <label
+              >主机<input
+                id="connectionHost"
+                required
+                placeholder="localhost" /></label
+            ><label
+              >端口<input
+                id="connectionPort"
+                required
+                type="number"
+                min="1"
+                max="65535"
+                value="5432"
+            /></label>
+          </div>
+          <label class="connection-tls-field" id="connectionTlsField"
+            ><span><input id="connectionTls" type="checkbox" /> <span id="connectionTlsLabel">使用 TLS</span></span></label
+          >
+          <label class="connection-tls-field" id="connectionCaField"
+            >自定义 CA（可选）<span class="connection-ca-row"><input id="connectionCaPath" placeholder="使用系统信任库" readonly /><button class="secondary-btn" id="chooseConnectionCa" type="button">选择</button><button class="icon-btn" id="clearConnectionCa" type="button" title="清除自定义 CA">×</button></span></label
+          >
+          <div class="form-grid">
+            <label id="connectionDatabaseField"
+              ><span id="connectionDatabaseLabel">数据库</span><input
+                id="connectionDatabase"
+                required
+                placeholder="postgres" /></label
+            ><label id="connectionUserField"
+              ><span id="connectionUserLabel">用户名 / ACL 用户</span><input id="connectionUser" placeholder="postgres"
+            /></label>
+          </div>
+          <label
+            >数据库密码<input
+              id="connectionPassword"
+              type="password"
+              autocomplete="new-password"
+          /></label>
+          <p class="form-note connection-security-note">密码存入系统钥匙串，连接配置保存在此设备。Redis 支持单机连接。</p>
+          <div
+            class="dialog-feedback"
+            id="connectionFeedback"
+            role="status"
+          ></div>
+        </div>
+        <div class="dialog-actions">
+          <button class="danger-btn" id="deleteConnection" type="button" hidden>
+            删除连接</button
+          ><button class="secondary-btn" id="testConnection" type="button">
+            测试连接</button
+          ><span class="toolbar-spacer"></span
+          ><button class="secondary-btn" id="cancelConnection" type="button">
+            取消</button
+          ><button class="primary-btn" id="saveConnection" type="submit">
+            保存并连接
+          </button>
+        </div>
+      </form>
+    </dialog>
+    <dialog id="databaseModal" class="database-dialog">
+      <form method="dialog" id="databasePickerForm">
+        <div class="dialog-header database-picker-header">
+          <div>
+            <div class="eyebrow">DATABASE VISIBILITY</div>
+            <h2>显示的数据库</h2>
+          </div>
+          <button class="icon-btn" id="closeDatabasePicker" aria-label="关闭数据库选择" type="button">×</button>
+        </div>
+        <div class="database-picker-toolbar">
+          <label class="database-search"><span aria-hidden="true">⌕</span><input id="databaseSearch" placeholder="搜索数据库…" autocomplete="off" /></label>
+          <label class="database-select-all"><input id="databaseSelectAll" type="checkbox" /><span>全选</span><small id="databaseSelectionCount">0 个已显示</small></label>
+        </div>
+        <div class="database-list" id="databaseList"></div>
+        <div class="dialog-actions">
+          <span class="toolbar-spacer"></span>
+          <button class="secondary-btn" id="cancelDatabasePicker" type="button">取消</button>
+          <button class="primary-btn" id="applyDatabasePicker" type="submit">应用</button>
+        </div>
+      </form>
+    </dialog>
+    <dialog id="schemaModal" class="database-dialog">
+      <form method="dialog" id="schemaPickerForm">
+        <div class="dialog-header database-picker-header">
+          <div>
+            <div class="eyebrow">SCHEMA VISIBILITY</div>
+            <h2>显示的 schema</h2>
+            <small id="schemaPickerDatabaseName"></small>
+          </div>
+          <button class="icon-btn" id="closeSchemaPicker" aria-label="关闭 Schema 选择" type="button">×</button>
+        </div>
+        <div class="database-picker-toolbar">
+          <label class="database-search"><span aria-hidden="true">⌕</span><input id="schemaSearch" placeholder="搜索 schema…" autocomplete="off" /></label>
+          <label class="database-select-all"><input id="schemaSelectAll" type="checkbox" /><span>全选</span><small id="schemaSelectionCount">0 个已显示</small></label>
+        </div>
+        <div class="database-list" id="schemaList"></div>
+        <div class="dialog-actions">
+          <span class="toolbar-spacer"></span>
+          <button class="secondary-btn" id="cancelSchemaPicker" type="button">取消</button>
+          <button class="primary-btn" id="applySchemaPicker" type="submit">应用</button>
+        </div>
+      </form>
+    </dialog>
+    <dialog id="confirmActionModal" class="confirmation-dialog" aria-labelledby="confirmActionTitle" aria-describedby="confirmActionMessage">
+      <form method="dialog" class="connection-form">
+        <div class="dialog-header"><h2 id="confirmActionTitle" data-confirm-title>确认操作</h2></div>
+        <p id="confirmActionMessage" data-confirm-message></p>
+        <pre class="definition" data-confirm-detail hidden></pre>
+        <div class="dialog-actions"><span class="toolbar-spacer"></span><button class="secondary-btn" id="confirmActionCancel" value="cancel" autofocus>取消</button><button class="primary-btn" id="confirmActionAccept" value="accept">确认执行</button></div>
+      </form>
+    </dialog>
+    <div class="context-menu" id="objectContextMenu" hidden role="menu">
+      <div class="context-menu-title" id="objectContextTitle"></div>
+      <button type="button" data-context-action="open-data">打开表数据</button>
+      <button type="button" data-context-action="open-structure">查看表结构</button>
+      <button type="button" data-context-action="edit-structure">编辑表结构…</button>
+      <button type="button" data-context-action="new-query">新建查询</button>
+      <button type="button" role="menuitem" data-context-action="new-database-query">新建查询</button>
+      <button type="button" role="menuitem" data-context-action="create-table">新建表…</button>
+      <button type="button" role="menuitem" data-context-action="create-schema">新建 schema…</button>
+      <button type="button" role="menuitem" data-context-action="create-database">新建数据库…</button>
+      <button type="button" data-context-action="rename-table">重命名表…</button>
+      <button type="button" role="menuitem" data-context-action="refresh-object">刷新对象</button>
+      <button type="button" data-context-action="refresh-schema">刷新对象列表</button>
+      <button type="button" role="menuitem" data-context-action="refresh-database">刷新数据库</button>
+      <button type="button" role="menuitem" data-context-action="refresh-databases">刷新数据库列表</button>
+      <button type="button" data-context-action="refresh-redis">刷新实例</button>
+      <div class="context-menu-divider" role="separator" data-context-divider></div>
+      <button type="button" data-context-action="copy-name">复制完整名称</button>
+      <button type="button" data-context-action="copy-ddl">复制 DDL</button>
+    </div>
+    <dialog id="createObjectModal" class="create-object-dialog" aria-labelledby="createObjectTitle">
+      <form id="createObjectForm" class="connection-form">
+        <div class="dialog-header">
+          <div><h2 id="createObjectTitle">新建数据库</h2><p class="form-note" id="createObjectContext"></p></div>
+          <button type="button" class="icon-btn" id="closeCreateObject" aria-label="关闭">×</button>
+        </div>
+        <label><span id="createObjectNameLabel">数据库名称</span><input id="createObjectName" required autocomplete="off" /></label>
+        <p class="form-note" id="createObjectHint">填写名称后打开 SQL 编辑器，检查语句并点击「执行」完成创建。</p>
+        <div class="dialog-actions"><span class="toolbar-spacer"></span><button type="button" class="secondary-btn" id="cancelCreateObject">取消</button><button type="submit" class="primary-btn">打开 SQL</button></div>
+      </form>
+    </dialog>
+    <div class="context-menu" id="redisContextMenu" hidden role="menu">
+      <button type="button" data-redis-context-action="open">打开值</button>
+      <button type="button" data-redis-context-action="refresh">刷新 key</button>
+      <button type="button" data-redis-context-action="rename">重命名 key</button>
+      <button type="button" data-redis-context-action="delete">删除 key</button>
+      <button type="button" data-redis-context-action="copy">复制 key</button>
+    </div>
+    <div class="context-menu" id="redisDatabaseContextMenu" hidden role="menu">
+      <button type="button" data-redis-database-context-action="refresh">刷新当前 DB</button>
+      <button type="button" data-redis-database-context-action="console">打开控制台</button>
+    </div>
+    <div class="context-menu" id="tabContextMenu" hidden role="menu">
+      <button type="button" data-tab-context-action="close">关闭此标签</button>
+      <button type="button" data-tab-context-action="close-others">关闭其他标签</button>
+      <button type="button" data-tab-context-action="close-right">关闭右侧标签</button>
+      <button type="button" data-tab-context-action="close-all">关闭所有标签</button>
+    </div>
+    <dialog id="cellModal" class="cell-dialog" aria-labelledby="cellTitle">
+      <div class="dialog-header">
+        <div>
+          <div class="eyebrow">单元格详情</div>
+          <h2 id="cellTitle"></h2>
+        </div>
+        <button class="icon-btn" id="closeCell" aria-label="关闭单元格详情" type="button">×</button>
+      </div>
+      <div id="cellJsonTools" class="cell-json-tools" hidden>
+        <div class="cell-json-toolbar">
+          <span id="cellJsonCaption" class="form-note">JSON 预览</span>
+          <div id="cellJsonFormatControls" class="cell-json-format-controls">
+            <button class="secondary-btn" id="cellJsonPretty" type="button" aria-pressed="true">格式化</button>
+            <button class="secondary-btn" id="cellJsonCompact" type="button" aria-pressed="false">压缩</button>
+          </div>
+          <button class="secondary-btn" id="editCellJson" type="button" hidden>编辑 JSON</button>
+        </div>
+        <pre id="cellJsonPreview" hidden></pre>
+      </div>
+      <textarea id="cellValue" tabindex="0" spellcheck="false" aria-label="单元格值"></textarea>
+      <label id="cellNullControl" class="cell-null-control" hidden><input type="checkbox" id="cellNull" /> 设为 NULL <span>不勾选时，空白内容保存为空字符串</span></label>
+      <div id="cellFeedback" class="dialog-feedback error" role="alert"></div>
+      <div class="dialog-actions">
+        <span id="cellMeta" class="form-note"></span
+        ><span class="toolbar-spacer"></span
+        ><button class="secondary-btn" id="copyCell">复制值</button
+        ><button class="primary-btn" id="saveCell" hidden>保存修改</button>
+      </div>
+    </dialog>
+    <dialog id="redisRenameModal" class="cell-dialog">
+      <form id="redisRenameForm">
+        <div class="dialog-header">
+          <div><div class="eyebrow">REDIS KEY</div><h2>重命名 key</h2></div>
+          <button class="icon-btn" id="closeRedisRename" aria-label="关闭重命名" type="button">×</button>
+        </div>
+        <label>新的 key<input id="redisRenameInput" autocomplete="off" required /></label>
+        <div class="dialog-feedback" id="redisRenameFeedback" role="status"></div>
+        <div class="dialog-actions"><span class="toolbar-spacer"></span><button class="secondary-btn" id="cancelRedisRename" type="button">取消</button><button class="primary-btn" id="applyRedisRename" type="submit">确认重命名</button></div>
+      </form>
+    </dialog>
+    <dialog id="mutationModal" class="mutation-dialog">
+      <form id="mutationForm">
+        <div class="dialog-header">
+          <div>
+            <div class="eyebrow">TABLE DATA</div>
+            <h2 id="mutationTitle">编辑数据</h2>
+          </div>
+          <button class="icon-btn" id="closeMutation" aria-label="关闭数据编辑" type="button">×</button>
+        </div>
+        <p class="form-note" id="mutationHint"></p>
+        <div class="mutation-fields" id="mutationFields"></div>
+        <div class="dialog-feedback" id="mutationFeedback" role="status"></div>
+        <div class="dialog-actions">
+          <span class="toolbar-spacer"></span>
+          <button class="secondary-btn" id="cancelMutation" type="button">取消</button>
+          <button class="primary-btn" id="applyMutation" type="submit">执行</button>
+        </div>
+      </form>
+    </dialog>
+    <dialog id="shortcutsModal" class="shortcuts-dialog" aria-labelledby="shortcutsTitle">
+      <div class="dialog-header"><div><div class="eyebrow">WORK FASTER</div><h2 id="shortcutsTitle">键盘快捷键</h2></div><button class="icon-btn" id="closeShortcuts" type="button" aria-label="关闭快捷键">×</button></div>
+      <dl class="shortcut-list"><div><dt>快速操作 / 切换标签与连接</dt><dd><kbd>⌘ P</kbd></dd></div><div><dt>新建查询</dt><dd><kbd>⌘ T</kbd></dd></div><div><dt>执行 SQL / 所选语句</dt><dd><kbd>⌘ ↵</kbd></dd></div><div><dt>搜索数据库对象</dt><dd><kbd>⌘ K</kbd></dd></div><div><dt>保存 SQL 文件</dt><dd><kbd>⌘ S</kbd></dd></div><div><dt>搜索编辑器内容</dt><dd><kbd>⌘ F</kbd></dd></div><div><dt>在标签之间移动</dt><dd><kbd>←</kbd> <kbd>→</kbd></dd></div><div><dt>编辑选中单元格</dt><dd><kbd>Enter</kbd> <kbd>F2</kbd></dd></div><div><dt>单元格操作 / 查看详情</dt><dd><kbd>Shift F10</kbd></dd></div></dl>
+      <p class="form-note">方向键切换需先聚焦查询标签。Windows / Linux 使用 Ctrl 代替 ⌘。</p>
+    </dialog>
+    <div class="toast" id="toast" role="status" aria-live="polite" aria-atomic="true"></div>
+    <script type="module" src="src/main.js"></script>
+  </body>
+</html>

@@ -1,0 +1,25 @@
+[package]
+name = "db-studio"
+version = "0.1.0"
+description = "DB Studio desktop database client"
+authors = ["DB Studio"]
+edition = "2021"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio-postgres = "0.7"
+mysql_async = { version = "0.37", default-features = false, features = ["minimal", "default-rustls-ring"] }
+redis = { version = "1.7", default-features = false, features = ["tokio-rustls-comp", "connection-manager", "streams"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+percent-encoding = "2"
+hex = "0.4"
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+tokio = { version = "1", features = ["time", "macros", "rt-multi-thread"] }
+keyring = { version = "3", features = ["apple-native"] }
+uuid = { version = "1", features = ["v4"] }
+rfd = { version = "0.17", default-features = false }

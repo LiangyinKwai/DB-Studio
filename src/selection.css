@@ -1,0 +1,39 @@
+/* The workspace behaves like an app: layout whitespace is never text content. */
+body {
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+/* Enable native selection only inside actual text editing surfaces/content. */
+body input:not([type="checkbox"]):not([type="radio"]):not([type="button"]):not([type="submit"]):not([type="reset"]),
+body textarea,
+body [contenteditable="true"],
+body .cm-content,
+body .selectable-text {
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+/* Keep selections within the text box, away from table cell/panel padding. */
+body .selectable-text {
+  display: inline-block;
+  max-width: 100%;
+  vertical-align: top;
+  white-space: inherit;
+  cursor: text;
+}
+body .structure-table .pk-badge {
+  -webkit-user-select: none;
+  user-select: none;
+}
+body .selectable-text::selection,
+body input::selection,
+body textarea::selection {
+  background: var(--editor-selection-bg);
+  color: var(--app-text);
+}
+/* Keep short metadata labels/names intact when sizing the structure table. */
+#structurePanel .structure-table th,
+#structurePanel .structure-table td:first-child > .selectable-text {
+  white-space: nowrap;
+}
