@@ -1,5 +1,5 @@
 import { createServer } from "node:http";
-import { createReadStream, existsSync, statSync } from "node:fs";
+import { createReadStream, existsSync, mkdirSync, statSync } from "node:fs";
 import { extname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { chromium } from "./playwright-import.mjs";
@@ -32,6 +32,9 @@ const redis = new Map([
     ["cache:home", { keyType: "string", ttl: 500, value: "remote-home" }],
   ])],
 ]);
+const redisOtherDatabases = new Map([
+  ["redis-local:1", new Map([["otherdb:key", { keyType: "string", ttl: -1, value: "db1-only" }]])],
+]);
 const redisCalls = [];
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const record = (command, args) => { const entry = { command, args, at: Date.now() }; redisCalls.push(entry); fixture.calls.push(entry); return entry; };
@@ -39,9 +42,14 @@ const requireConnection = (args, command) => {
   if (typeof args?.connectionId !== "string" || !args.connectionId) throw new Error(`${command}: connectionId must be a string`);
   return args.connectionId;
 };
-const storeFor = (connectionId) => redis.get(connectionId) || new Map();
-function valuePayload(connectionId, key) {
-  const item = storeFor(connectionId).get(key);
+const storeFor = (connectionId, database = 0) => {
+  if (Number(database) === 0) return redis.get(connectionId) || new Map();
+  const target = `${connectionId}:${database}`;
+  if (!redisOtherDatabases.has(target)) redisOtherDatabases.set(target, new Map());
+  return redisOtherDatabases.get(target);
+};
+function valuePayload(connectionId, key, database = 0) {
+  const item = storeFor(connectionId, database).get(key);
   if (!item) throw new Error(`missing Redis key: ${key}`);
   if (item.keyType === "string") return { key, keyType: "string", ttl: item.ttl, columns: ["value"], rows: [[item.value]], raw: item.value };
   return { key, keyType: "hash", ttl: item.ttl, columns: ["field", "value"], rows: [...item.fields].map(([field, value]) => [field, value]), raw: Object.fromEntries(item.fields) };
@@ -55,27 +63,26 @@ if (command === "list_redis_databases") {
     { index: 1, keyCount: 0, current: false },
   ];
 }
-if (!["list_redis_keys", "get_redis_value", "execute_redis_command", "save_redis_cell", "delete_redis_key", "rename_redis_key"].includes(command)) return originalInvoke(command, args);
+if (!["list_redis_keys", "get_redis_value", "execute_redis_command", "save_redis_cell", "create_redis_key", "delete_redis_key", "rename_redis_key"].includes(command)) return originalInvoke(command, args);
   record(command, args);
   if (command === "list_redis_keys") {
     const connectionId = requireConnection(args, command);
-    if (args.database === 1) return { cursor: 0, keys: ["otherdb:key"] };
     if (String(args.pattern || "").includes("slow")) await wait(350);
     const pattern = String(args.pattern || "").replace(/^\*|\*$/g, "");
     if (pattern === "empty") return { cursor: args.cursor ? 0 : 12, keys: [] };
     if (pattern === "slow") return { cursor: 0, keys: ["stale:remote"] };
-    const keys = [...storeFor(connectionId).keys()].filter((key) => !pattern || key.includes(pattern));
+    const keys = [...storeFor(connectionId, args.database).keys()].filter((key) => !pattern || key.includes(pattern));
     return { cursor: 0, keys };
   }
   if (command === "get_redis_value") {
     const connectionId = requireConnection(args, command);
-    return valuePayload(connectionId, String(args.key));
+    return valuePayload(connectionId, String(args.key), args.database);
   }
   if (command === "save_redis_cell") {
     const request = args?.request || {};
     const connectionId = requireConnection(request, command);
     if (request.readOnly) throw new Error("Redis mutation is read-only");
-    const item = storeFor(connectionId).get(String(request.key));
+    const item = storeFor(connectionId, request.database).get(String(request.key));
     if (!item) throw new Error("missing Redis key");
     if (item.keyType !== request.keyType) throw new Error("Redis type changed");
     const old = request.field == null ? item.value : item.fields.get(String(request.field));
@@ -89,22 +96,36 @@ if (!["list_redis_keys", "get_redis_value", "execute_redis_command", "save_redis
     const connectionId = requireConnection(request, command);
     if (request.readOnly) throw new Error("Redis mutation is read-only");
     const sql = String(request.sql || "");
+    const get = sql.match(/^GET\s+"?([^"\s]+)"?\s*$/i);
+    if (get) {
+      const value = storeFor(connectionId, request.database).get(get[1])?.value ?? null;
+      return { columns: ["result"], rows: [[value]], rowCount: 1, elapsedMs: 0.1, raw: value };
+    }
     const set = sql.match(/^SET\s+"((?:[^"\\]|\\.)*)"\s+"((?:[^"\\]|\\.)*)"/i);
     const hash = sql.match(/^HSET\s+"((?:[^"\\]|\\.)*?)"\s+"((?:[^"\\]|\\.)*?)"\s+"((?:[^"\\]|\\.)*)"/i);
-    if (set) storeFor(connectionId).get(set[1].replaceAll('\\"', '"')).value = set[2];
-    if (hash) storeFor(connectionId).get(hash[1]).fields.set(hash[2], hash[3]);
+    if (set) storeFor(connectionId, request.database).get(set[1].replaceAll('\\"', '"')).value = set[2];
+    if (hash) storeFor(connectionId, request.database).get(hash[1]).fields.set(hash[2], hash[3]);
     return { columns: ["result"], rows: [["OK"]], rowCount: 1, elapsedMs: 0.1 };
+  }
+  if (command === "create_redis_key") {
+    const request = args.request;
+    const connectionId = requireConnection(request, command);
+    if (request.readOnly) throw new Error("Redis mutation is read-only");
+    const current = storeFor(connectionId, request.database);
+    if (current.has(request.key)) throw new Error("目标 key 已存在，未覆盖原数据");
+    current.set(request.key, { keyType: request.keyType, value: request.value, ttl: request.ttl || -1, fields: new Map([[request.field, request.value]]) });
+    return null;
   }
   if (command === "delete_redis_key") {
     const connectionId = requireConnection(args, command);
     if (args.readOnly) throw new Error("Redis mutation is read-only");
-    return storeFor(connectionId).delete(String(args.key)) ? 1 : 0;
+    return storeFor(connectionId, args.database).delete(String(args.key)) ? 1 : 0;
   }
   if (command === "rename_redis_key") {
     const request = args?.request || {};
     const connectionId = requireConnection(request, command);
     if (request.readOnly) throw new Error("Redis mutation is read-only");
-    const current = storeFor(connectionId);
+    const current = storeFor(connectionId, request.database);
     if (current.has(request.newKey)) return false;
     const item = current.get(request.key);
     if (!item) return false;
@@ -143,6 +164,7 @@ await context.addInitScript(({ profiles }) => {
 }, { profiles: fixture.profiles });
 await context.exposeFunction("__FIXTURE_INVOKE__", fixture.invoke);
 const page = await context.newPage();
+page.on("pageerror", error => console.log(`[page error] ${error.message}`));
 page.on("console", (message) => { if (message.type() === "error") console.log(`[browser error] ${message.text()}`); });
 await page.goto(`http://127.0.0.1:${port}/`, { waitUntil: "networkidle" });
 await waitFor(() => page.locator("#connectionList [data-connection-id]").count().then((count) => count === 4), "connections");
@@ -154,9 +176,30 @@ const ensureConnection = async (id) => {
 const expandRedisDatabase = async (index) => {
   const database = page.locator(`.redis-database[data-redis-db='${index}']`);
   await waitFor(() => database.count().then((count) => count === 1), `Redis DB ${index}`);
-  if ((await database.getAttribute("open")) !== "") await database.locator("> summary").click();
+  if ((await database.getAttribute("open")) !== "") await database.locator("> summary .tree-toggle").click();
   return database;
 };
+
+await check("new connections fill defaults and preserve custom values across drivers", async () => {
+  await page.locator("#newConnection").click();
+  expect(await page.locator("#connectionHost").inputValue() === "localhost", "host default missing");
+  expect(await page.locator("#connectionUser").inputValue() === "postgres", "user default missing");
+  expect(await page.locator("#connectionDatabase").inputValue() === "postgres", "database default missing");
+  for (const [driver, host, user, port] of [["redis", "127.0.0.1", "default", "6379"], ["mysql", "localhost", "root", "3306"], ["postgres", "localhost", "postgres", "5432"]]) {
+    await page.locator("#connectionDriverTrigger").click();
+    await page.locator(`#connectionDriverMenu [data-driver='${driver}']`).click();
+    expect(await page.locator("#connectionHost").inputValue() === host, `${driver} host missing`);
+    expect(await page.locator("#connectionUser").inputValue() === user, `${driver} user missing`);
+    expect(await page.locator("#connectionPort").inputValue() === port, `${driver} port missing`);
+  }
+  await page.locator("#connectionHost").fill("custom.host");
+  await page.locator("#connectionUser").fill("custom-user");
+  await page.locator("#connectionDriverTrigger").click();
+  await page.locator("#connectionDriverMenu [data-driver='redis']").click();
+  expect(await page.locator("#connectionHost").inputValue() === "custom.host", "custom host replaced");
+  expect(await page.locator("#connectionUser").inputValue() === "custom-user", "custom user replaced");
+  await page.locator("#cancelConnection").click();
+});
 
 await check("Redis logical databases can be expanded independently", async () => {
   await ensureConnection("redis-local");
@@ -166,9 +209,126 @@ await check("Redis logical databases can be expanded independently", async () =>
   const before = calls("list_redis_keys").length;
   await expandRedisDatabase(0);
   await waitFor(() => calls("list_redis_keys").slice(before).some((entry) => entry.args?.database === 0), "Redis DB 0 scan");
-  await page.locator(".redis-database[data-redis-db='1'] > summary").click();
+  await page.locator(".redis-database[data-redis-db='1'] > summary .tree-toggle").click();
   await waitFor(() => calls("list_redis_keys").slice(before).some((entry) => entry.args?.database === 1), "Redis DB 1 scan");
   expect(await page.locator(".redis-database[open]").count() === 2, "multiple Redis DBs were not kept expanded");
+});
+
+await check("Redis type picker supports keyboard selection, dismiss and reset", async () => {
+  await page.locator(".redis-database[data-redis-db='1'] > summary").click({ button: "right" });
+  await page.locator("[data-redis-database-context-action='create']").click();
+  const trigger = page.locator("#redisCreateTypeTrigger");
+  await trigger.focus();
+  await trigger.press("ArrowDown");
+  expect(await page.locator("#redisCreateTypeMenu [role='option']").count() === 5, "type options incomplete");
+  await page.keyboard.press("ArrowDown");
+  await page.keyboard.press("Enter");
+  expect(await page.locator("#redisCreateType").inputValue() === "hash", "keyboard did not choose Hash");
+  expect(await page.locator("#redisCreateFieldRow").isVisible(), "Hash field missing");
+  await trigger.click();
+  await page.keyboard.press("End");
+  await page.keyboard.press("Enter");
+  expect(await page.locator("#redisCreateScoreRow").isVisible(), "Sorted Set score missing");
+  expect(await page.locator("#redisCreateFieldRow").isHidden(), "Hash field stayed visible");
+  await trigger.click();
+  await page.keyboard.press("Escape");
+  expect(await page.locator("#redisCreateTypeMenu").isHidden(), "Escape did not close picker");
+  expect(await page.locator("#redisCreateModal").isVisible(), "Escape also closed dialog");
+  await trigger.click();
+  await page.locator("#redisCreateKey").click();
+  expect(await page.locator("#redisCreateTypeMenu").isHidden(), "outside click kept picker open");
+  await page.locator("#cancelRedisCreate").click();
+  const screenshots = join(root, "output/playwright/redis-type-picker");
+  mkdirSync(screenshots, { recursive: true });
+  for (const theme of ["dark", "light", "ocean", "forest", "contrast"]) {
+    await page.locator("#themeButton").click();
+    await page.locator(`[data-theme-option='${theme}']`).click();
+    await page.setViewportSize({ width: 1060, height: 680 });
+    await page.locator(".redis-database[data-redis-db='1'] > summary").click({ button: "right" });
+    await page.locator("[data-redis-database-context-action='create']").click();
+    expect(await page.locator("#redisCreateType").inputValue() === "string", "reopen did not reset type");
+    await trigger.click();
+    const bounds = await page.locator("#redisCreateTypeMenu").evaluate(menu => {
+      const r = menu.getBoundingClientRect();
+      const last = menu.lastElementChild.getBoundingClientRect();
+      const hit = document.elementFromPoint(last.x + last.width / 2, last.y + last.height / 2);
+      return { bottom: r.bottom, right: r.right, height: r.height, visible: menu.lastElementChild.contains(hit) };
+    });
+    expect(bounds.bottom <= 680 && bounds.right <= 1060 && bounds.height > 200 && bounds.visible, `${theme} type menu clipped`);
+    await page.screenshot({ path: join(screenshots, `${theme}-1060.png`) });
+    await page.keyboard.press("Escape");
+    await page.locator("#cancelRedisCreate").click();
+  }
+  await page.setViewportSize({ width: 1440, height: 900 });
+});
+
+await check("Redis create key stays scoped to DB and rejects duplicates", async () => {
+  await page.locator(".redis-database[data-redis-db='1'] > summary").click({ button: "right" });
+  await page.locator("[data-redis-database-context-action='create']").click();
+  await page.locator("#redisCreateKey").fill("new:hash");
+  await page.locator("#redisCreateTypeTrigger").click();
+  await page.locator('[data-redis-type="hash"]').click();
+  await page.locator("#redisCreateField").fill("name");
+  await page.locator("#redisCreateValue").fill("中文 value");
+  await page.locator("#redisCreateTtl").fill("60");
+  await page.locator("#applyRedisCreate").click();
+  await waitFor(() => page.locator("#redisCreateModal").isHidden(), "created key modal close");
+  const request = calls("create_redis_key").at(-1).args.request;
+  expect(request.connectionId === "redis-local" && request.database === 1, "creation target changed");
+  expect(request.keyType === "hash" && request.field === "name" && request.ttl === 60, "creation payload incomplete");
+  await page.locator(".redis-database[data-redis-db='1'] > summary").click({ button: "right" });
+  await page.locator("[data-redis-database-context-action='create']").click();
+  await page.locator("#redisCreateKey").fill("new:hash");
+  await page.locator("#applyRedisCreate").click();
+  await waitFor(() => page.locator("#redisCreateFeedback").innerText().then(text => text.includes("已存在")), "duplicate rejection");
+  await page.locator("#cancelRedisCreate").click();
+});
+
+await check("Redis console completes commands and shows argument hints without executing", async () => {
+  await page.locator(".redis-database[data-redis-db='1'] > summary").click({ button: "right" });
+  await page.locator("[data-redis-database-context-action='console']").click();
+  const input = page.locator("#redisConsoleInput");
+  const before = calls("execute_redis_command").length;
+  await input.fill("hget");
+  await waitFor(() => page.locator("#redisCommandEditor .cm-tooltip-autocomplete").isVisible(), "command suggestions");
+  await input.press("Enter");
+  expect(await input.innerText() === "HGET", "Enter did not accept completion");
+  expect(calls("execute_redis_command").length === before, "completion executed a command");
+  expect((await page.locator("#redisConsoleHint").innerText()).includes("key field"), "parameter hint missing");
+  await page.locator("#closeRedisConsole").click();
+});
+
+await check("Redis queries inherit DB 1 from consoles and keys and reopen history in DB 1", async () => {
+  const run = async () => {
+    const before = calls("execute_redis_command").length;
+    await page.locator("#runQuery").click();
+    await waitFor(() => calls("execute_redis_command").length > before, "DB 1 query");
+    await waitFor(() => page.locator("#runQuery").isEnabled(), "DB 1 query complete");
+    expect(calls("execute_redis_command").at(-1).args.request.database === 1, "query fell back to DB 0");
+    expect((await page.locator("#resultGrid").innerText()).includes("db1-only"), "DB 1 value missing");
+  };
+  const fillQuery = async () => {
+    const editor = page.locator("#sqlEditor .cm-content");
+    await editor.click();
+    await page.keyboard.press(process.platform === "darwin" ? "Meta+A" : "Control+A");
+    await page.keyboard.type('GET "otherdb:key"');
+  };
+  await page.locator(".redis-database[data-redis-db='1'] > summary").click({ button: "right" });
+  await page.locator("[data-redis-database-context-action='console']").click();
+  await page.locator("#addQueryTab").click();
+  expect(await page.locator("#queryTargetContext").innerText() === "DB 1", "console DB not inherited");
+  await fillQuery();
+  await run();
+  await page.locator("#recentQueries .recent-query").filter({ hasText: 'GET "otherdb:key"' }).first().click();
+  expect(await page.locator("#queryTargetContext").innerText() === "DB 1", "history DB not restored");
+  await run();
+  await expandRedisDatabase(1);
+  await page.locator("[data-redis-db='1'][data-redis-key='otherdb:key']").click();
+  await waitFor(() => page.locator("#tableToolbarTitle").innerText().then(value => value === "otherdb:key"), "DB 1 key tab");
+  await page.locator("#addQueryTab").click();
+  expect(await page.locator("#queryTargetContext").innerText() === "DB 1", "key DB not inherited");
+  await fillQuery();
+  await run();
 });
 
 await check("Redis hash cell save uses CAS request and preserves connection scope", async () => {
@@ -181,7 +341,8 @@ await check("Redis hash cell save uses CAS request and preserves connection scop
   await ensureConnection("redis-remote");
   await ensureConnection("redis-local");
   await ensureRedisMode(page, "write");
-  await page.locator("#resultGrid .db-grid-cell").nth(1).dblclick();
+  await page.locator("#resultGrid .db-grid-cell").nth(1).click({ button: "right" });
+  await page.locator('[data-cell-action="inspect"]').click();
   await waitFor(() => page.locator("#cellModal").isVisible(), "hash cell modal");
   const before = calls("save_redis_cell").length;
   await page.locator("#cellValue").fill("Grace");
@@ -197,7 +358,8 @@ await check("Redis hash cell save uses CAS request and preserves connection scop
 });
 
 await check("cancelled Redis cell confirmation does not mutate", async () => {
-  await page.locator("#resultGrid .db-grid-cell").nth(1).dblclick();
+  await page.locator("#resultGrid .db-grid-cell").nth(1).click({ button: "right" });
+  await page.locator('[data-cell-action="inspect"]').click();
   await waitFor(() => page.locator("#cellModal").isVisible(), "second hash cell modal");
   await page.locator("#cellValue").fill("Rejected");
   const before = calls("save_redis_cell").length;
@@ -254,6 +416,9 @@ await check("read-only Redis menu cannot delete a key", async () => {
   expect(calls("delete_redis_key").length === before, "read-only Redis menu sent delete");
   expect(await page.locator("#confirmActionModal").isHidden(), "read-only Redis menu opened a delete confirmation");
   expect(redis.get("redis-remote").has("cache:home"), "read-only Redis menu deleted key");
+  await page.locator(".redis-database[data-redis-db='0'] > summary").click({ button: "right" });
+  await page.locator("[data-redis-database-context-action='create']").click();
+  expect(await page.locator("#redisCreateModal").isHidden(), "read-only database opened creation dialog");
 });
 
 await check("Redis SCAN empty pages retain a load-more control", async () => {
@@ -269,8 +434,13 @@ await check("Redis SCAN empty pages retain a load-more control", async () => {
 
 await check("Redis MEMORY PURGE requires write confirmation", async () => {
   await page.locator("#addQueryTab").click();
-  const editor = page.locator(".cm-content");
+  const editor = page.locator("#sqlEditor .cm-content");
   await editor.click();
+  await page.keyboard.type("HG");
+  await waitFor(() => page.locator(".cm-tooltip-autocomplete").isVisible(), `Redis editor completion: ${await editor.innerText()}`);
+  expect((await page.locator(".cm-tooltip-autocomplete").innerText()).includes("HGET"), "Redis editor commands missing");
+  await page.keyboard.press("Escape");
+  await page.keyboard.press(process.platform === "darwin" ? "Meta+A" : "Control+A");
   await page.keyboard.type("MEMORY PURGE");
   const before = calls("execute_redis_command").length;
   let prompted = false;

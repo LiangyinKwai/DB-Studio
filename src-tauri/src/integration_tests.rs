@@ -447,6 +447,7 @@ async fn postgres_catalog_and_query_runtime_contract() {
         .await
         .unwrap();
     assert!(before.columns[0].identity);
+    assert_eq!(before.columns[0].identity_generation.as_deref(), Some("byDefault"));
     assert!(before.columns[3].generated);
     let plan_path =
         std::env::var("DB_STUDIO_TEST_STRUCTURE_SQL").expect("generated visual editor SQL path");
@@ -499,6 +500,15 @@ async fn postgres_catalog_and_query_runtime_contract() {
     assert_eq!(values.get::<_, String>(0), "ready");
     assert_eq!(values.get::<_, i32>(1), 2);
     assert_eq!(values.get::<_, String>(2), "0.00");
+    client
+        .batch_execute("ALTER TABLE app.editor_probe ALTER COLUMN id SET GENERATED ALWAYS")
+        .await
+        .unwrap();
+    let always = catalog::load_object_details(&client, &probe_id, Some("table"))
+        .await
+        .unwrap();
+    assert_eq!(always.columns[0].identity_generation.as_deref(), Some("always"));
+    assert!(always.columns[1].identity_generation.is_none());
 
     // The new-table designer names the table only at save time. Execute its
     // generated SQL through the same mutation path, including quoted names.

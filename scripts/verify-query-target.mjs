@@ -48,7 +48,7 @@ const page = await context.newPage();
 const errors = [];
 page.on("pageerror", (error) => errors.push(error.message));
 const expect = (ok, message) => { if (!ok) throw new Error(message); };
-const editor = page.locator(".cm-content");
+const editor = page.locator("#sqlEditor .cm-content");
 const targetHint = () => page.locator("#editorHint").innerText();
 const schema = page.locator("#querySchema");
 const selectSchema = async (value) => {

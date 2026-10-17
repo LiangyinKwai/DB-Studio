@@ -32,6 +32,7 @@ pub struct SchemaColumn {
     pub comment: Option<String>,
     pub primary_key: bool,
     pub identity: bool,
+    pub identity_generation: Option<String>,
     pub generated: bool,
 }
 #[derive(Debug, Clone, Serialize)]
@@ -179,6 +180,7 @@ pub async fn load_schema_objects(
                 comment: col(&row, "comment"),
                 primary_key: false,
                 identity: false,
+                identity_generation: None,
                 generated: false,
             });
     }
@@ -235,7 +237,7 @@ pub async fn load_object_details(
         .map_err(|e| postgres_error("读取对象详情失败", &e))?;
     let schema: String = r.get("schema_name");
     let name: String = r.get("name");
-    let col_sql = "SELECT a.attname AS name,a.attnum::smallint AS ordinal_position,format_type(a.atttypid,a.atttypmod) AS data_type,NOT a.attnotnull AS nullable,pg_get_expr(ad.adbin,ad.adrelid) AS default_value,col_description(a.attrelid,a.attnum) AS comment,EXISTS (SELECT 1 FROM pg_constraint pk WHERE pk.conrelid=a.attrelid AND pk.contype='p' AND a.attnum=ANY(pk.conkey)) AS primary_key,a.attidentity <> '' AS identity,a.attgenerated <> '' AS generated FROM pg_attribute a LEFT JOIN pg_attrdef ad ON ad.adrelid=a.attrelid AND ad.adnum=a.attnum WHERE a.attrelid=$1::oid AND a.attnum>0 AND NOT a.attisdropped ORDER BY a.attnum";
+    let col_sql = "SELECT a.attname AS name,a.attnum::smallint AS ordinal_position,format_type(a.atttypid,a.atttypmod) AS data_type,NOT a.attnotnull AS nullable,pg_get_expr(ad.adbin,ad.adrelid) AS default_value,col_description(a.attrelid,a.attnum) AS comment,EXISTS (SELECT 1 FROM pg_constraint pk WHERE pk.conrelid=a.attrelid AND pk.contype='p' AND a.attnum=ANY(pk.conkey)) AS primary_key,a.attidentity <> '' AS identity,CASE a.attidentity WHEN 'a' THEN 'always' WHEN 'd' THEN 'byDefault' END AS identity_generation,a.attgenerated <> '' AS generated FROM pg_attribute a LEFT JOIN pg_attrdef ad ON ad.adrelid=a.attrelid AND ad.adnum=a.attnum WHERE a.attrelid=$1::oid AND a.attnum>0 AND NOT a.attisdropped ORDER BY a.attnum";
     let cr = timeout(QUERY_TIMEOUT, client.query(col_sql, &[&oid]))
         .await
         .map_err(|_| timeout_error("读取对象列"))?
@@ -251,6 +253,7 @@ pub async fn load_object_details(
             comment: col(&x, "comment"),
             primary_key: x.get("primary_key"),
             identity: x.get("identity"),
+            identity_generation: col(&x, "identity_generation"),
             generated: x.get("generated"),
         })
         .collect();

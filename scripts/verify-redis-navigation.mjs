@@ -71,7 +71,7 @@ const openConsole = async (database = 1) => {
 const expand = async (index) => {
   const db = page.locator(`.redis-database[data-redis-db='${index}']`);
   await db.waitFor();
-  if (await db.getAttribute("open") === null) await db.locator(":scope > summary").click();
+  if (await db.getAttribute("open") === null) await db.locator(":scope > summary [data-tree-toggle]").click();
   await db.locator("[data-redis-key]").first().waitFor();
 };
 const assertCollapsed = async (scanCount) => {
@@ -82,14 +82,14 @@ const assertCollapsed = async (scanCount) => {
 try {
   await page.goto(`http://127.0.0.1:${server.address().port}`, { waitUntil: "networkidle" });
   await connect("conn-dev");
-  await page.locator(".tree-database[data-database='app'] > summary").click();
-  await page.locator(".tree-schema[data-schema='public'] > summary").click();
+  await page.locator(".tree-database[data-database='app'] > summary [data-tree-toggle]").click();
+  await page.locator(".tree-schema[data-schema='public'] > summary [data-tree-toggle]").click();
   await page.locator("[data-object-id='public.orders'] .object-main").dblclick();
   await page.locator("#resultGrid .db-grid-cell").first().waitFor();
   const tableId = await page.locator(".query-tab.active").getAttribute("data-tab-id");
   const tableTab = page.locator(`.query-tab[data-tab-id='${tableId}'] .tab-select`);
-  const tableSql = await page.locator(".cm-content").innerText();
-  await page.locator(".tree-schema[data-schema='public'] .tree-category[data-kind='view'] .category-summary").click();
+  const tableSql = await page.locator("#sqlEditor .cm-content").innerText();
+  await page.locator(".tree-schema[data-schema='public'] .tree-category[data-kind='view'] .category-summary [data-tree-toggle]").click();
   const scans = calls("list_redis_keys").length;
   await connect("redis-local");
   await assertCollapsed(scans);
@@ -113,7 +113,7 @@ try {
   await tableTab.click();
   expect(await page.locator("#redisConsolePanel").isHidden(), "clicking same SQL tab did not exit console");
   expect(await page.locator("#tableToolbar").isVisible() && await page.locator("#resultGrid").isVisible(), "table data view not restored");
-  expect(await page.locator(".cm-content").innerText() === tableSql, "console command replaced SQL draft");
+  expect(await page.locator("#sqlEditor .cm-content").innerText() === tableSql, "console command replaced SQL draft");
   await openConsole(1);
   holdCommand = true;
   await page.locator("#redisConsoleInput").fill("PING");
@@ -135,7 +135,7 @@ try {
   await page.locator("#openTableSql").click();
   await until(() => page.locator("#runQuery").isEnabled());
   const pgBefore = calls("execute_query").length;
-  await page.locator(".cm-content").click();
+  await page.locator("#sqlEditor .cm-content").click();
   await page.keyboard.press("Meta+Enter");
   await until(() => calls("execute_query").length === pgBefore + 1);
   expect(calls("execute_query").at(-1).args.request.connectionId === "conn-dev", "SQL shortcut ran against Redis");
@@ -180,13 +180,13 @@ try {
   await connect("redis-second");
   await assertCollapsed(beforeSecondReconnect);
   await connect("redis-local");
-  await page.locator(".redis-database[data-redis-db='1'] > summary").click();
+  await page.locator(".redis-database[data-redis-db='1'] > summary [data-tree-toggle]").click();
   await connect("redis-second");
   await connect("redis-local");
   await assertCollapsed(beforeSecondReconnect);
   // Resume a scan interrupted by navigation, and ignore its old response.
   holdScan = true;
-  await page.locator(".redis-database[data-redis-db='0'] > summary").click();
+  await page.locator(".redis-database[data-redis-db='0'] > summary [data-tree-toggle]").click();
   await until(() => Boolean(releaseScan), "held Redis scan");
   await connect("conn-dev");
   await connect("redis-local");

@@ -546,6 +546,7 @@ pub fn is_read_command(tokens: &[String]) -> bool {
             | "HSCAN"
             | "HGET"
             | "HGETALL"
+            | "HKEYS"
             | "HEXISTS"
             | "HLEN"
             | "LRANGE"
@@ -553,9 +554,11 @@ pub fn is_read_command(tokens: &[String]) -> bool {
             | "SMEMBERS"
             | "SSCAN"
             | "SCARD"
+            | "SISMEMBER"
             | "ZRANGE"
             | "ZSCAN"
             | "ZCARD"
+            | "ZSCORE"
             | "XRANGE"
             | "XLEN"
             | "STRLEN"
@@ -730,6 +733,9 @@ mod tests {
         let command = |input: &str| tokenize(input).unwrap();
         assert!(is_read_command(&command("GET")));
         assert!(is_read_command(&command("hgetall")));
+        for input in ["HKEYS key", "SISMEMBER key member", "ZSCORE key member"] {
+            assert!(is_read_command(&command(input)));
+        }
         assert!(!is_read_command(&command("KEYS")));
         assert!(!is_read_command(&command("CONFIG")));
         assert!(!is_read_command(&command("FLUSHALL")));

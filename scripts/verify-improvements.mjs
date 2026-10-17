@@ -39,7 +39,7 @@ try {
   await page.locator("[data-connection-id='conn-dev']").click();
   await page.locator("#connectionMode").getByText("已连接", { exact: true }).waitFor();
   await page.locator("#addQueryTab").click();
-  const editor = page.locator(".cm-content");
+  const editor = page.locator("#sqlEditor .cm-content");
   async function typeSql(text) {
     await editor.click();
     await page.keyboard.press("Meta+A");

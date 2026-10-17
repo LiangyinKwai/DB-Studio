@@ -40,9 +40,14 @@ try {
   await page.locator('[data-connection-id="conn-dev"]').click();
   await page.locator('#connectionMode').getByText('已连接', { exact: true }).waitFor();
   await page.locator('#addQueryTab').click();
-  const editor = page.locator('.cm-content');
+  let editor = page.locator('#sqlEditor .cm-content');
+  const sqlEditor = editor;
   const cdp = await context.newCDPSession(page);
-  const text = () => editor.innerText();
+  const text = () => editor.evaluate(element => [...element.querySelectorAll('.cm-line')].map(line => {
+    const copy = line.cloneNode(true);
+    copy.querySelectorAll('.cm-placeholder').forEach(node => node.remove());
+    return copy.textContent;
+  }).join('\n'));
   async function reset(sql = '') {
     await editor.fill(sql);
     await page.keyboard.press('Escape');
@@ -190,6 +195,45 @@ try {
     assert.equal(await text(), 'SELECT 42;');
     await page.locator(`.tab-select[data-tab-id="${original}"]`).click();
     assert.equal(await text(), 'sel', 'previous tab was not reconciled before switching');
+  });
+  await page.locator('[data-connection-id="redis-local"]').click();
+  await page.locator('.redis-database[data-redis-db="0"] > summary').click({ button: 'right' });
+  await page.locator('[data-redis-database-context-action="console"]').click();
+  editor = page.locator('#redisConsoleInput');
+  await check('Redis console repairs segmented command and key commits with undo', async () => {
+    await reset(); await preedit('ge t'); await commit('ge t');
+    assert.equal(await text(), 'get');
+    await page.keyboard.press('Escape');
+    await page.keyboard.press('Meta+z');
+    assert.equal((await text()).trim(), '');
+    await page.keyboard.press('Meta+Shift+z');
+    assert.equal(await text(), 'get');
+    await reset('GET '); await preedit('use r'); await commit('use r', 'Shift');
+    assert.equal(await text(), 'GET user');
+  });
+  await check('Redis console protects quoted values, multiline strings and deliberate spaces', async () => {
+    for (const prefix of ['SET key "', "SET key '", 'SET key "first line\n']) {
+      await reset(prefix); await preedit('se l'); await commit('se l');
+      assert.equal(await text(), prefix + 'se l', prefix);
+    }
+    await reset('GET '); await preedit('use r'); await page.keyboard.press('Space'); await commit('use r');
+    assert.equal(await text(), 'GET use r ');
+    await reset(); await page.keyboard.insertText('SET key "se l"');
+    assert.equal(await text(), 'SET key "se l"');
+  });
+  await check('Redis execution uses the repaired command', async () => {
+    await reset(); await preedit('pin g'); await commit('pin g');
+    await page.locator('#redisConsoleRun').click();
+    await page.waitForFunction(() => document.querySelector('#redisConsoleOutput')?.textContent.includes('ping'));
+    assert.equal(fixture.callsFor('execute_redis_command').at(-1)?.args.request.sql, 'ping');
+  });
+  await page.locator('#addQueryTab').click();
+  editor = sqlEditor;
+  await check('Redis query tabs share the IME fix and string protection', async () => {
+    await reset(); await preedit('ge t'); await commit('ge t');
+    assert.equal(await text(), 'get');
+    await reset('SET key "'); await preedit('se l'); await commit('se l');
+    assert.equal(await text(), 'SET key "se l');
   });
   assert.deepEqual(errors, []);
   writeFileSync(resolve(evidence, 'report.json'), JSON.stringify({ checks, errors }, null, 2));

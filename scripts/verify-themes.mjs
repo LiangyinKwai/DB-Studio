@@ -215,7 +215,7 @@ try {
       await page.locator("[data-connection-id='conn-dev']").click();
       await page.locator(".tree-database[data-database='app']").waitFor();
       await page.locator("#addQueryTab").click();
-      await page.locator(".cm-content").click();
+      await page.locator("#sqlEditor .cm-content").click();
       await page.keyboard.type("SELECT 'readable', 123 /* theme check */");
       const syntaxColors = await page.locator(".cm-line span").evaluateAll((nodes) => nodes.map((node) => getComputedStyle(node).color));
       expect(syntaxColors.length > 0, "syntax highlighting missing");
@@ -223,7 +223,7 @@ try {
         const index = await node.evaluate((el) => [...el.parentElement.children].indexOf(el));
         await measure(`.cm-line span:nth-child(${index + 1})`, "SQL syntax text");
       }
-      await page.locator(".cm-content").click();
+      await page.locator("#sqlEditor .cm-content").click();
       await page.keyboard.press("Meta+A");
       await page.keyboard.insertText("SELECT * FROM public.orders o WHERE o.st");
       await page.keyboard.press("Control+Space");
@@ -232,7 +232,7 @@ try {
       await measure(".cm-completionDetail", "completion type text");
       await page.screenshot({ path: resolve(evidence, `${theme}-completion.png`), fullPage: true });
       await page.keyboard.press("Escape");
-      await page.locator(".cm-content").click();
+      await page.locator("#sqlEditor .cm-content").click();
       await page.keyboard.press("Meta+f");
       await measure(".cm-search label", "editor search label");
       await measure(".cm-search .cm-button", "editor search button");

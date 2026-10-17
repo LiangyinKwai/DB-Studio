@@ -47,7 +47,7 @@ const page = await context.newPage();
 page.setDefaultTimeout(6000);
 const errors = [];
 page.on("pageerror", (error) => errors.push(error.message));
-const editor = page.locator(".cm-content");
+const editor = page.locator("#sqlEditor .cm-content");
 const menu = page.locator("#queryStructureMenu");
 const search = page.locator("#queryStructureSearch");
 const entries = page.locator("#queryStructureList [role='option']");

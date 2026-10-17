@@ -114,3 +114,54 @@ pub async fn rename_key(
     .map_err(|_| "重命名 Redis key 超时，请刷新确认结果".to_string())?
     .map_err(|error| format!("重命名 Redis key 失败：{error}"))
 }
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KeyCreate {
+    pub key: String,
+    pub key_type: String,
+    pub value: String,
+    #[serde(default)]
+    pub field: String,
+    #[serde(default)]
+    pub score: f64,
+    #[serde(default)]
+    pub ttl: i64,
+    #[serde(default = "default_read_only")]
+    pub read_only: bool,
+}
+
+// Check existence and initialize the value and TTL atomically. Never overwrite
+// a key created by another client while the creation dialog was open.
+const CREATE_KEY: &str = r#"
+if redis.call('EXISTS', KEYS[1]) == 1 then return 0 end
+local kind = ARGV[1]
+if kind == 'string' then redis.call('SET', KEYS[1], ARGV[2])
+elseif kind == 'hash' then redis.call('HSET', KEYS[1], ARGV[3], ARGV[2])
+elseif kind == 'list' then redis.call('RPUSH', KEYS[1], ARGV[2])
+elseif kind == 'set' then redis.call('SADD', KEYS[1], ARGV[2])
+elseif kind == 'zset' then redis.call('ZADD', KEYS[1], ARGV[4], ARGV[2])
+end
+if tonumber(ARGV[5]) > 0 then redis.call('EXPIRE', KEYS[1], ARGV[5]) end
+return 1
+"#;
+
+pub async fn create_key(connection: &mut MultiplexedConnection, draft: &KeyCreate) -> Result<(), String> {
+    require_write(draft.read_only)?;
+    if draft.key.is_empty() || !matches!(draft.key_type.as_str(), "string" | "hash" | "list" | "set" | "zset") {
+        return Err("请填写 key 并选择支持的类型".into());
+    }
+    if !(0..=2_147_483_647).contains(&draft.ttl) || !draft.score.is_finite() {
+        return Err("过期时间或分数无效".into());
+    }
+    if draft.key_type == "hash" && draft.field.is_empty() {
+        return Err("请填写哈希字段".into());
+    }
+    let created: i64 = timeout(TIMEOUT, redis::cmd("EVAL").arg(CREATE_KEY).arg(1)
+        .arg(&draft.key).arg(&draft.key_type).arg(&draft.value).arg(&draft.field)
+        .arg(draft.score).arg(draft.ttl).query_async(connection))
+        .await.map_err(|_| "创建 Redis key 超时，请刷新确认结果；不会自动重试".to_string())?
+        .map_err(|error| format!("创建 Redis key 失败：{error}"))?;
+    if created == 0 { return Err("目标 key 已存在，未覆盖原数据".into()); }
+    Ok(())
+}

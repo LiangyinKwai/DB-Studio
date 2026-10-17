@@ -10,7 +10,7 @@ mod redis_adapter;
 mod redis_mutation;
 
 use redis_adapter::{connect, execute_command, get_value, list_databases, ping, scan_keys};
-use redis_mutation::{delete_key, rename_key, save_cell, CellEdit};
+use redis_mutation::{create_key, KeyCreate, delete_key, rename_key, save_cell, CellEdit};
 use std::env;
 
 fn required(name: &str) -> String {
@@ -312,4 +312,29 @@ async fn redis_runtime_contract() {
         remaining.is_empty(),
         "runtime keys were not deleted: {remaining:?}"
     );
+}
+
+#[tokio::test]
+#[ignore = "requires a disposable Redis on DB_STUDIO_REDIS_CREATE_PORT"]
+async fn redis_create_runtime_contract() {
+    let port = required("DB_STUDIO_REDIS_CREATE_PORT").parse().unwrap();
+    let mut target = connect("127.0.0.1", port, 1, "", "", false, None).await.unwrap();
+    let mut other = connect("127.0.0.1", port, 0, "", "", false, None).await.unwrap();
+    for kind in ["string", "hash", "list", "set", "zset"] {
+        let mut draft = KeyCreate {
+            key: format!("db_studio_runtime:create:{kind}"), key_type: kind.into(),
+            value: "value with spaces\n中文".into(), field: "field".into(),
+            score: 1.5, ttl: 60, read_only: true,
+        };
+        assert!(create_key(&mut target, &draft).await.is_err());
+        draft.read_only = false;
+        create_key(&mut target, &draft).await.expect("create typed key");
+        let value = get_value(&mut target, &draft.key).await.unwrap();
+        assert_eq!(value.key_type, kind);
+        assert!(value.ttl > 0 && value.ttl <= 60);
+        draft.value = "must not overwrite".into();
+        assert!(create_key(&mut target, &draft).await.unwrap_err().contains("已存在"));
+        assert_eq!(get_value(&mut target, &draft.key).await.unwrap().rows, value.rows);
+        assert_eq!(get_value(&mut other, &draft.key).await.unwrap().key_type, "none");
+    }
 }

@@ -9,6 +9,7 @@
     <link rel="stylesheet" href="src/result-grid.css" />
     <link rel="stylesheet" href="src/themes.css" />
     <link rel="stylesheet" href="src/workspace.css" />
+    <link rel="stylesheet" href="src/redis-workspace.css" />
     <link rel="stylesheet" href="src/command-palette.css" />
     <link rel="stylesheet" href="src/query-library.css" />
     <link rel="stylesheet" href="src/scrollbars.css" />
@@ -293,15 +294,16 @@
               </div>
             </section>
           </div>
-          <div class="redis-console" id="redisConsolePanel" hidden>
-            <div class="redis-console-header"><span>Redis 控制台</span><span class="redis-console-header-actions"><span id="redisConsoleContext">DB 0</span><button class="icon-btn" id="closeRedisConsole" type="button" title="关闭控制台">×</button></span></div>
-            <div class="redis-console-output" id="redisConsoleOutput"></div>
-            <form class="redis-console-input-row" id="redisConsoleForm">
-              <span class="redis-console-prompt" id="redisConsolePrompt">redis[0]&gt;</span>
-              <textarea id="redisConsoleInput" rows="1" spellcheck="false" autocomplete="off" placeholder="输入 Redis 命令，例如 GET key 或 INFO"></textarea>
-              <button class="primary-btn" id="redisConsoleRun" type="submit">执行</button>
-            </form>
-          </div>
+          <section class="redis-console" id="redisConsolePanel" hidden aria-label="Redis 命令工作区">
+            <div class="redis-workspace-toolbar">
+              <div class="redis-workspace-title"><span class="redis-workspace-mark" aria-hidden="true">R</span><strong>命令工作区</strong><span class="redis-target-label" id="redisConsoleContext">DB 0</span></div>
+              <div class="redis-workspace-actions"><button class="quiet-btn" id="redisClearEditor" type="button">清空输入</button><button class="primary-btn" id="redisConsoleRun" type="button">执行 <kbd>⌘ ↵</kbd></button><button class="icon-btn" id="closeRedisConsole" type="button" title="关闭命令工作区" aria-label="关闭命令工作区">×</button></div>
+            </div>
+            <div class="redis-command-editor-shell"><div id="redisCommandEditor"></div></div>
+            <div class="redis-command-assistance"><span class="redis-assistance-label">用法</span><code id="redisConsoleHint">输入命令查看参数说明</code><span class="redis-editor-shortcuts"><kbd>Tab</kbd> 接受补全 <span>·</span> <kbd>⌘ ↵</kbd> 执行</span></div>
+            <div class="redis-output-toolbar"><div class="redis-output-heading"><strong>执行记录</strong><span id="redisOutputCount">0</span></div><button class="quiet-btn" id="redisClearOutput" type="button">清空记录</button></div>
+            <div class="redis-console-output" id="redisConsoleOutput" aria-label="Redis 执行结果"></div>
+          </section>
         </main>
       </div>
       <footer class="statusbar">
@@ -358,7 +360,7 @@
               >主机<input
                 id="connectionHost"
                 required
-                placeholder="localhost" /></label
+                value="localhost" /></label
             ><label
               >端口<input
                 id="connectionPort"
@@ -380,9 +382,9 @@
               ><span id="connectionDatabaseLabel">数据库</span><input
                 id="connectionDatabase"
                 required
-                placeholder="postgres" /></label
+                value="postgres" /></label
             ><label id="connectionUserField"
-              ><span id="connectionUserLabel">用户名 / ACL 用户</span><input id="connectionUser" placeholder="postgres"
+              ><span id="connectionUserLabel">用户名 / ACL 用户</span><input id="connectionUser" value="postgres"
             /></label>
           </div>
           <label
@@ -502,6 +504,7 @@
       <button type="button" data-redis-context-action="copy">复制 key</button>
     </div>
     <div class="context-menu" id="redisDatabaseContextMenu" hidden role="menu">
+      <button type="button" data-redis-database-context-action="create">新建 Key…</button>
       <button type="button" data-redis-database-context-action="refresh">刷新当前 DB</button>
       <button type="button" data-redis-database-context-action="console">打开控制台</button>
     </div>
@@ -539,6 +542,30 @@
         ><button class="secondary-btn" id="copyCell">复制值</button
         ><button class="primary-btn" id="saveCell" hidden>保存修改</button>
       </div>
+    </dialog>
+    <dialog id="redisCreateModal" class="cell-dialog">
+      <form id="redisCreateForm">
+        <div class="dialog-header"><h2>新建 Redis Key</h2><button class="icon-btn" id="closeRedisCreate" type="button" aria-label="关闭">×</button></div>
+        <label>Key<input id="redisCreateKey" required autocomplete="off" /></label>
+        <div class="redis-type-field">
+          <span id="redisCreateTypeLabel">类型</span>
+          <input id="redisCreateType" type="hidden" value="string" />
+          <div class="driver-picker redis-type-picker">
+            <button id="redisCreateTypeTrigger" class="driver-picker-trigger" type="button" aria-haspopup="listbox" aria-expanded="false" aria-controls="redisCreateTypeMenu" aria-labelledby="redisCreateTypeLabel redisCreateTypeValue">
+              <span class="driver-picker-icon" id="redisCreateTypeIcon" aria-hidden="true">Aa</span>
+              <span class="redis-type-copy"><strong id="redisCreateTypeValue">String</strong><small id="redisCreateTypeDetail">字符串 · 文本、数字或 JSON</small></span>
+              <span class="driver-picker-chevron" aria-hidden="true"></span>
+            </button>
+            <div id="redisCreateTypeMenu" class="driver-picker-menu redis-type-menu" role="listbox" aria-labelledby="redisCreateTypeLabel" hidden></div>
+          </div>
+        </div>
+        <label id="redisCreateFieldRow" hidden>字段<input id="redisCreateField" autocomplete="off" /></label>
+        <label id="redisCreateScoreRow" hidden>分数<input id="redisCreateScore" type="number" step="any" value="0" required /></label>
+        <label>初始值 / 成员<textarea id="redisCreateValue" rows="4"></textarea></label>
+        <label>过期时间（秒，0 为永不过期）<input id="redisCreateTtl" type="number" min="0" max="2147483647" step="1" value="0" required /></label>
+        <div class="dialog-feedback" id="redisCreateFeedback" role="status"></div>
+        <div class="dialog-actions"><span class="toolbar-spacer"></span><button class="secondary-btn" id="cancelRedisCreate" type="button">取消</button><button class="primary-btn" id="applyRedisCreate" type="submit">创建</button></div>
+      </form>
     </dialog>
     <dialog id="redisRenameModal" class="cell-dialog">
       <form id="redisRenameForm">

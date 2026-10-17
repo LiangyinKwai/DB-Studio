@@ -129,3 +129,43 @@ test("row dialogs follow actual result column order and format JSON as editable 
   assert.ok(f.refs.mutationFields.innerHTML.includes("{&quot;ok&quot;:true}"));
   assert.ok(!f.refs.mutationFields.innerHTML.includes("[object Object]"));
 });
+
+test("insert dialogs allow manual primary keys while edit dialogs keep them locked", () => {
+  const f = fixture("insert", { driver: "postgres" });
+  f.runtime.openMutation("insert");
+  assert.match(f.refs.mutationFields.innerHTML, /data-mutation-column="id" value=""\/>/);
+  f.runtime.openMutation("edit");
+  assert.match(f.refs.mutationFields.innerHTML, /data-mutation-column="id" value="001" disabled/);
+});
+
+test("inserts exclude generated and ALWAYS identity fields even if disabled inputs contain text", async () => {
+  const f = fixture("insert", { driver: "postgres", values: { id: "99", code: "generated", payload: "{}", active: "true" } });
+  f.tab.browse.columns[0] = { name: "id", primaryKey: true, identity: true, identityGeneration: "always" };
+  f.tab.browse.columns[1] = { name: "code", generated: true };
+  await f.submit();
+  assert.equal(f.calls[0].args.request.sql, 'INSERT INTO "public"."items" ("payload", "active")\nVALUES (E\'{}\', E\'true\');');
+});
+
+test("BY DEFAULT identity permits an explicit key without losing precision", async () => {
+  const f = fixture("insert", { driver: "postgres", values: { id: "9007199254740993", code: "", payload: "", active: "" } });
+  f.tab.browse.columns[0] = { name: "id", primaryKey: true, identity: true, identityGeneration: "byDefault" };
+  await f.submit();
+  assert.equal(f.calls[0].args.request.sql, 'INSERT INTO "public"."items" ("id")\nVALUES (E\'9007199254740993\');');
+});
+
+test("an all-default insert uses each database's default-row syntax", async () => {
+  for (const driver of ["postgres", "mysql"]) {
+    const f = fixture("insert", { driver, values: { id: "", code: "", payload: "", active: "" } });
+    await f.submit();
+    assert.equal(f.calls[0].args.request.sql, driver === "postgres"
+      ? 'INSERT INTO "public"."items" DEFAULT VALUES;'
+      : 'INSERT INTO `public`.`items` () VALUES ();');
+  }
+});
+
+test("row edits exclude generated fields even if stale inputs contain a changed value", async () => {
+  const f = fixture("edit", { driver: "postgres", values: { code: "002", payload: "changed generated value" } });
+  f.tab.browse.columns[2] = { name: "payload", generated: true };
+  await f.submit();
+  assert.equal(f.calls[0].args.request.sql, 'UPDATE "public"."items"\nSET "code" = E\'002\'\nWHERE "id" IS NOT DISTINCT FROM E\'001\';');
+});

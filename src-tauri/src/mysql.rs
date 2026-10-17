@@ -472,6 +472,7 @@ pub async fn load_schema_objects(
                 comment: row.get(6),
                 primary_key: false,
                 identity: false,
+                identity_generation: None,
                 generated: false,
             });
     }
@@ -512,6 +513,7 @@ pub async fn load_object_details(
                     .get::<String, _>(7)
                     .map(|v| v.to_lowercase().contains("auto_increment"))
                     .unwrap_or(false),
+                identity_generation: None,
                 generated: r
                     .get::<String, _>(7)
                     .map(|v| {

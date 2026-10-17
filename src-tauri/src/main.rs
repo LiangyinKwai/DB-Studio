@@ -112,6 +112,16 @@ fn default_read_only() -> bool {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct RedisKeyCreateRequest {
+    connection_id: String,
+    #[serde(default)]
+    database: Option<i64>,
+    #[serde(flatten)]
+    draft: redis_mutation::KeyCreate,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct RedisCellEditRequest {
     connection_id: String,
     #[serde(default)]
@@ -1349,6 +1359,18 @@ async fn rename_redis_key(
 }
 
 #[command]
+async fn create_redis_key(
+    app: AppHandle,
+    state: State<'_, BackendState>,
+    request: RedisKeyCreateRequest,
+) -> Result<(), String> {
+    redis_mutation::require_write(request.draft.read_only)?;
+    let client = redis_client_for(&app, &state, &request.connection_id, request.database).await?;
+    let mut client = client.lock().await;
+    redis_mutation::create_key(&mut client, &request.draft).await
+}
+
+#[command]
 async fn save_redis_cell(
     app: AppHandle,
     state: State<'_, BackendState>,
@@ -1835,6 +1857,7 @@ pub fn run() {
             execute_redis_command,
             delete_redis_key,
             rename_redis_key,
+            create_redis_key,
             save_redis_cell,
             list_databases,
             get_query_context,

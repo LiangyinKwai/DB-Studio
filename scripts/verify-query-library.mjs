@@ -32,7 +32,7 @@ page.on("pageerror", error => failures.push(error.message));
 page.on("response", response => { if (response.status() >= 400) failures.push(`${response.status()} ${response.url()}`); });
 page.on("download", download => downloads.push(download));
 const libraryKey = "db-studio.query-library.v1";
-const editor = page.locator(".cm-content");
+const editor = page.locator("#sqlEditor .cm-content");
 const dialog = page.locator(".query-library-dialog");
 const savedEntries = () => page.evaluate(key => JSON.parse(localStorage.getItem(key) || "[]"), libraryKey);
 const queryCalls = () => fixture.callsFor("execute_query").length + fixture.callsFor("execute_mutation").length;

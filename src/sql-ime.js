@@ -17,9 +17,11 @@ export function normalizeImeCommit({ text, switched, typedSpace, protectedContex
 }
 
 function protectedAt(state, position) {
+  const guards = state.languageDataAt('imeProtectedContext', position);
+  if (guards.length) return guards.some(guard => guard(state, position));
   if (!syntaxTreeAvailable(state, position)) return true;
   for (let node = syntaxTree(state).resolveInner(position, -1); node; node = node.parent)
-    if (/String|Comment|QuotedIdentifier/.test(node.name)) return true;
+    if (/String|Comment|QuotedIdentifier/i.test(node.name)) return true;
   return false;
 }
 

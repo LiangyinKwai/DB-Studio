@@ -88,7 +88,7 @@ try {
   await action("new-database-query").click();
   let tab = await activeSavedTab();
   expect(tab.database === "app_reporting" && tab.connectionId === "conn-dev", "new query lost selected database");
-  const editor = page.locator(".cm-content");
+  const editor = page.locator("#sqlEditor .cm-content");
   await editor.fill("SELECT 1");
   await page.locator("#runQuery").click();
   await page.locator(".db-grid-cell").first().waitFor();

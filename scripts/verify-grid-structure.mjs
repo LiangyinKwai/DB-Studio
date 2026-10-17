@@ -57,7 +57,7 @@ const filter = async (column, operator, value = '') => {
   await popup.getByRole('button', { name: '应用筛选', exact: true }).click();
 };
 const ids = () => page.locator('.db-grid-body [data-column-index="0"]').allTextContents();
-const typeSql = async (sql) => { await page.locator('.cm-content').click(); await page.keyboard.press('Meta+A'); await page.keyboard.insertText(sql); };
+const typeSql = async (sql) => { await page.locator('#sqlEditor .cm-content').click(); await page.keyboard.press('Meta+A'); await page.keyboard.insertText(sql); };
 const confirm = () => page.locator('#confirmActionAccept').click();
 const contrast = async (selectors) => {
   for (const selector of selectors) {

@@ -60,6 +60,10 @@ import { getCellEditCapability, buildCellUpdateSql, validateCellDraft, cellColum
 import { buildTableDdl } from "./table-ddl.js";
 import { setSelectableText } from "./selectable-text.js";
 import { initDesktopMenu } from "./desktop-menu.js";
+import { redisCompletionSource, redisCommandHint } from "./redis-completion.js";
+import { createRedisTypePicker } from "./redis-type-picker.js";
+import { createRedisEditor, redisLanguage } from "./redis-editor.js";
+import { resolveRedisDatabase } from "./redis-target.js";
 import { orderedObjectGroups, syncTreeToggle, setTreeRowExpanded, treeBranchForDoubleClick } from "./object-tree.js";
 
 const invoke = window.__TAURI__?.core?.invoke;
@@ -488,13 +492,11 @@ function changeQuerySchema(value) {
   renderOutput();
 }
 function redisProfileDatabase(profile) {
-  const database = Number(profile?.redisDb ?? profile?.database ?? 0);
-  return Number.isInteger(database) && database >= 0 ? database : 0;
+  return resolveRedisDatabase(null, profile);
 }
 function redisTabDatabase(tab = activeTab()) {
-  if (Number.isInteger(tab?.redisDb) && tab.redisDb >= 0) return tab.redisDb;
   const profile = state.profiles.find((item) => item.id === tab?.connectionId);
-  return redisProfileDatabase(profile);
+  return resolveRedisDatabase(tab, profile);
 }
 function showToast(message, type = "info") {
   refs.toast.textContent = message;
@@ -845,9 +847,16 @@ function updateEditorSchema() {
       ),
     });
 }
+let redisTypePicker;
+let redisEditor;
+let redisEditorSessionId;
+function cachedRedisKeys(tab = activeExecutionTab()) {
+  return tab?.connectionId === state.activeConnectionId ? state.redisPages.get(redisTabDatabase(tab))?.keys || [] : [];
+}
+function completeRedis(context) { return redisCompletionSource(context, cachedRedisKeys(activeTab())); }
 function editorLanguageExtension(tab = activeTab()) {
   const profile = state.profiles.find((item) => item.id === tab?.connectionId);
-  if (profile?.driver === "redis") return [];
+  if (profile?.driver === "redis") return [redisLanguage, EditorState.languageData.of(() => [{ autocomplete: completeRedis }])];
   const dialect = profile?.driver === "mysql" ? MySQL : PostgreSQL;
   return [sql({ dialect, upperCaseKeywords: true, keywordCompletion: sqlKeywordCompletion }),
     dialect.language.data.of({ autocomplete: completeCatalog })];
@@ -1948,8 +1957,8 @@ function rememberActiveView() {
   if (!tab || !state.editor) return;
   state.editor.plugin(sqlIme)?.finish();
   tab.editorState = state.editor.state;
-  tab.sql = tab.console && refs.redisConsoleInput
-    ? refs.redisConsoleInput.value
+  tab.sql = tab.console && redisEditor
+    ? redisEditor.getValue()
     : state.editor.state.doc.toString();
   tab.editorScroll = {
     top: state.editor.scrollDOM.scrollTop,
@@ -1986,7 +1995,7 @@ function activateTab(id, focus = true) {
   updateCursor();
   persistTabs();
   if (focus) {
-    if (next.console) refs.redisConsoleInput?.focus();
+    if (next.console) redisEditor?.focus();
     else state.editor.focus();
   }
   refs.queryTabs
@@ -2016,12 +2025,17 @@ function addTab(
     : null;
   const openedObject = objectTabTarget(options.openedObject || tabBrowse, connectionId);
   const structureOnly = Boolean(openedObject && options.openedObjectView === "structure" && !tabBrowse);
+  const database = options.database ?? browse?.database ?? (inherited
+    ? profile?.driver === "redis" ? String(redisTabDatabase(inherited)) : tabDatabase(inherited)
+    : profile?.database) ?? null;
+  const redisDb = profile?.driver === "redis" ? resolveRedisDatabase({ database }, profile) : null;
   const tab = {
     id: makeId("query"),
     title: options.title || browse?.name || `查询 ${nextQueryNumber()}`,
     sql,
     connectionId,
-    database: options.database ?? browse?.database ?? (inherited ? tabDatabase(inherited) : profile?.database) ?? null,
+    database: redisDb === null ? database : String(redisDb),
+    redisDb,
     schema: options.schema ?? browse?.schema ?? (inherited ? tabSchema(inherited) : null),
     mode: "write",
     browse: tabBrowse,
@@ -2338,12 +2352,20 @@ function renderRedisConsole(tab) {
   const profile = state.profiles.find((item) => item.id === tab.connectionId);
   refs.redisConsoleContext.textContent = `${profile?.name || "Redis"} · DB ${database}`;
   refs.redisConsoleRun.disabled = Boolean(tab.running);
-  refs.redisConsolePrompt.textContent = `redis[${database}]>`;
-  if (refs.redisConsoleInput && refs.redisConsoleInput.value !== (tab.sql || "")) refs.redisConsoleInput.value = tab.sql || "";
+  refs.closeRedisConsole.disabled = Boolean(tab.running);
+  if (redisEditorSessionId !== tab.id) { redisEditor?.reset(tab.sql || ""); redisEditorSessionId = tab.id; }
+  else redisEditor?.setValue(tab.sql || "");
+  refs.redisConsoleHint.textContent = redisCommandHint(redisEditor?.currentLine() || "") || "输入命令查看参数说明";
   const history = tab.consoleHistory || [];
+  refs.redisOutputCount.textContent = history.length;
+  refs.redisClearOutput.disabled = !history.length || Boolean(tab.running);
+  refs.redisClearEditor.disabled = Boolean(tab.running);
   refs.redisConsoleOutput.innerHTML = history.length
-    ? history.map((entry) => { const entryDatabase = entry.database ?? database; return `<div class="redis-console-entry"><div class="redis-console-command"><span class="redis-console-prompt">redis[${entryDatabase}]&gt;</span><span class="selectable-text">${escapeHtml(entry.command || "")}</span></div>${entry.output ? `<pre class="redis-console-result${entry.error ? " error" : ""}"><span class="selectable-text">${escapeHtml(entry.output)}</span></pre>` : entry.pending ? '<pre class="redis-console-result">执行中…</pre>' : ""}</div>`; }).join("")
-    : `<div class="redis-console-empty"><span class="redis-console-prompt">redis[${database}]&gt;</span> 输入 Redis 命令并执行。支持完整 Redis 命令。</div>`;
+    ? history.map((entry, index) => {
+      const entryDatabase = entry.database ?? database;
+      return `<article class="redis-console-entry${entry.error ? " has-error" : ""}"><div class="redis-entry-header"><span class="redis-entry-status ${entry.pending ? "pending" : entry.error ? "error" : "success"}">${entry.pending ? "执行中" : entry.error ? "失败" : "完成"}</span><span class="redis-entry-database">DB ${entryDatabase}</span><span class="redis-entry-meta">${entry.elapsedMs != null ? `${Number(entry.elapsedMs).toFixed(1)} ms` : ""}</span><span class="toolbar-spacer"></span><button type="button" class="quiet-btn" data-redis-reuse="${index}" title="将命令放回编辑器">复用</button><button type="button" class="quiet-btn" data-redis-copy="${index}"${entry.pending ? " disabled" : ""}>复制结果</button></div><pre class="redis-console-command selectable-text">${escapeHtml(entry.command || "")}</pre>${entry.output ? `<pre class="redis-console-result${entry.error ? " error" : ""} selectable-text">${escapeHtml(entry.output)}</pre>` : ""}</article>`;
+    }).join("")
+    : `<div class="redis-console-empty"><div class="redis-empty-symbol" aria-hidden="true">›_</div><h3>从一条命令开始</h3><p>命令、参数说明和 Key 补全，随输入出现。</p><div class="redis-command-examples"><button type="button" data-redis-example="PING"><code>PING</code><span>检查连接</span></button><button type="button" data-redis-example="INFO server"><code>INFO server</code><span>实例信息</span></button><button type="button" data-redis-example="SCAN 0 MATCH * COUNT 100"><code>SCAN 0</code><span>浏览 Key</span></button></div></div>`;
   refs.redisConsoleOutput.scrollTop = refs.redisConsoleOutput.scrollHeight;
 }
 function structurePlaceholder(tab) {
@@ -3008,8 +3030,8 @@ function isRedisReadCommand(sql) {
   if (command === "MEMORY") return new Set(["DOCTOR", "HELP", "MALLOC-STATS", "STATS", "USAGE"]).has(subcommand);
   return new Set([
     "GET", "MGET", "TYPE", "TTL", "PTTL", "EXISTS", "SCAN", "HSCAN", "HGET",
-    "HGETALL", "HEXISTS", "HLEN", "LRANGE", "LLEN", "SMEMBERS", "SSCAN", "SCARD",
-    "ZRANGE", "ZSCAN", "ZCARD", "XRANGE", "XLEN", "STRLEN", "GETRANGE",
+    "HGETALL", "HKEYS", "HEXISTS", "HLEN", "LRANGE", "LLEN", "SMEMBERS", "SSCAN", "SCARD", "SISMEMBER",
+    "ZRANGE", "ZSCAN", "ZCARD", "ZSCORE", "XRANGE", "XLEN", "STRLEN", "GETRANGE",
     "INFO", "PING", "DBSIZE",
   ]).has(command);
 }
@@ -3124,8 +3146,6 @@ async function runRedisCommand(tab, sqlText, connectionId) {
   if (consoleEntry) {
     tab.consoleHistory.push(consoleEntry);
     tab.consoleHistory = tab.consoleHistory.slice(-100);
-    tab.sql = "";
-    if (refs.redisConsoleInput) refs.redisConsoleInput.value = "";
   }
   renderTabs();
   renderOutput();
@@ -3164,6 +3184,7 @@ async function runRedisCommand(tab, sqlText, connectionId) {
     }
     if (consoleEntry) {
       consoleEntry.output = redisConsoleOutput(payload);
+      consoleEntry.elapsedMs = tab.result.elapsedMs;
       consoleEntry.pending = false;
       persistTabs();
     }
@@ -3218,7 +3239,8 @@ async function runQuery({ preserveResult = false } = {}) {
   const tab = activeExecutionTab();
   if (!tab || tab.running || tab.confirming || tab.resolvingTarget || tab.changingTransaction || cellWritePending(tab)) return;
   if (!await confirmDiscardCellEdits([tab]) || activeExecutionTab() !== tab) return;
-  if (!tab.console) state.editor.plugin(sqlIme)?.finish();
+  if (tab.console) redisEditor?.finishComposition();
+  else state.editor.plugin(sqlIme)?.finish();
   const previousResult = preserveResult ? tab.result : null;
   const previousGridState = preserveResult ? tab.gridState : null;
   const selected = tab.console
@@ -3230,7 +3252,7 @@ async function runQuery({ preserveResult = false } = {}) {
         )
         .trim();
   const sqlText = tab.console
-    ? (refs.redisConsoleInput?.value || tab.sql || "").trim()
+    ? (redisEditor?.executionText() || tab.sql || "").trim()
     : selected || tab.sql.trim();
   if (!sqlText) {
     showToast("请先输入 SQL", "error");
@@ -3428,6 +3450,20 @@ function mutationColumns(tab) {
     : tab?.browse?.columns?.map((column) => column.name) || [];
 }
 
+function mutationFieldState(tab, column, type) {
+  const field = tab.browse?.columns?.find((item) => item.name === column) || {};
+  const isKey = tab.browse?.primaryKeys?.includes(column);
+  if (field.generated) return { disabled: true, hint: "生成字段由数据库维护" };
+  if (type === "edit" && isKey) return { disabled: true, hint: "主键用于定位行，不会被修改" };
+  if (field.identity) {
+    if (type === "edit" || (driverForTab(tab) === "postgres" && field.identityGeneration !== "byDefault")) {
+      return { disabled: true, hint: "自增字段由数据库自动生成" };
+    }
+    return { disabled: false, hint: "留空由数据库自动生成，也可手动指定" };
+  }
+  return { disabled: false, hint: type === "insert" && field.defaultValue ? "留空使用数据库默认值" : "" };
+}
+
 function openMutation(type) {
   const tab = activeTab();
   if (tab?.mode !== "write") {
@@ -3460,8 +3496,9 @@ function openMutation(type) {
     : columns
         .map((column, index) => {
           const isKey = primaryKeys.includes(column);
+          const field = mutationFieldState(tab, column, type);
           const value = type === "edit" && source[index] != null ? cellText(source[index]) : "";
-          return `<div class="mutation-field"><label for="mutation-${index}">${escapeHtml(column)}${isKey ? " · 主键" : ""}</label><input id="mutation-${index}" data-mutation-column="${escapeHtml(column)}" value="${escapeHtml(value ?? "")}"${isKey ? " disabled" : ""}/>${isKey ? '<small>主键用于定位行，不会被修改</small>' : ""}</div>`;
+          return `<div class="mutation-field"><label for="mutation-${index}">${escapeHtml(column)}${isKey ? " · 主键" : ""}</label><input id="mutation-${index}" data-mutation-column="${escapeHtml(column)}" value="${escapeHtml(value ?? "")}"${field.disabled ? " disabled" : ""}/>${field.hint ? `<small>${escapeHtml(field.hint)}</small>` : ""}</div>`;
         })
         .join("");
   refs.mutationModal.showModal();
@@ -3489,16 +3526,13 @@ async function applyMutation(event) {
         [...refs.mutationFields.querySelectorAll("[data-mutation-column]")].map((input) => [input.dataset.mutationColumn, input.value]),
       );
       const source = selectedRows[0] || [];
-      const changed = columns.filter((column, index) => !primaryKeys.includes(column) && typeof values[column] === "string" && values[column].trim() !== "" &&
+      const changed = columns.filter((column, index) => !mutationFieldState(tab, column, type).disabled && typeof values[column] === "string" && values[column].trim() !== "" &&
         values[column] !== (source[index] == null ? "" : cellText(source[index])));
       if (type === "insert") {
-        const included = columns.filter((column) => typeof values[column] === "string" && values[column].trim() !== "");
-        if (!included.length) {
-          refs.mutationFeedback.textContent = "至少填写一列数据";
-          refs.mutationFeedback.classList.add("error");
-          return;
-        }
-        sql = `INSERT INTO ${table} (${included.map(quote).join(", ")})\nVALUES (${included.map((column) => sqlLiteral(values[column], driver)).join(", ")});`;
+        const included = columns.filter((column) => !mutationFieldState(tab, column, type).disabled && typeof values[column] === "string" && values[column].trim() !== "");
+        sql = included.length
+          ? `INSERT INTO ${table} (${included.map(quote).join(", ")})\nVALUES (${included.map((column) => sqlLiteral(values[column], driver)).join(", ")});`
+          : driver === "mysql" ? `INSERT INTO ${table} () VALUES ();` : `INSERT INTO ${table} DEFAULT VALUES;`;
       } else {
         if (!changed.length) {
           refs.mutationFeedback.textContent = "尚未修改任何字段";
@@ -3926,6 +3960,7 @@ const dismissibleDialogIds = [
   "schemaModal",
   "cellModal",
   "redisRenameModal",
+  "redisCreateModal",
   "mutationModal",
   "createObjectModal",
   "shortcutsModal",
@@ -3939,6 +3974,7 @@ function clearDialogDraft(dialog) {
   }
   if (dialog === refs.cellModal) state.cellInspector = null;
   if (dialog === refs.redisRenameModal) state.pendingRedisRename = null;
+  if (dialog === refs.redisCreateModal) state.pendingRedisCreate = null;
   if (dialog === refs.mutationModal) state.mutation = null;
 }
 function dismissDialog(dialog) {
@@ -3949,6 +3985,7 @@ function dismissDialog(dialog) {
 function dialogIsBusy(dialog) {
   return (dialog === refs.connectionModal && (refs.saveConnection.disabled || refs.testConnection.disabled)) ||
     (dialog === refs.cellModal && refs.saveCell.disabled) ||
+    (dialog === refs.redisCreateModal && refs.applyRedisCreate.disabled) ||
     (dialog === refs.mutationModal && refs.applyMutation.disabled);
 }
 function isBackdropClick(dialog, event) {
@@ -3989,8 +4026,9 @@ function setConnectionDriver(value) {
   if (!refs.connectionDriver) return;
   if (value !== selectedConnectionDriver()) {
     refs.connectionDatabase.value = defaultConnectionDatabase(value);
+    if (["", "localhost", "127.0.0.1"].includes(refs.connectionHost.value)) refs.connectionHost.value = value === "redis" ? "127.0.0.1" : "localhost";
     if (!refs.connectionUser.value || refs.connectionUser.dataset.defaultUser === "true") {
-      refs.connectionUser.value = value === "mysql" ? "root" : "";
+      refs.connectionUser.value = value === "mysql" ? "root" : value === "redis" ? "default" : "postgres";
       refs.connectionUser.dataset.defaultUser = "true";
     }
   }
@@ -4023,12 +4061,12 @@ function updateConnectionFormForDriver() {
   if (refs.connectionDatabaseLabel) refs.connectionDatabaseLabel.textContent = "数据库";
   if (refs.connectionUserLabel) refs.connectionUserLabel.textContent = isRedis ? "ACL 用户（可选）" : "用户名";
   if (refs.connectionDatabase) {
-    refs.connectionDatabase.placeholder = isMysql ? "mysql" : "postgres";
+    refs.connectionDatabase.removeAttribute("placeholder");
     refs.connectionDatabase.required = driver === "postgres";
   }
   if (refs.connectionDatabaseField) refs.connectionDatabaseField.hidden = isRedis || isMysql;
   if (refs.connectionUser) {
-    refs.connectionUser.placeholder = isRedis ? "default（可选）" : isMysql ? "root" : "postgres";
+    refs.connectionUser.removeAttribute("placeholder");
     refs.connectionUser.required = !isRedis;
   }
   if (refs.connectionTlsField) refs.connectionTlsField.hidden = !isTlsDriver;
@@ -4038,7 +4076,7 @@ function updateConnectionFormForDriver() {
   if (refs.connectionCaPath) refs.connectionCaPath.disabled = !isRedis || !refs.connectionTls?.checked;
   if (refs.chooseConnectionCa) refs.chooseConnectionCa.disabled = !isRedis || !refs.connectionTls?.checked;
   if (refs.clearConnectionCa) refs.clearConnectionCa.disabled = !isRedis || !refs.connectionTls?.checked;
-  if (refs.connectionHost) refs.connectionHost.placeholder = isRedis ? "127.0.0.1" : "localhost";
+  refs.connectionHost?.removeAttribute("placeholder");
   const defaultPort = isRedis ? "6379" : isMysql ? "3306" : "5432";
   if (refs.connectionPort && (!refs.connectionPort.value || ["5432", "6379", "3306"].includes(refs.connectionPort.value)))
     refs.connectionPort.value = defaultPort;
@@ -4074,15 +4112,15 @@ function fillConnection(profile = null) {
   refs.connectionDriver.value = profile?.driver || "postgres";
   renderConnectionDriver();
   refs.connectionName.value = profile?.name || "";
-  refs.connectionHost.value = profile?.host || "";
+  refs.connectionHost.value = profile?.host ?? "localhost";
   refs.connectionPort.value = profile?.port || (profile?.driver === "redis" ? 6379 : profile?.driver === "mysql" ? 3306 : 5432);
   if (refs.connectionTls) refs.connectionTls.checked = Boolean(profile?.tls);
   if (refs.connectionCaPath) refs.connectionCaPath.value = profile?.redisCaCertPath || "";
   refs.connectionDatabase.value = profile?.driver === "redis"
     ? String(profile?.redisDb ?? profile?.database ?? 0)
     : profile?.database || defaultConnectionDatabase(selectedConnectionDriver());
-  refs.connectionUser.value = profile?.user || "";
-  refs.connectionUser.dataset.defaultUser = "false";
+  refs.connectionUser.value = profile?.user ?? "postgres";
+  refs.connectionUser.dataset.defaultUser = String(!profile);
   refs.connectionPassword.value = "";
   passwordFields.hideAll(refs.connectionModal);
   refs.connectionPassword.placeholder = profile ? "留空保留已保存密码" : "";
@@ -4701,6 +4739,20 @@ function bindEvents() {
       if (connectionId === state.activeConnectionId) await refreshRedisContext(database);
       return;
     }
+    if (action === "create") {
+      const tab = activeExecutionTab();
+      if (tab?.connectionId === connectionId && tab.mode === "read") return showToast("当前 Redis 标签已锁定为只读，请先解锁", "error");
+      state.pendingRedisCreate = { connectionId, database };
+      refs.redisCreateForm.reset();
+      redisTypePicker.reset();
+      refs.redisCreateFeedback.textContent = "已存在的 key 不会被覆盖。";
+      refs.redisCreateFieldRow.hidden = true;
+      refs.redisCreateField.required = false;
+      refs.redisCreateScoreRow.hidden = true;
+      refs.redisCreateModal.showModal();
+      refs.redisCreateKey.focus();
+      return;
+    }
     if (action !== "console") return;
     rememberActiveView();
     state.redisConsole = {
@@ -4716,7 +4768,7 @@ function bindEvents() {
     };
     renderTabs();
     renderOutput();
-    refs.redisConsoleInput?.focus();
+    redisEditor?.focus();
   });
   refs.objectTree.addEventListener("dblclick", (event) => {
     const branch = treeBranchForDoubleClick(event.target);
@@ -4929,26 +4981,73 @@ function bindEvents() {
   refs.cancelMutation?.addEventListener("click", closeMutation);
   refs.closeMutation?.addEventListener("click", closeMutation);
   refs.runQuery.addEventListener("click", runQuery);
-  refs.redisConsoleForm?.addEventListener("submit", (event) => {
-    event.preventDefault();
-    void runQuery();
+  redisEditor = createRedisEditor({ parent: refs.redisCommandEditor, getKeys: () => cachedRedisKeys(),
+    onChange: value => {
+      const tab = activeExecutionTab();
+      if (!tab?.console) return;
+      tab.sql = value;
+      refs.redisConsoleHint.textContent = redisCommandHint(value) || "输入命令查看参数说明";
+      persistTabs();
+    }, onHint: value => { refs.redisConsoleHint.textContent = redisCommandHint(value) || "输入命令查看参数说明"; }, onRun: () => void runQuery() });
+  refs.redisConsoleRun.addEventListener("click", () => void runQuery());
+  refs.redisClearEditor.addEventListener("click", () => { redisEditor.setValue(""); redisEditor.focus(); });
+  refs.redisClearOutput.addEventListener("click", () => {
+    const tab = activeExecutionTab();
+    if (!tab?.console || tab.running) return;
+    tab.consoleHistory = []; persistTabs(); renderRedisConsole(tab);
   });
-  refs.closeRedisConsole?.addEventListener("click", closeRedisConsole);
-  refs.redisConsoleInput?.addEventListener("input", () => {
+  refs.redisConsoleOutput.addEventListener("click", async event => {
     const tab = activeExecutionTab();
     if (!tab?.console) return;
-    tab.sql = refs.redisConsoleInput.value;
-    persistTabs();
-  });
-  refs.redisConsoleInput?.addEventListener("keydown", (event) => {
-    // Keep plain Enter and the familiar ⌘/Ctrl+Enter run shortcut local to
-    // the Redis console; the document-level handler intentionally ignores
-    // text inputs to avoid hijacking filters and search fields.
-    if (event.key === "Enter" && !event.shiftKey) {
-      event.preventDefault();
-      void runQuery();
+    const reuse = event.target.closest("[data-redis-reuse]");
+    const copy = event.target.closest("[data-redis-copy]");
+    const example = event.target.closest("[data-redis-example]");
+    if (example || reuse) {
+      redisEditor.setValue(example?.dataset.redisExample ?? tab.consoleHistory[Number(reuse.dataset.redisReuse)]?.command ?? "");
+      redisEditor.focus();
+    }
+    if (copy) {
+      try { await copyText(tab.consoleHistory[Number(copy.dataset.redisCopy)]?.output || "", { allowEmpty: true }); showToast("已复制执行结果"); }
+      catch { showToast("复制失败", "error"); }
     }
   });
+  redisTypePicker = createRedisTypePicker({ input: refs.redisCreateType, trigger: refs.redisCreateTypeTrigger,
+    menu: refs.redisCreateTypeMenu, label: refs.redisCreateTypeValue, icon: refs.redisCreateTypeIcon,
+    detail: refs.redisCreateTypeDetail, dialog: refs.redisCreateModal });
+  refs.redisCreateType.addEventListener("change", () => {
+    refs.redisCreateFieldRow.hidden = refs.redisCreateType.value !== "hash";
+    refs.redisCreateField.required = refs.redisCreateType.value === "hash";
+    refs.redisCreateScoreRow.hidden = refs.redisCreateType.value !== "zset";
+  });
+  refs.closeRedisCreate.addEventListener("click", () => dismissDialog(refs.redisCreateModal));
+  refs.cancelRedisCreate.addEventListener("click", () => dismissDialog(refs.redisCreateModal));
+  refs.redisCreateForm.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const pending = state.pendingRedisCreate;
+    if (!pending || refs.applyRedisCreate.disabled) return;
+    const tab = activeExecutionTab();
+    if (tab?.connectionId === pending.connectionId && tab.mode === "read") {
+      refs.redisCreateFeedback.textContent = "当前 Redis 标签已锁定为只读，请先解锁";
+      return;
+    }
+    refs.applyRedisCreate.disabled = true;
+    try {
+      await call("create_redis_key", { request: { ...pending,
+        key: refs.redisCreateKey.value, keyType: refs.redisCreateType.value,
+        value: refs.redisCreateValue.value, field: refs.redisCreateField.value,
+        score: Number(refs.redisCreateScore.value), ttl: Number(refs.redisCreateTtl.value), readOnly: false } });
+      state.pendingRedisCreate = null;
+      refs.redisCreateModal.close();
+      if (state.activeConnectionId === pending.connectionId) {
+        state.redisExpanded.add(pending.database);
+        await refreshRedisTree();
+      }
+      showToast("Redis key 已创建");
+    } catch (error) {
+      refs.redisCreateFeedback.textContent = errorText(error);
+    } finally { refs.applyRedisCreate.disabled = false; }
+  });
+  refs.closeRedisConsole?.addEventListener("click", closeRedisConsole);
   refs.stopQuery.addEventListener("click", async () => {
     const tab = activeTab();
     if (!tab?.queryId) return;
@@ -5210,18 +5309,20 @@ const desktopMenu = initDesktopMenu({
   onError: error => showToast(errorText(error), "error"),
   getItems(target) {
     if (target.closest('.cm-editor') && state.editor) {
-      const editor = state.editor;
-      const tab = activeTab();
+      const isRedis = Boolean(target.closest("#redisCommandEditor"));
+      const editor = isRedis ? redisEditor?.view : state.editor;
+      if (!editor) return [];
+      const tab = isRedis ? activeExecutionTab() : activeTab();
       const original = editor.state;
       const selection = original.selection.main;
       const selected = original.sliceDoc(selection.from, selection.to);
-      const current = () => { if (state.editor !== editor || activeTab() !== tab || editor.state !== original) throw new Error("查询内容已改变，请重新打开菜单"); };
+      const current = () => { if ((isRedis ? redisEditor?.view !== editor || activeExecutionTab() !== tab : state.editor !== editor || activeTab() !== tab) || editor.state !== original) throw new Error("查询内容已改变，请重新打开菜单"); };
       return [
         { label: "剪切", disabled: !selected, run: async () => { await copyText(selected); current(); editor.dispatch({ changes: { from: selection.from, to: selection.to, insert: "" } }); editor.focus(); } },
         { label: "复制", disabled: !selected, run: () => copyText(selected) },
         { label: "粘贴", run: async () => { const text = await navigator.clipboard.readText(); current(); editor.dispatch({ changes: { from: selection.from, to: selection.to, insert: text }, selection: { anchor: selection.from + text.length } }); editor.focus(); } },
         { label: "全选", run: () => { editor.dispatch({ selection: { anchor: 0, head: editor.state.doc.length } }); editor.focus(); } },
-        { label: "格式化 SQL", disabled: refs.formatQuery.disabled, run: () => { current(); refs.formatQuery.click(); } },
+        ...(isRedis ? [{ label: "执行命令", run: () => { current(); void runQuery(); } }] : [{ label: "格式化 SQL", disabled: refs.formatQuery.disabled, run: () => { current(); refs.formatQuery.click(); } }]),
       ];
     }
     const connection = target.closest('[data-connection-id], [data-connection-toggle], [data-edit-id]');

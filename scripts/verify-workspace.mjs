@@ -132,28 +132,28 @@ await check("Redis DB context menu replaces the browser default menu", async () 
   expect(await page.locator("#redisConsolePanel").isVisible(), "Redis console panel did not open");
   expect(await page.locator(".query-tab").count() === 0, "Redis console incorrectly opened a query tab");
   expect(await page.locator("#redisConsoleInput").evaluate((node) => getComputedStyle(node).minHeight).then((value) => Number.parseFloat(value) >= 100), "Redis console input is too short by default");
-  expect(await page.locator("#redisConsoleInput").evaluate((node) => getComputedStyle(node).resize) === "vertical", "Redis console input is not resizable");
-  expect((await page.locator("#redisConsoleInput").inputValue()).trim() === "", "Redis console was prefilled with a SCAN query");
-  expect((await page.locator("#redisConsoleOutput").innerText()).includes("输入 Redis 命令"), "Redis console did not show its command prompt hint");
+  expect(await page.locator(".redis-command-editor-shell").evaluate((node) => getComputedStyle(node).resize) === "vertical", "Redis console input is not resizable");
+  expect(await page.locator("#redisConsoleInput .cm-placeholder").isVisible(), "Redis console was not empty on open");
+  expect((await page.locator("#redisConsoleOutput").innerText()).includes("从一条命令开始"), "Redis console did not show its command prompt hint");
   expect(await page.locator("#redisConsoleInput").evaluate((node) => document.activeElement === node), "Redis console did not focus its command input");
   expect(await page.locator("#beginTransaction").isHidden(), "Redis query toolbar still exposes begin transaction");
   expect(await page.locator("#commitTransaction").isHidden() && await page.locator("#rollbackTransaction").isHidden(), "Redis query toolbar still exposes transaction controls");
   const beforeConsoleCommand = calls("execute_redis_command").length;
   await page.locator("#redisConsoleInput").fill("PING");
-  await page.locator("#redisConsoleInput").press("Enter");
+  await page.locator("#redisConsoleRun").click();
   await waitFor(() => calls("execute_redis_command").length > beforeConsoleCommand, "Redis console command");
   await waitFor(() => page.locator("#redisConsoleOutput").innerText().then((value) => value.includes("OK")), "Redis console output");
   expect(calls("execute_redis_command").at(-1).args.request.console === true, "Redis console request lost console mode");
   expect(calls("execute_redis_command").at(-1).args.request.readOnly === false, "Redis console request remained read-only");
   const beforeSelect = calls("execute_redis_command").length;
   await page.locator("#redisConsoleInput").fill("SELECT 1");
-  await page.locator("#redisConsoleInput").press("Enter");
+  await page.locator("#redisConsoleRun").click();
   await waitFor(() => calls("execute_redis_command").length > beforeSelect, "Redis console SELECT");
   expect(calls("execute_redis_command").at(-1).args.request.sql === "SELECT 1", "Redis console did not send SELECT");
-  await waitFor(() => page.locator("#redisConsolePrompt").innerText().then((value) => value.includes("[1]")), "Redis console DB prompt update");
+  await waitFor(() => page.locator("#redisConsoleContext").innerText().then((value) => value.includes("DB 1")), "Redis console DB prompt update");
   const beforeKeys = calls("execute_redis_command").length;
   await page.locator("#redisConsoleInput").fill("KEYS *");
-  await page.locator("#redisConsoleInput").press("Enter");
+  await page.locator("#redisConsoleRun").click();
   await waitFor(() => calls("execute_redis_command").length > beforeKeys, "Redis console KEYS");
   await page.screenshot({ path: join(evidenceDir, "redis-console.png"), fullPage: true });
   await page.locator("#closeRedisConsole").click();
@@ -280,7 +280,7 @@ await check("schema visibility picker can hide and restore schemas per database"
 });
 
 await check("multi-tab SQL stays isolated and undo does not cross the first tab", async () => {
-  const editor = page.locator(".cm-content");
+  const editor = page.locator("#sqlEditor .cm-content");
   await editor.click();
   await editor.click(); await page.keyboard.press("Meta+A"); await page.keyboard.type("SELECT 'fixture_tab_a'");
   await page.locator("#addQueryTab").click();
@@ -313,7 +313,7 @@ await check("write mode confirms mutations and supports transaction rollback", a
   await ensureConnection("conn-dev");
   await expandDatabase("app");
   await waitFor(() => page.locator("#modeBadge").isEnabled(), "query mode toggle");
-  const editor = page.locator(".cm-content");
+  const editor = page.locator("#sqlEditor .cm-content");
   await editor.click(); await page.keyboard.press("Meta+A"); await page.keyboard.type("UPDATE public.orders SET status = 'PAID'");
   const beforeMutation = calls("execute_mutation").length;
   await page.locator("#runQuery").click();
@@ -439,7 +439,7 @@ await check("PostgreSQL cells edit only in write mode and keep the primary key r
 });
 
 await check("stop query enables cancel and leaves a cancellation message", async () => {
-  const editor = page.locator(".cm-content");
+  const editor = page.locator("#sqlEditor .cm-content");
   if (await page.locator("#openTableSql").isVisible()) await page.locator("#openTableSql").click();
   await editor.click();
   await page.keyboard.press("Meta+A");
@@ -454,7 +454,7 @@ await check("stop query enables cancel and leaves a cancellation message", async
 });
 
 await check("delayed query from another tab does not pollute the active tab", async () => {
-  const editor = page.locator(".cm-content");
+  const editor = page.locator("#sqlEditor .cm-content");
   if (await page.locator("#openTableSql").isVisible()) await page.locator("#openTableSql").click();
   await editor.click(); await page.keyboard.press("Meta+A"); await page.keyboard.type("SELECT /* fixture_big_grid */ 1");
   await page.locator("#runQuery").click();
@@ -487,7 +487,7 @@ await check("late errors remain attached to the background tab", async () => {
   await page.locator("#messageTab").click();
   const activeBeforeError = await page.locator(".query-tab.active").getAttribute("data-tab-id");
   await page.locator("#addQueryTab").click();
-  const editor = page.locator(".cm-content");
+  const editor = page.locator("#sqlEditor .cm-content");
   if (await page.locator("#openTableSql").isVisible()) await page.locator("#openTableSql").click();
   await editor.click(); await page.keyboard.press("Meta+A"); await page.keyboard.type("SELECT /* fixture_delay_error */ 1");
   await page.locator("#runQuery").click();
@@ -503,7 +503,7 @@ await check("late errors remain attached to the background tab", async () => {
 await check("result filter changes the visible count and exported data per tab", async () => {
   await page.locator(".query-tab").first().locator(".tab-select").click();
   if (await page.locator("#openTableSql").isVisible()) await page.locator("#openTableSql").click();
-  const editor = page.locator(".cm-content");
+  const editor = page.locator("#sqlEditor .cm-content");
   await editor.click(); await page.keyboard.press("Meta+A"); await page.keyboard.type("SELECT /* fixture_filter */ 1");
   await page.locator("#runQuery").click();
   await waitFor(() => page.locator("#resultCount").innerText().then((value) => value.trim() === "4"), "filter result");
@@ -533,6 +533,8 @@ await check("Ctrl/Cmd+Enter in connection modal does not run SQL", async () => {
 await check("connection driver choices switch fields and submit the selected driver", async () => {
   await page.locator("#newConnection").click();
   const modal = page.locator("#connectionModal");
+  expect(await modal.locator("#connectionHost").inputValue() === "localhost", "new connection host was not filled");
+  expect(await modal.locator("#connectionUser").inputValue() === "postgres", "new connection username was not filled");
   await modal.locator("#connectionName").fill("Fixture driver validation");
   await modal.locator("#connectionHost").fill("fixture.local");
   expect(await modal.locator("#connectionDriver").inputValue() === "postgres", "new connection did not default to PostgreSQL");
@@ -571,7 +573,7 @@ await check("connection driver choices switch fields and submit the selected dri
   await modal.locator("#connectionDriverTrigger").click();
   await modal.locator("#connectionDriverMenu [data-driver='postgres']").click();
   expect(await modal.locator("#connectionDatabase").inputValue() === "postgres", "MySQL database leaked into PostgreSQL connection");
-  expect(await modal.locator("#connectionUser").inputValue() === "", "automatic MySQL username leaked into another driver");
+  expect(await modal.locator("#connectionUser").inputValue() === "postgres", "PostgreSQL username did not restore its default");
   await modal.locator("#connectionUser").fill("custom_user");
   await modal.locator("#connectionDriverTrigger").click();
   await modal.locator("#connectionDriverMenu [data-driver='mysql']").click();
@@ -718,7 +720,7 @@ await check("1000x100 result grid keeps bounded DOM while exposing two-axis scro
   await page.setViewportSize({ width: 1440, height: 900 });
   if (await page.locator("#openTableSql").isVisible()) await page.locator("#openTableSql").click();
   await page.locator("#resultFilter").fill("");
-  const editor = page.locator(".cm-content");
+  const editor = page.locator("#sqlEditor .cm-content");
   await editor.click(); await page.keyboard.press("Meta+A"); await page.keyboard.type("SELECT /* fixture_big_grid */ 1");
   await page.locator("#runQuery").click();
   await waitFor(() => page.locator("#resultGrid .db-grid-viewport").getAttribute("aria-rowcount").then((value) => value === "1001"), "large result grid");
@@ -756,7 +758,7 @@ await check("structure detail and PostgreSQL syntax highlighting are visible", a
   await waitFor(() => page.locator("#structurePanel").innerText().then((value) => /public\.orders|列/.test(value)), "structure details");
   await page.screenshot({ path: join(evidenceDir, "workspace-structure-1440.png"), fullPage: true });
   await page.locator("#addQueryTab").click();
-  const editor = page.locator(".cm-content");
+  const editor = page.locator("#sqlEditor .cm-content");
   if (await page.locator("#openTableSql").isVisible()) await page.locator("#openTableSql").click();
   await editor.click(); await page.keyboard.press("Meta+A"); await page.keyboard.type("SELECT * FROM public.orders WHERE status = 'ACTIVE'");
   const classes = await page.locator(".cm-line span").evaluateAll((nodes) => nodes.map((node) => node.className).filter(Boolean));

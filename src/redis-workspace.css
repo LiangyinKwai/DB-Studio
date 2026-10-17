@@ -1,0 +1,55 @@
+body .redis-console { display: flex; flex: 1; min-height: 0; flex-direction: column; background: var(--app-panel); color: var(--app-text); font: 12px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+.redis-workspace-toolbar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; flex: none; min-height: 56px; padding: 10px 18px; border-bottom: 1px solid var(--app-border); }
+.redis-workspace-title, .redis-workspace-actions { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.redis-workspace-title strong { font-size: 12px; font-weight: 600; white-space: nowrap; }
+.redis-workspace-mark { display: grid; place-items: center; width: 24px; height: 24px; border-radius: 6px; color: var(--driver-redis); background: color-mix(in srgb, var(--driver-redis) 12%, transparent); font: 600 12px/1 ui-monospace, monospace; }
+.redis-target-label { color: var(--app-muted); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 220px; padding-left: 10px; border-left: 1px solid var(--app-border); }
+.redis-workspace-actions .primary-btn { display: flex; align-items: center; gap: 14px; min-height: 30px; font-size: 12px; padding: 6px 12px; }
+.redis-workspace-actions kbd { color: inherit; font: 11px/1 ui-monospace, monospace; opacity: .75; }
+.redis-command-editor-shell { flex: none; height: 200px; min-height: 125px; max-height: 50%; overflow: auto; resize: vertical; background: var(--input-bg); }
+#redisCommandEditor { height: 100%; }
+.redis-command-assistance { display: flex; align-items: center; gap: 12px; flex: none; min-height: 36px; padding: 7px 18px; border-top: 1px solid var(--app-border); border-bottom: 1px solid var(--app-border); color: var(--app-muted); font-size: 11px; }
+.redis-assistance-label { color: var(--driver-redis); font-weight: 600; flex: none; }
+#redisConsoleHint { font: 11px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.redis-editor-shortcuts { display: flex; align-items: center; gap: 6px; margin-left: auto; white-space: nowrap; flex: none; font-size: 10px; }
+.redis-editor-shortcuts kbd { font: inherit; color: var(--app-text); }
+.redis-output-toolbar { display: flex; align-items: center; justify-content: space-between; flex: none; padding: 12px 18px 8px; }
+.redis-output-heading { display: flex; align-items: center; gap: 8px; font-size: 11px; }
+#redisOutputCount { font: 10px/1.5 ui-monospace, monospace; background: var(--selected-bg); padding: 1px 6px; border-radius: 4px; color: var(--app-muted); }
+body .redis-console-output { flex: 1; min-height: 0; overflow: auto; padding: 6px 18px 18px; }
+body .redis-console-entry { margin: 0 0 12px; border: 1px solid var(--app-border); border-radius: 8px; overflow: hidden; background: var(--input-bg); }
+.redis-entry-header { display: flex; align-items: center; gap: 10px; min-height: 34px; padding: 4px 12px; border-bottom: 1px solid var(--app-border); background: color-mix(in srgb, var(--app-panel) 65%, var(--input-bg)); }
+.redis-entry-status { font-size: 10px; font-weight: 600; }
+.redis-entry-status.success { color: var(--success, #6eae8b); }
+.redis-entry-status.error { color: var(--error); }
+.redis-entry-status.pending { color: var(--driver-redis); }
+.redis-entry-database, .redis-entry-meta { color: var(--app-muted); font: 10px/1.5 ui-monospace, monospace; }
+.redis-entry-header .quiet-btn { padding: 3px 6px; font-size: 10px; }
+body .redis-console .redis-console-command { display: block; width: 100%; margin: 0; padding: 10px 14px; color: var(--app-text); font: 12px/1.7 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; overflow-wrap: anywhere; border-bottom: 1px solid var(--app-border); }
+body .redis-console .redis-console-result { display: block; width: 100%; margin: 0; padding: 12px 14px; color: var(--app-text); font: 12px/1.7 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 350px; overflow: auto; }
+body .redis-console-result.error { color: var(--error); }
+body .redis-console-empty { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; min-height: 190px; height: 100%; padding: 18px; color: var(--app-muted); text-align: center; }
+.redis-empty-symbol { color: var(--driver-redis); font: 500 22px/1 ui-monospace, monospace; margin-bottom: 8px; }
+.redis-console-empty h3 { color: var(--app-text); margin: 0; font-size: 14px; font-weight: 600; }
+.redis-console-empty p { margin: 0 0 14px; font-size: 12px; }
+.redis-command-examples { display: flex; justify-content: center; flex-wrap: wrap; gap: 8px; }
+.redis-command-examples button { display: flex; align-items: center; gap: 12px; padding: 8px 12px; border: 1px solid var(--app-border); border-radius: 6px; background: var(--input-bg); color: var(--app-text); cursor: pointer; }
+.redis-command-examples button:hover { border-color: var(--accent-line); background: var(--selected-bg); }
+.redis-command-examples code { font: 11px/1.5 ui-monospace, monospace; }
+.redis-command-examples span { color: var(--app-muted); font-size: 10px; }
+.redis-completion-info strong { font: 600 12px/1.6 ui-monospace, monospace; }
+.redis-command-kind { margin-left: 10px; padding: 2px 5px; border-radius: 4px; color: var(--driver-redis); background: color-mix(in srgb, var(--driver-redis) 12%, transparent); font-size: 10px; }
+.redis-completion-info code { display: block; margin-top: 10px; color: var(--syntax-keyword); white-space: normal; font: 11px/1.7 ui-monospace, monospace; }
+.redis-completion-info p { margin: 6px 0 0; color: var(--app-muted); }
+@media (max-width: 1200px) { .redis-editor-shortcuts { display: none; } .redis-workspace-toolbar { padding: 10px 12px; } .redis-target-label { max-width: 140px; } }
+
+.redis-type-field { display: grid; gap: 7px; }
+body .redis-type-picker .driver-picker-trigger { height: 54px; gap: 11px; }
+.redis-type-copy { display: grid; gap: 3px; text-align: left; }
+.redis-type-copy strong { font-size: 12px; font-weight: 600; }
+.redis-type-copy small { color: var(--app-muted); font-size: 11px; font-weight: 400; }
+.redis-type-menu { max-height: min(290px, 42vh); overflow-y: auto; }
+body .redis-type-option { min-height: 52px; gap: 11px; border-radius: 5px; }
+body .redis-type-option:focus-visible { outline: none; background: var(--selected-bg); box-shadow: inset 0 0 0 1px var(--accent-line); }
+body .redis-type-option:hover { background: var(--selected-bg); }
+body .redis-type-picker .driver-picker-icon { color: var(--driver-redis); width: 28px; height: 28px; font: 600 12px/1 ui-monospace, monospace; }

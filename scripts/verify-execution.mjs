@@ -48,7 +48,7 @@ const sql = `ALTER TABLE upsell.upsell_cart_modules
 COMMENT ON COLUMN upsell.upsell_cart_modules.enable_celebration IS
   '阶梯奖励解锁特效开关; 仅 TIERED_REWARDS 使用，默认关闭，不影响奖励计算';`;
 const modal = page.locator("#confirmActionModal");
-const editor = page.locator(".cm-content");
+const editor = page.locator("#sqlEditor .cm-content");
 const accept = page.locator("#confirmActionAccept");
 const waitForDone = () => page.locator("#toast").getByText("查询完成", { exact: true }).waitFor();
 try {
