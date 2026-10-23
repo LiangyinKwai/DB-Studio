@@ -1227,7 +1227,6 @@ export class ResultGrid {
       });
       menu.append(button);
     };
-    item('edit', '编辑单元格', editable, (source) => this.startCellEdit(source));
     item('inspect', '查看详情', Boolean(this.onInspect && !busy), (source) => this.inspectCell(source));
     item('copy', '复制值', true, async () => {
       const value = session ? session.isNull ? null : session.draftValue : payload.value;
@@ -1238,6 +1237,7 @@ export class ResultGrid {
         this.announce(`已复制 ${payload.column} 的值`);
       } catch (error) { this.announce(`复制失败：${error instanceof Error ? error.message : String(error)}`); }
     });
+    item('edit', '编辑单元格', editable, (source) => this.startCellEdit(source));
     item('null', '设为 NULL', editable && state.allowNull !== false, (source) => {
       if (!this.startCellEdit(source, { isNull: true })) return;
       this.editSession.isNull = true;

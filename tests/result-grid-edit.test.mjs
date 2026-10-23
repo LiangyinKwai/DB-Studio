@@ -538,7 +538,8 @@ test('the right-click menu transfers current draft and context into details', (t
   emit(grid.editorInput, 'input');
   const context = grid.editSession.payload.context;
   grid.openCellMenu(cellNode(grid));
-  assert.deepEqual(grid.cellMenu.children.map((item) => item.textContent), ['编辑单元格', '查看详情', '复制值', '设为 NULL']);
+  assert.deepEqual(grid.cellMenu.children.map((item) => item.textContent), ['查看详情', '复制值', '编辑单元格', '设为 NULL']);
+  assert.equal(document.activeElement, grid.cellMenu.querySelector('[data-cell-action="inspect"]'));
   emit(grid.cellMenu.querySelector('[data-cell-action="inspect"]'), 'click');
   assert.equal(grid.cellMenu, null);
   assert.equal(inspected.draftValue, 'Draft for details');
@@ -563,6 +564,7 @@ test('context menu NULL stays a draft until save and read-only actions explain t
   assert.match(grid.cellMenu.querySelector('[data-cell-action="edit"]').title, /没有唯一键/);
   assert.equal(grid.cellMenu.querySelector('[data-cell-action="null"]').disabled, true);
   assert.equal(grid.cellMenu.querySelector('[data-cell-action="inspect"]').disabled, false);
+  assert.equal(document.activeElement, grid.cellMenu.querySelector('[data-cell-action="inspect"]'));
 });
 
 test('Shift F10 and the context-menu key expose the same cell operations', () => {

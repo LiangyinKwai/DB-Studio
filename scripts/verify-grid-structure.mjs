@@ -178,6 +178,8 @@ try {
   await wait(async () => (await page.locator('#resultCount').innerText()).trim() === '500');
   await filter(0, 'equal', '3');
   await page.locator('.db-grid-body [data-column-index="1"]').click({ button: 'right' });
+  assert.deepEqual(await page.locator('.db-grid-cell-menu [role="menuitem"]').allTextContents(), ['查看详情', '复制值', '编辑单元格', '设为 NULL']);
+  assert.equal(await page.evaluate(() => document.activeElement?.dataset.cellAction), 'inspect');
   await page.locator('.db-grid-cell-menu').getByRole('menuitem', { name: '查看详情', exact: true }).click();
   assert.equal(await page.locator('#cellValue').inputValue(), 'value-3');
   await page.locator('#cellValue').fill('AFTER_FILTER');
