@@ -91,6 +91,138 @@ function fixture() {
   };
 }
 
+const batchDraft = (context, newValue, isNull = false) => ({ context, newValue, isNull });
+test('saving composite primary key drafts rebases later cells to the new keys in either edit order', async () => {
+  for (const keyFirst of [true, false]) {
+    const f = fixture();
+    const drafts = [batchDraft(f.capture(0, 1), '9007199254740997'), batchDraft(f.capture(0, 3), 'new-tenant'), batchDraft(f.capture(0, 0), 'paid')];
+    if (!keyFirst) drafts.unshift(drafts.pop());
+    f.runtime.resultGrid.updateCellEditContexts = (_rows, update) => drafts.forEach(draft => update(draft));
+    const outcomes = await f.runtime.commitTableCellEdits(drafts);
+    assert.deepEqual(Array.from(outcomes, outcome => outcome.saved), [true, true, true]);
+    assert.deepEqual(Array.from(f.tab.result.rows[0]), ['paid', '9007199254740997', '{"n":9007199254740993}', 'new-tenant']);
+    if (keyFirst) {
+      assert.match(f.calls[0].args.request.sql, /SET "id" = E'9007199254740997'.*WHERE "tenant_id" IS NOT DISTINCT FROM E'acme' AND "id" IS NOT DISTINCT FROM E'9007199254740993'/);
+      assert.match(f.calls[1].args.request.sql, /WHERE "tenant_id" IS NOT DISTINCT FROM E'acme' AND "id" IS NOT DISTINCT FROM E'9007199254740997'/);
+      assert.match(f.calls[2].args.request.sql, /WHERE "tenant_id" IS NOT DISTINCT FROM E'new-tenant' AND "id" IS NOT DISTINCT FROM E'9007199254740997'/);
+    }
+    await f.runtime.commitCellValue(f.capture(0, 0), 'later', false, { confirm: false });
+    assert.match(f.calls.at(-1).args.request.sql, /WHERE "tenant_id" IS NOT DISTINCT FROM E'new-tenant' AND "id" IS NOT DISTINCT FROM E'9007199254740997'/);
+  }
+});
+
+test('failed primary key saves retain the original row and all unsaved drafts for retry', async () => {
+  for (const message of ['duplicate key', 'foreign key restriction']) {
+    const f = fixture(), original = f.tab.result.rows[0];
+    const drafts = [batchDraft(f.capture(0, 1), '9007199254740994'), batchDraft(f.capture(0, 0), 'paid')];
+    f.runtime.call = async () => { throw new Error(message); };
+    const outcomes = await f.runtime.commitTableCellEdits(drafts);
+    assert.deepEqual(Array.from(outcomes, outcome => outcome.saved), [false, false]);
+    assert.equal(f.tab.result.rows[0], original);
+    assert.equal(drafts[1].context.rowRef, original);
+    assert.equal(drafts[1].newValue, 'paid');
+  }
+});
+
+test('MySQL save-all rebases typed BIT and binary primary key values before subsequent updates', async () => {
+  const f = fixture(); f.state.profiles[0].driver = 'mysql';
+  f.tab.browse.primaryKeys = ['mask', 'raw_key'];
+  f.tab.browse.columns = [{ name: 'mask', dataType: 'bit(8)', primaryKey: true }, { name: 'raw_key', dataType: 'varbinary(8)', primaryKey: true }, { name: 'label', dataType: 'text' }];
+  f.tab.result.columns = ['mask', 'raw_key', 'label'];
+  f.tab.result.rows = [['255', { $dbStudio: 'mysql-binary', hex: '00ff' }, 'before']];
+  const drafts = [batchDraft(f.capture(0, 1), '0xaabb'), batchDraft(f.capture(0, 0), '254'), batchDraft(f.capture(0, 2), 'after')];
+  f.runtime.resultGrid.updateCellEditContexts = (_rows, update) => drafts.forEach(update);
+  const result = await f.runtime.commitTableCellEdits(drafts);
+  assert.deepEqual(Array.from(result, outcome => outcome.saved), [true, true, true]);
+  assert.match(f.calls[0].args.request.sql, /SET `raw_key` = X'aabb' WHERE `mask` <=> 255 AND `raw_key` <=> X'00ff'/);
+  assert.match(f.calls[1].args.request.sql, /SET `mask` = 254 WHERE `mask` <=> 255 AND `raw_key` <=> X'aabb'/);
+  assert.match(f.calls[2].args.request.sql, /WHERE `mask` <=> 254 AND `raw_key` <=> X'aabb'/);
+});
+
+test('MySQL only invalidates transaction results when the backend confirms rollback', () => {
+  const f = fixture();
+  assert.equal(f.runtime.transactionDidRollback(new Error('DDL cannot run inside the active transaction'), 'mysql'), false);
+  assert.equal(f.runtime.transactionDidRollback(new Error('[TX_ROLLED_BACK] failed update'), 'mysql'), true);
+  assert.equal(f.runtime.transactionDidRollback(new Error('failed update'), 'postgres'), true);
+});
+
+test('table save writes multiple cells directly without per-cell confirmations and preserves sibling row changes', async () => {
+  const f = fixture();
+  const status = f.capture(0, 0), json = f.capture(0, 2), other = f.capture(1, 0);
+  const drafts = [batchDraft(status, 'paid'), batchDraft(json, '{"n":9007199254740995}'), batchDraft(other, 'done')];
+  f.runtime.resultGrid.updateCellEditContexts = (_rows, update) => drafts.forEach(draft => update(draft));
+  const result = await f.runtime.commitTableCellEdits(drafts);
+  assert.deepEqual(Array.from(result, outcome => outcome.saved), [true, true, true]);
+  assert.equal(f.confirmations.length, 0);
+  assert.equal(f.calls.length, 3);
+  assert.deepEqual(Array.from(f.tab.result.rows[0]), ['paid', '9007199254740993', '{"n":9007199254740995}', 'acme']);
+  assert.equal(f.tab.result.rows[1][0], 'done');
+  assert.equal(f.notifications.length, 1);
+  assert.equal(f.tab.cellBatchSaving, null);
+});
+
+test('table save validates every draft before writing and rejects mixed targets', async () => {
+  const f = fixture();
+  await assert.rejects(f.runtime.commitTableCellEdits([batchDraft(f.capture(), 'paid'), batchDraft(f.capture(1, 2), '{bad')]), /JSON 格式无效/);
+  assert.equal(f.calls.length, 0);
+  const context = f.capture(1, 0);
+  await assert.rejects(f.runtime.commitTableCellEdits([batchDraft(f.capture(), 'paid'), batchDraft({ ...context, tab: { ...f.tab } }, 'other')]), /当前表/);
+  assert.equal(f.calls.length, 0);
+});
+
+test('table save stops on failure and reports exactly which cells were saved', async () => {
+  const f = fixture();
+  let writes = 0;
+  f.runtime.call = async () => { if (++writes === 2) throw new Error('connection unavailable'); return { row_count: 1 }; };
+  const outcomes = await f.runtime.commitTableCellEdits([batchDraft(f.capture(), 'paid'), batchDraft(f.capture(1, 0), 'ready2'), batchDraft(f.capture(1, 2), '{}')]);
+  assert.deepEqual(Array.from(outcomes, outcome => outcome.saved), [true, false, false]);
+  assert.equal(writes, 2);
+  assert.equal(f.tab.result.rows[0][0], 'paid');
+  assert.equal(f.tab.result.rows[1][0], 'ready');
+  assert.equal(f.tab.cellBatchSaving, null);
+  assert.match(f.notifications.at(-1), /已保存 1 格.*2 格修改已保留/);
+});
+
+test('a rolled-back transaction cannot mark earlier cells in the same batch as saved', async () => {
+  const f = fixture();
+  f.state.transactionKeys.add('pg\0commerce');
+  let writes = 0;
+  f.runtime.call = async () => { if (++writes === 2) throw new Error('transaction failed'); return { row_count: 1 }; };
+  const outcomes = await f.runtime.commitTableCellEdits([batchDraft(f.capture(), 'paid'), batchDraft(f.capture(1, 0), 'ready2')]);
+  assert.deepEqual(Array.from(outcomes, outcome => outcome.saved), [false, false]);
+  assert.equal(f.tab.result.transactionRolledBack, true);
+  assert.equal(f.state.transactionKeys.has('pg\0commerce'), false);
+  assert.match(f.notifications.at(-1), /事务已回滚/);
+});
+
+test('table save locks duplicate and single-cell writes for the full operation', async () => {
+  const f = fixture();
+  const first = f.capture(), second = f.capture(1, 0);
+  const held = deferred();
+  let writes = 0;
+  f.runtime.call = async () => { writes++; await held.promise; return { row_count: 1 }; };
+  const saving = f.runtime.commitTableCellEdits([batchDraft(first, 'paid')]);
+  await assert.rejects(f.runtime.commitTableCellEdits([batchDraft(second, 'done')]), /等待/);
+  await assert.rejects(f.runtime.commitInlineCell({ context: second, newValue: 'done' }), /等待/);
+  assert.equal(writes, 1);
+  held.resolve(); await saving;
+  assert.equal(f.tab.cellBatchSaving, null);
+});
+
+test('Redis hash batch saves retain the captured logical DB and original value checks', async () => {
+  const f = fixture();
+  f.state.profiles[0].driver = 'redis';
+  Object.assign(f.tab, { browse: null, database: '7', redisDb: 7, redisKey: 'shared:key', redisType: 'hash' });
+  f.tab.result.columns = ['field', 'value'];
+  f.tab.result.rows = [['name', 'Ada'], ['role', 'admin']];
+  const outcomes = await f.runtime.commitTableCellEdits([batchDraft(f.capture(0, 1), 'Grace'), batchDraft(f.capture(1, 1), 'editor')]);
+  assert.deepEqual(Array.from(outcomes, outcome => outcome.saved), [true, true]);
+  assert.equal(f.confirmations.length, 0);
+  assert.deepEqual(f.calls.map(call => [call.command, call.args.request.connectionId, call.args.request.database, call.args.request.field, call.args.request.expectedValue]), [
+    ['save_redis_cell', 'pg', 7, 'name', 'Ada'], ['save_redis_cell', 'pg', 7, 'role', 'admin'],
+  ]);
+});
+
 test('cancelling the real save confirmation sends no database write and retains the original row', async () => {
   const f = fixture();
   const original = f.tab.result.rows[0];

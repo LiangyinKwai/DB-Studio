@@ -1,3 +1,5 @@
+import { redisKeyIcon } from './redis-key-icons.js';
+
 const types = [
   { value: "string", label: "String", icon: "Aa", detail: "字符串 · 文本、数字或 JSON" },
   { value: "hash", label: "Hash", icon: "{}", detail: "哈希 · 字段与值" },
@@ -15,7 +17,7 @@ export function createRedisTypePicker({ input, trigger, menu, label, icon, detai
   function render() {
     const selected = types.find(type => type.value === input.value) || types[0];
     label.textContent = selected.label;
-    icon.textContent = selected.icon;
+    icon.innerHTML = redisKeyIcon(selected.value);
     detail.textContent = selected.detail;
     menu.replaceChildren(...types.map(type => {
       const option = document.createElement("button");
@@ -26,7 +28,7 @@ export function createRedisTypePicker({ input, trigger, menu, label, icon, detai
       option.setAttribute("aria-selected", String(type.value === selected.value));
       option.tabIndex = -1;
       const badge = document.createElement("span");
-      badge.className = "driver-picker-icon"; badge.textContent = type.icon; badge.setAttribute("aria-hidden", "true");
+      badge.className = "driver-picker-icon"; badge.innerHTML = redisKeyIcon(type.value); badge.setAttribute("aria-hidden", "true");
       const copy = document.createElement("span"); copy.className = "redis-type-copy";
       const name = document.createElement("strong"); name.textContent = type.label;
       const description = document.createElement("small"); description.textContent = type.detail;

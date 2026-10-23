@@ -118,11 +118,12 @@ try {
   assert.deepEqual(await ids(), ['1', '3', '9007199254740993']);
   assert.equal(await page.locator('#selectionCount').innerText(), '');
   await filter(0, 'gt', '1'); assert.deepEqual(await ids(), ['3', '9007199254740993']);
-  await page.locator('[data-sort-column="0"]').click(); await page.locator('[data-sort-column="0"]').click();
+  await page.locator('[data-sort-column="0"][data-sort-direction="-1"]').click();
   assert.deepEqual(await ids(), ['9007199254740993', '3']);
   await page.locator('#resultFilter').fill('text'); assert.deepEqual(await ids(), ['3']);
   await page.locator('#resultFilter').fill(''); assert.deepEqual(await ids(), ['9007199254740993','3']);
   await page.locator('[data-select-all]').check();
+  await page.locator('#resultMore').click();
   await page.locator('#exportResults').click();
   await wait(async () => (await page.locator('#toast').innerText()).includes('取消导出'));
   const csv = fixture.callsFor('save_text_file').at(-1).args.contents;
@@ -161,10 +162,10 @@ try {
     await page.screenshot({ path: resolve(evidence, `funnel-options-${theme}.png`) });
     await page.keyboard.press('Escape'); await page.keyboard.press('Escape');
   }
-  await page.setViewportSize({ width: 720, height: 440 });
+  await page.setViewportSize({ width: 1060, height: 680 });
   await page.locator('[data-filter-column="2"]').click(); await condition.click();
   const compactOptions = await conditions.boundingBox();
-  assert.ok(compactOptions.x >= 8 && compactOptions.x + compactOptions.width <= 712 && compactOptions.y >= 8 && compactOptions.y + compactOptions.height <= 432, 'compact condition list leaves viewport');
+  assert.ok(compactOptions.x >= 8 && compactOptions.x + compactOptions.width <= 1052 && compactOptions.y >= 8 && compactOptions.y + compactOptions.height <= 672, 'minimum-window condition list leaves viewport');
   await page.keyboard.press('End'); await page.keyboard.press('Enter');
   assert.equal(await condition.innerText(), '不为空字符串');
   await page.keyboard.press('Escape');
@@ -176,13 +177,14 @@ try {
   await object.locator('.object-main').dblclick();
   await wait(async () => (await page.locator('#resultCount').innerText()).trim() === '500');
   await filter(0, 'equal', '3');
-  await page.locator('.db-grid-body [data-column-index="1"]').dblclick();
+  await page.locator('.db-grid-body [data-column-index="1"]').click({ button: 'right' });
+  await page.locator('.db-grid-cell-menu').getByRole('menuitem', { name: '查看详情', exact: true }).click();
   assert.equal(await page.locator('#cellValue').inputValue(), 'value-3');
   await page.locator('#cellValue').fill('AFTER_FILTER');
   await page.locator('#saveCell').click(); await confirm();
   await page.locator('#cellModal').waitFor({ state: 'hidden' });
   const cellWrite = fixture.callsFor('execute_mutation').at(-1).args.request.sql;
-  assert.match(cellWrite, /"id" IS NOT DISTINCT FROM (?:'3'|3);/);
+  assert.match(cellWrite, /"id" IS NOT DISTINCT FROM (?:E?'3'|3);/);
   const dataTabId = await page.locator('.query-tab.active').getAttribute('data-tab-id');
   await page.locator('#openTableSql').click();
   const sqlTabId = await page.locator('.query-tab.active').getAttribute('data-tab-id');

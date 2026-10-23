@@ -79,6 +79,15 @@ pub struct ObjectDetails {
     pub definition: Option<String>,
     pub signature: Option<String>,
     pub table_ddl: Option<TableDdl>,
+    pub mysql: Option<MySqlMetadata>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MySqlMetadata {
+    pub sql_mode: String,
+    pub server_version: String,
+    pub engine: Option<String>,
 }
 
 // Extra catalog data used by schema export. The display model intentionally
@@ -228,6 +237,7 @@ pub async fn load_object_details(
             definition: col(&r, "definition"),
             signature: Some(format!("{name}({signature})")),
             table_ddl: None,
+            mysql: None,
         });
     }
     let sql = "SELECT c.oid::text AS id,n.nspname AS schema_name,c.relname AS name,CASE c.relkind WHEN 'r' THEN 'table' WHEN 'p' THEN 'partitioned_table' WHEN 'v' THEN 'view' WHEN 'm' THEN 'materialized_view' WHEN 'f' THEN 'foreign_table' WHEN 'S' THEN 'sequence' ELSE c.relkind::text END AS kind,pg_get_userbyid(c.relowner) AS owner_name,obj_description(c.oid,'pg_class') AS comment,CASE WHEN c.relkind IN ('v','m') THEN pg_get_viewdef(c.oid,true) END AS definition FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE c.oid=$1::oid";
@@ -310,6 +320,7 @@ pub async fn load_object_details(
         definition: col(&r, "definition"),
         signature: None,
         table_ddl,
+        mysql: None,
     })
 }
 

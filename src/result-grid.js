@@ -11,8 +11,13 @@ function columnName(column) {
   return typeof column === 'string' ? column : String(column?.name ?? column ?? '');
 }
 
+function columnDataType(column) {
+  return typeof column === 'object' ? column?.dataType ?? column?.data_type ?? column?.type : undefined;
+}
+
 export function formatCellValue(value) {
   if (value === null || value === undefined) return 'NULL';
+  if (value && typeof value === 'object' && value.$dbStudio === 'mysql-binary' && typeof value.hex === 'string') return `0x${value.hex}`;
   if (typeof value === 'object') {
     try { return JSON.stringify(value); } catch { return String(value); }
   }
@@ -188,13 +193,15 @@ function element(tag, className, text) {
 /** A dependency-free, two-axis virtual result grid. It retains original row
  * references; only the visible cells and a small overscan exist in the DOM. */
 export class ResultGrid {
-  constructor(container, { onInspect, onSelectionChange, onTextFilterChange, getCellEditState, onCommitCell, onCopyCell } = {}) {
+  constructor(container, { onInspect, onSelectionChange, onTextFilterChange, onDraftChange, getCellEditState, onCommitCell, onCommitCells, onCopyCell, editActions } = {}) {
     this.container = container;
     this.onInspect = onInspect;
     this.onSelectionChange = onSelectionChange;
     this.onTextFilterChange = onTextFilterChange;
+    this.onDraftChange = onDraftChange;
     this.getCellEditState = getCellEditState;
     this.onCommitCell = onCommitCell;
+    this.onCommitCells = onCommitCells;
     this.onCopyCell = onCopyCell;
     // Result arrays belong to their tabs. Keep drafts with that exact result,
     // never with a visible position that sorting or a new query can change.
@@ -257,15 +264,16 @@ export class ResultGrid {
     this.footerStatus.setAttribute('aria-atomic', 'true');
     this.footerActions = element('div', 'db-grid-footer-actions');
     this.footerActions.hidden = true;
-    this.editCancel = element('button', 'db-grid-edit-cancel', '取消');
+    this.externalEditActions = Boolean(editActions);
+    this.editCancel = editActions?.cancel || element('button', 'db-grid-edit-cancel', '取消修改');
     this.editCancel.type = 'button';
-    this.editCancel.title = '取消编辑 · Esc';
-    this.editCancel.addEventListener('click', () => this.cancelCellEdit(), options);
-    this.editSave = element('button', 'db-grid-edit-save', '保存');
+    this.editCancel.title = '取消当前表的全部未保存修改';
+    this.editCancel.addEventListener('click', () => this.discardCellEdit(), options);
+    this.editSave = editActions?.save || element('button', 'db-grid-edit-save', '保存');
     this.editSave.type = 'button';
-    this.editSave.title = '保存到数据库 · Enter';
-    this.editSave.addEventListener('click', () => this.commitCellEdit(), options);
-    this.footerActions.append(this.editCancel, this.editSave);
+    this.editSave.title = '保存当前表的修改 · ⌘/Ctrl+S';
+    this.editSave.addEventListener('click', () => this.commitAllCellEdits(), options);
+    if (!editActions) this.footerActions.append(this.editCancel, this.editSave);
     this.footer.append(this.footerHint, this.footerStatus, this.footerActions);
     this.container.append(this.filterBar, this.viewport, this.footer);
     this.container.classList.add('db-grid-host');
@@ -420,6 +428,61 @@ export class ResultGrid {
 
   getRow(index) {
     return this.rows[index];
+  }
+
+  /** Original column indices remain stable across scrolling, sorting and filtering. */
+  getColumnNavigationItems(metadata = []) {
+    const counts = new Map();
+    const metadataByName = new Map();
+    for (const column of this.columns) counts.set(columnName(column), (counts.get(columnName(column)) || 0) + 1);
+    for (const column of Array.isArray(metadata) ? metadata : []) {
+      const name = columnName(column);
+      // Duplicate source/result names cannot be mapped unambiguously by name.
+      metadataByName.set(name, metadataByName.has(name) ? null : column);
+    }
+    return this.columns.map((column, index) => ({
+      index,
+      name: columnName(column),
+      type: String(columnDataType(column) ?? (counts.get(columnName(column)) === 1 ? columnDataType(metadataByName.get(columnName(column))) : undefined) ?? ''),
+      active: this.activeCell?.column === index,
+      selected: Boolean(this.selectedColumns?.has(index)),
+      filtered: this.filters.some(filter => filter.column === index),
+    }));
+  }
+
+  /** Reveal a column without changing the data/column selection used by copy and export. */
+  revealColumn(index, { focus = true } = {}) {
+    if (this.destroyed || !Number.isInteger(index) || index < 0 || index >= this.columns.length || this.editorComposing) return false;
+    this.closeFilter(false);
+    this.closeCellMenu(false);
+    this.suspendCellEdit();
+    const left = this.offsets[index];
+    const right = left + this.widths[index];
+    const width = this.viewport.clientWidth || 800;
+    if (left < this.viewport.scrollLeft + SELECTOR_WIDTH || this.widths[index] > width - SELECTOR_WIDTH)
+      this.viewport.scrollLeft = Math.max(0, left - SELECTOR_WIDTH);
+    else if (right > this.viewport.scrollLeft + width)
+      this.viewport.scrollLeft = Math.max(0, right - width);
+    if (this.visibleOrder.length) {
+      // A cell left above/below the viewport should not pull a scrolled result back.
+      const first = Math.floor(this.viewport.scrollTop / ROW_HEIGHT);
+      const last = Math.ceil((this.viewport.scrollTop + Math.max(ROW_HEIGHT, (this.viewport.clientHeight || 320) - HEADER_HEIGHT)) / ROW_HEIGHT) - 1;
+      const current = this.activeCell?.position;
+      const position = current >= first && current <= last ? current : first;
+      this.activeCell = { position: Math.max(0, Math.min(this.visibleOrder.length - 1, position)), column: index };
+    } else this.activeCell = null;
+    this.invalidate();
+    this.render();
+    if (focus) {
+      if (this.activeCell) this.focusActiveCell(true);
+      else this.header.querySelector(`[data-select-column="${index}"]`)?.focus({ preventScroll: true });
+    }
+    const header = this.header.querySelector(`[data-column-header="${index}"]`);
+    header?.classList.remove('db-grid-column-located');
+    if (header) { void header.offsetWidth; header.classList.add('db-grid-column-located'); }
+    this.announce(`已定位 ${columnName(this.columns[index])} · 第 ${index + 1} 列`);
+    this.updateFooter();
+    return true;
   }
 
   destroy() {
@@ -904,6 +967,7 @@ export class ResultGrid {
   }
 
   startCellEdit(cell, { replaceValue, isNull } = {}) {
+    if (this.savingResults?.has(this.rows)) return false;
     const payload = this.cellPayload(cell);
     if (!payload) return false;
     const existing = this.cellEditSession(payload.rowIndex, payload.columnIndex);
@@ -1020,7 +1084,7 @@ export class ResultGrid {
     if (!session) { this.updateFooter(); return; }
     if (this.editorInput) {
       // readOnly retains focus and the selection while a write is pending.
-      this.editorInput.readOnly = session.pending;
+      this.editorInput.readOnly = session.pending || Boolean(this.savingResults?.has(session.rows));
       this.editorInput.placeholder = session.isNull ? 'NULL' : '空字符串';
       this.editorInput.classList.toggle('db-grid-edit-null', session.isNull);
       this.editorInput.setAttribute('aria-busy', String(session.pending));
@@ -1240,8 +1304,55 @@ export class ResultGrid {
     }
   }
 
+  async commitAllCellEdits() {
+    if (this.editorComposing || this.savingResults?.has(this.rows)) return false;
+    const rows = this.rows;
+    const sessions = [...(this.editSessions?.get(rows)?.values() || [])];
+    if (sessions.some(session => session.pending)) return false;
+    const dirty = sessions.filter(session => this.isCellEditDirty(session));
+    if (!dirty.length || (!this.onCommitCells && !this.onCommitCell)) return false;
+    const payloads = dirty.map(session => ({ ...session.payload, newValue: session.draftValue, isNull: session.isNull }));
+    this.savingResults ||= new WeakSet();
+    this.savingResults.add(rows);
+    for (const session of dirty) { session.pending = true; session.error = ''; }
+    this.updateCellEditor();
+    let outcomes;
+    try {
+      outcomes = this.onCommitCells ? await this.onCommitCells(payloads) : await this.commitCellEditsSequentially(payloads);
+    } catch (error) {
+      outcomes = dirty.map(() => ({ saved: false, error: error instanceof Error ? error.message : String(error) }));
+    }
+    this.savingResults.delete(rows);
+    for (const [index, session] of dirty.entries()) {
+      session.pending = false;
+      if (outcomes?.[index]?.saved) {
+        this.removeCellEditSession(session);
+        if (this.editSession === session) { this.unmountCellEditor(); this.editSession = null; }
+      } else session.error = outcomes?.[index]?.error || '未能保存，修改已保留';
+    }
+    if (this.rows === rows) {
+      this.invalidate(); this.render();
+    }
+    this.updateCellEditor(); this.updateFooter();
+    return outcomes?.length === dirty.length && outcomes.every(outcome => outcome.saved);
+  }
+
+  async commitCellEditsSequentially(payloads) {
+    const outcomes = [];
+    for (const payload of payloads) {
+      try {
+        if (!await this.onCommitCell(payload)) throw new Error('未能保存，修改已保留');
+        outcomes.push({ saved: true });
+      } catch (error) {
+        while (outcomes.length < payloads.length) outcomes.push({ saved: false, error: error instanceof Error ? error.message : String(error) });
+        break;
+      }
+    }
+    return outcomes;
+  }
+
   cancelCellEdit({ focus = true } = {}) {
-    if (!this.editSession || this.editSession.pending) return;
+    if (!this.editSession || this.editSession.pending || this.savingResults?.has(this.editSession.rows)) return;
     this.removeCellEditSession(this.editSession);
     this.unmountCellEditor();
     this.editSession = null;
@@ -1268,6 +1379,7 @@ export class ResultGrid {
   }
 
   discardCellEdit(rows = this.rows) {
+    if (this.savingResults?.has(rows)) return false;
     const sessions = this.editSessions?.get(rows);
     if (!sessions) return true;
     if ([...sessions.values()].some((session) => session.pending)) return false;
@@ -1410,12 +1522,15 @@ export class ResultGrid {
     this.footer.hidden = this.columns.length === 0;
     const session = this.editSession;
     const drafts = this.getCellEditDrafts().filter((draft) => draft.pending || draft.dirty);
+    this.onDraftChange?.({ rows: this.rows, dirtyCount: drafts.filter(draft => draft.dirty).length, pending: drafts.some(draft => draft.pending) });
     const unsaved = drafts.length ? `未保存 ${drafts.length} 格` : '';
-    this.footerHint.textContent = session ? 'Enter 保存 · Shift Enter 换行 · Esc 取消 · Tab 下一格 · 右键详情' :  '点击列名选列 · 输入文字编辑 · 右键详情';
-    this.footerActions.hidden = !session;
-    this.editSave.disabled = this.editCancel.disabled = Boolean(session?.pending);
-    this.editSave.textContent = session?.pending ? '保存中…' : '保存当前';
-    this.editCancel.textContent = '取消当前';
+    this.footerHint.textContent = session ? 'Enter 保存当前格 · Esc 取消当前格 · ⌘/Ctrl S 保存修改' : '点击列名选列 · 输入文字编辑 · 右键详情';
+    this.footerActions.hidden = Boolean(this.externalEditActions);
+    const dirty = drafts.filter(draft => draft.dirty);
+    const pending = drafts.some(draft => draft.pending);
+    this.editCancel.disabled = !dirty.length || pending;
+    this.editSave.disabled = !dirty.length || pending || !this.getCellEditState?.(dirty[0])?.editable;
+    this.editSave.title = `保存当前表的修改${dirty.length ? `（${dirty.length} 格）` : ''} · ⌘/Ctrl+S`;
     this.footerStatus.classList.toggle('db-grid-footer-error', Boolean(session?.error));
     if (session) {
       const position = this.visibleOrder.indexOf(session.payload.rowIndex);

@@ -55,8 +55,8 @@ test('read-only, unloaded, stale, busy and unsupported results cannot edit', () 
   assert.equal(getCellEditCapability(tableTab(), { ...nameCell, rowIndex: -1 }).editable, false);
 });
 
-test('primary keys, generated fields, unknown columns and incomplete primary keys cannot edit', () => {
-  assert.equal(getCellEditCapability(tableTab(), { column: 'id', columnIndex: 1, rowIndex: 0 }).editable, false);
+test('primary key values can edit but generated fields and incomplete primary keys cannot', () => {
+  assert.equal(getCellEditCapability(tableTab(), { column: 'id', columnIndex: 1, rowIndex: 0 }).editable, true);
   const mutations = [
     tab => { tab.browse.columns[1].identity = true; },
     tab => { tab.browse.columns[1].generated = true; },
@@ -125,7 +125,7 @@ test('MySQL SQL uses UTF-8 hex literals independent of string escape mode', () =
 
 test('SQL update refuses missing, NULL, duplicate, unsafe or ambiguous primary keys and targets', () => {
   for (const invalid of [
-    { schema: '' }, { name: 'bad\0name' }, { column: '' }, { column: 'absent' }, { column: 'id' },
+    { schema: '' }, { name: 'bad\0name' }, { column: '' }, { column: 'absent' }, { column: 'id', value: null },
     { primaryKeys: [] }, { primaryKeys: ['id', 'id'] }, { primaryKeys: ['missing'] },
     { row: ['Alice', null] }, { row: ['Alice', undefined] }, { row: ['Alice', {}] },
     { row: ['Alice', Number.MAX_SAFE_INTEGER + 1] }, { row: ['Alice', NaN] },
@@ -133,6 +133,21 @@ test('SQL update refuses missing, NULL, duplicate, unsafe or ambiguous primary k
     { columns: ['name', 'name', 'id'], row: ['Alice', 'Bob', '1'] },
     { row: ['Alice'] }, { value: undefined }, { value: 3 }, { driver: 'redis' },
   ]) assert.throws(() => update(invalid), JSON.stringify(invalid));
+});
+
+test('primary key values use the captured original key for WHERE, including composite keys', () => {
+  assert.equal(update({ column: 'id', value: '9007199254740995' }), 'UPDATE "public"."accounts" SET "id" = E\'9007199254740995\' WHERE "id" IS NOT DISTINCT FROM E\'9007199254740993\';');
+  assert.equal(update({ driver: 'mysql', column: 'tenant', primaryKeys: ['tenant', 'id'], columns: ['id', 'tenant', 'name'], row: ['001', 'old', 'Alice'], value: 'new' }),
+    "UPDATE `public`.`accounts` SET `tenant` = CONVERT(X'6e6577' USING utf8mb4) WHERE `tenant` <=> CONVERT(X'6f6c64' USING utf8mb4) AND `id` <=> CONVERT(X'303031' USING utf8mb4);");
+  const tab = tableTab(), cell = { column: 'id', columnIndex: 1, rowIndex: 0 };
+  tab.browse.columns[0].identity = true;
+  assert.equal(getCellEditCapability(tab, cell, 'mysql').editable, true);
+  tab.browse.columns[0].identityGeneration = 'byDefault';
+  assert.equal(getCellEditCapability(tab, cell).editable, true);
+  tab.browse.columns[0].identityGeneration = 'always';
+  assert.equal(getCellEditCapability(tab, cell).editable, false);
+  tab.browse.columns[0].identity = false; tab.browse.columns[0].nullable = true;
+  assert.equal(getCellEditCapability(tab, cell).allowNull, false);
 });
 
 test('draft validation preserves SQL NULL, empty text and raw JSON precision', () => {

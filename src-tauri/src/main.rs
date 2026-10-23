@@ -16,7 +16,9 @@ use tokio::time::timeout;
 use tokio_postgres::{CancelToken, Client, NoTls};
 
 mod catalog;
+mod clipboard;
 mod mysql;
+mod mysql_sql;
 mod query;
 mod query_context;
 #[path = "redis.rs"]
@@ -184,6 +186,7 @@ struct BackendState {
     mysql_connections: Mutex<std::collections::HashMap<String, Arc<mysql_async::Pool>>>,
     mysql_transactions:
         Mutex<std::collections::HashMap<String, Arc<tokio::sync::Mutex<mysql_async::Conn>>>>,
+    mysql_operation_gates: Mutex<std::collections::HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     queries: Mutex<std::collections::HashMap<String, ActiveQuery>>,
     /// Passwords are held only for the lifetime of this process. This avoids
     /// prompting macOS Keychain again for every schema refresh and query.
@@ -434,6 +437,12 @@ async fn mysql_pool_for_database(
     Ok(pool)
 }
 
+async fn mysql_operation_guard(state: &BackendState, key: &str) -> Result<tokio::sync::OwnedMutexGuard<()>, String> {
+    let gate = state.mysql_operation_gates.lock().map_err(|error| state_error("读取 MySQL 操作锁失败", error))?
+        .entry(key.to_string()).or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))).clone();
+    Ok(gate.lock_owned().await)
+}
+
 async fn mysql_transaction_client(
     app: &AppHandle,
     state: &BackendState,
@@ -455,13 +464,8 @@ async fn mysql_transaction_client(
         return Ok((key, client));
     }
     let pool = mysql_pool_for_database(app, state, connection_id, Some(selected)).await?;
-    let mut conn = pool
-        .get_conn()
-        .await
-        .map_err(|error| format!("获取 MySQL 事务连接失败：{error}"))?;
-    conn.query_drop("START TRANSACTION")
-        .await
-        .map_err(|error| format!("开启 MySQL 事务失败：{error}"))?;
+    let mut conn = timeout(QUERY_TIMEOUT, pool.get_conn()).await.map_err(|_| timeout_error("获取 MySQL 事务连接"))?.map_err(|error| format!("获取 MySQL 事务连接失败：{error}"))?;
+    timeout(QUERY_TIMEOUT, conn.query_drop("START TRANSACTION")).await.map_err(|_| timeout_error("开启 MySQL 事务"))?.map_err(|error| format!("开启 MySQL 事务失败：{error}"))?;
     let client = Arc::new(tokio::sync::Mutex::new(conn));
     state
         .mysql_transactions
@@ -676,6 +680,28 @@ async fn redis_console_client_for(
         .map_err(|error| state_error("保存 Redis 控制台状态失败", error))?
         .insert(key, client.clone());
     Ok(client)
+}
+
+#[command]
+async fn write_clipboard_text(text: String) -> Result<(), String> {
+    clipboard::write_text(text).await
+}
+
+#[command]
+async fn save_binary_file(file_name: String, contents: Vec<u8>) -> Result<bool, String> {
+    let name = file_name.rsplit(['/', '\\']).next().unwrap_or("export.xlsx").to_string();
+    if !name.to_ascii_lowercase().ends_with(".xlsx") || contents.len() > 32 * 1024 * 1024 {
+        return Err("仅支持不超过 32 MiB 的 XLSX 文件".into());
+    }
+    if !contents.starts_with(b"PK") { return Err("XLSX 文件内容无效".into()); }
+    tokio::task::spawn_blocking(move || {
+        let Some(path) = rfd::FileDialog::new().set_file_name(name).add_filter("Excel 工作簿", &["xlsx"]).save_file() else { return Ok(false); };
+        if !path.extension().is_some_and(|extension| extension.to_string_lossy().eq_ignore_ascii_case("xlsx")) {
+            return Err("请使用 .xlsx 扩展名".into());
+        }
+        std::fs::write(path, contents).map_err(|error| format!("写入 XLSX 失败：{error}"))?;
+        Ok(true)
+    }).await.map_err(|error| format!("打开保存对话框失败：{error}"))?
 }
 
 #[command]
@@ -1426,7 +1452,7 @@ async fn list_schemas(
     if profile.driver.eq_ignore_ascii_case("mysql") {
         let pool =
             mysql_pool_for_database(&app, &state, &connection_id, database.as_deref()).await?;
-        return mysql::list_schemas(&pool).await;
+        return timeout(QUERY_TIMEOUT, mysql::list_schemas(&pool)).await.map_err(|_| timeout_error("读取 MySQL 数据库"))?;
     }
     let client =
         catalog_client_for_database(&app, &state, &connection_id, database.as_deref()).await?;
@@ -1442,7 +1468,7 @@ async fn list_databases(
     let (profile, _) = find_profile(&app, &state, &connection_id)?;
     if profile.driver.eq_ignore_ascii_case("mysql") {
         let pool = mysql_pool_for_database(&app, &state, &connection_id, None).await?;
-        return mysql::list_databases(&pool).await;
+        return timeout(QUERY_TIMEOUT, mysql::list_databases(&pool)).await.map_err(|_| timeout_error("读取 MySQL 数据库列表"))?;
     }
     let client = catalog_client_for_database(&app, &state, &connection_id, None).await?;
     catalog::list_databases(&client).await
@@ -1460,7 +1486,7 @@ async fn get_schema_objects(
     if profile.driver.eq_ignore_ascii_case("mysql") {
         let pool =
             mysql_pool_for_database(&app, &state, &connection_id, database.as_deref()).await?;
-        return mysql::load_schema_objects(&pool, schema_name.as_deref()).await;
+        return timeout(QUERY_TIMEOUT, mysql::load_schema_objects(&pool, schema_name.as_deref())).await.map_err(|_| timeout_error("读取 MySQL 对象目录"))?;
     }
     let client =
         catalog_client_for_database(&app, &state, &connection_id, database.as_deref()).await?;
@@ -1480,7 +1506,7 @@ async fn get_object_details(
     if profile.driver.eq_ignore_ascii_case("mysql") {
         let pool =
             mysql_pool_for_database(&app, &state, &connection_id, database.as_deref()).await?;
-        return mysql::load_object_details(&pool, &object_id, kind.as_deref()).await;
+        return timeout(QUERY_TIMEOUT, mysql::load_object_details(&pool, &object_id, kind.as_deref())).await.map_err(|_| timeout_error("读取 MySQL 对象详情"))?;
     }
     let client =
         catalog_client_for_database(&app, &state, &connection_id, database.as_deref()).await?;
@@ -1510,6 +1536,7 @@ async fn begin_transaction(
     let (profile, _) = find_profile(&app, &state, &connection_id)?;
     if profile.driver.eq_ignore_ascii_case("mysql") {
         let key = transaction_key(&connection_id, database.as_deref(), &profile.database);
+        let _operation = mysql_operation_guard(&state, &key).await?;
         if state
             .mysql_transactions
             .lock()
@@ -1544,13 +1571,14 @@ async fn commit_transaction(
     let (profile, _) = find_profile(&app, &state, &connection_id)?;
     if profile.driver.eq_ignore_ascii_case("mysql") {
         let key = transaction_key(&connection_id, database.as_deref(), &profile.database);
+        let _operation = mysql_operation_guard(&state, &key).await?;
         let client = state
             .mysql_transactions
             .lock()
             .map_err(|error| state_error("读取 MySQL 事务状态失败", error))?
             .remove(&key)
-            .ok_or_else(|| "当前没有未提交事务".to_string())?;
-        let result = client.lock().await.query_drop("COMMIT").await;
+            .ok_or_else(|| "[TX_MISSING] 当前没有未提交事务".to_string())?;
+        let result = timeout(QUERY_TIMEOUT, client.lock().await.query_drop("COMMIT")).await.map_err(|_| "提交 MySQL 事务超时；结果不确定，请核对后重试 COMMIT".to_string()).and_then(|result| result.map_err(|error| error.to_string()));
         if let Err(error) = result {
             state
                 .mysql_transactions
@@ -1567,7 +1595,7 @@ async fn commit_transaction(
         .lock()
         .map_err(|error| state_error("读取事务状态失败", error))?
         .remove(&key)
-        .ok_or_else(|| "当前没有未提交事务".to_string())?;
+        .ok_or_else(|| "[TX_MISSING] 当前没有未提交事务".to_string())?;
     let commit_result = {
         let guard = client.lock().await;
         guard.batch_execute("COMMIT").await
@@ -1593,18 +1621,16 @@ async fn rollback_transaction(
     let (profile, _) = find_profile(&app, &state, &connection_id)?;
     if profile.driver.eq_ignore_ascii_case("mysql") {
         let key = transaction_key(&connection_id, database.as_deref(), &profile.database);
+        let _operation = mysql_operation_guard(&state, &key).await?;
         let client = state
             .mysql_transactions
             .lock()
             .map_err(|error| state_error("读取 MySQL 事务状态失败", error))?
             .remove(&key)
-            .ok_or_else(|| "当前没有未提交事务".to_string())?;
-        client
-            .lock()
-            .await
-            .query_drop("ROLLBACK")
-            .await
-            .map_err(|error| format!("回滚 MySQL 事务失败：{error}"))?;
+            .ok_or_else(|| "[TX_MISSING] 当前没有未提交事务".to_string())?;
+        timeout(QUERY_TIMEOUT, client.lock().await.query_drop("ROLLBACK")).await
+            .map_err(|_| "[TX_MISSING] 回滚 MySQL 事务超时，请核对目标库状态".to_string())?
+            .map_err(|error| format!("[TX_MISSING] 回滚 MySQL 事务失败：{error}"))?;
         return Ok(true);
     }
     let key = transaction_key(&connection_id, database.as_deref(), &profile.database);
@@ -1613,7 +1639,7 @@ async fn rollback_transaction(
         .lock()
         .map_err(|error| state_error("读取事务状态失败", error))?
         .remove(&key)
-        .ok_or_else(|| "当前没有未提交事务".to_string())?;
+        .ok_or_else(|| "[TX_MISSING] 当前没有未提交事务".to_string())?;
     client
         .lock()
         .await
@@ -1685,6 +1711,7 @@ async fn execute_mutation(
             request.database.as_deref(),
             &profile.database,
         );
+        let _operation = mysql_operation_guard(&state, &key).await?;
         let transaction = state
             .mysql_transactions
             .lock()
@@ -1694,7 +1721,10 @@ async fn execute_mutation(
         if let Some(transaction) = transaction {
             let result = {
                 let mut client = transaction.lock().await;
-                mysql::execute_write_conn(&mut client, &request.sql, &query_id, Instant::now())
+                // Reject parse/implicit-commit hazards without closing a valid
+                // transaction. Use this connection's real SQL quoting mode.
+                mysql::validate_write(&mut client, &request.sql, true).await?;
+                mysql::execute_in_transaction(&mut client, &request.sql, &query_id, Instant::now())
                     .await
             };
             if result.is_err() {
@@ -1708,7 +1738,7 @@ async fn execute_mutation(
                     .map_err(|_| ())
                     .map(|mut transactions| transactions.remove(&key));
             }
-            return result;
+            return result.map_err(|error| format!("[TX_ROLLED_BACK] MySQL 事务已回滚：{error}"));
         }
         let pool = mysql_pool_for_database(
             &app,
@@ -1820,6 +1850,7 @@ async fn execute_query(
 
 #[command]
 async fn cancel_query(state: State<'_, BackendState>, query_id: String) -> Result<bool, String> {
+    if let Some(cancelled) = mysql::cancel_query(&query_id).await? { return Ok(cancelled); }
     let active = state
         .queries
         .lock()
@@ -1842,6 +1873,8 @@ pub fn run() {
     tauri::Builder::default()
         .manage(BackendState::default())
         .invoke_handler(tauri::generate_handler![
+            write_clipboard_text,
+            save_binary_file,
             save_text_file,
             choose_redis_ca_file,
             list_connections,
@@ -1911,3 +1944,5 @@ mod tests {
 
 #[cfg(test)]
 mod integration_tests;
+#[cfg(test)]
+mod mysql_audit_tests;

@@ -1,0 +1,32 @@
+/* Type colors supplement explicit names. Opaque theme-based surfaces keep
+   selected/hovered rows from changing the badge's text contrast. */
+.redis-key-icon {
+  --redis-type-color: var(--app-muted);
+  display: inline-flex; align-items: center; justify-content: center;
+  flex: none; width: 46px; height: 19px; border-radius: 5px;
+  font: 10px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+  letter-spacing: -.2px; white-space: nowrap;
+  color: var(--redis-type-color);
+  background: color-mix(in srgb, var(--redis-type-color) 12%, var(--app-panel));
+}
+.redis-key-icon--string { --redis-type-color: #9ebcff; }
+.redis-key-icon--hash { --redis-type-color: #c6abff; }
+.redis-key-icon--list { --redis-type-color: #ff9ca7; }
+.redis-key-icon--set { --redis-type-color: #6ed9b1; }
+.redis-key-icon--zset { --redis-type-color: #ffc084; }
+.redis-key-icon--stream { --redis-type-color: #7bd9ed; }
+body[data-theme="light"] .redis-key-icon--string { --redis-type-color: #2455a4; }
+body[data-theme="light"] .redis-key-icon--hash { --redis-type-color: #7340b4; }
+body[data-theme="light"] .redis-key-icon--list { --redis-type-color: #ad3145; }
+body[data-theme="light"] .redis-key-icon--set { --redis-type-color: #146c50; }
+body[data-theme="light"] .redis-key-icon--zset { --redis-type-color: #924800; }
+body[data-theme="light"] .redis-key-icon--stream { --redis-type-color: #12667c; }
+body #objectTree .redis-key-kind { width: 46px; flex-basis: 46px; }
+body .redis-tab-glyph { width: auto; flex-basis: auto; background: transparent; padding: 0; }
+body .redis-tab-glyph > .redis-key-icon { width: 43px; height: 17px; font-size: 9px; }
+body .redis-type-picker .driver-picker-icon,
+body .redis-type-option .driver-picker-icon { width: 46px; flex: none; }
+.object-quick-open-kind > .redis-key-icon { margin-inline: auto; }
+@media (forced-colors: active) {
+  body[data-theme] .redis-key-icon { color: CanvasText; background: Canvas; border: 1px solid CanvasText; }
+}

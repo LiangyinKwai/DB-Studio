@@ -31,7 +31,7 @@ export function filterCommands(commands, query = "") {
 let paletteSequence = 0;
 
 /** Creates a local dialog. The caller owns global shortcuts and available actions. */
-export function createCommandPalette({ getCommands, onError = console.error }) {
+export function createCommandPalette({ getCommands, onError = console.error, title = '快速操作', subtitle = '搜索命令、连接与查询', placeholder = '输入命令或名称…', emptyTitle = '未找到匹配的操作', emptyDescription = '试试更短的关键词，或搜索连接和查询名称。', actionLabel = '执行' }) {
   const prefix = `command-palette-${++paletteSequence}`;
   const dialog = document.createElement("dialog");
   dialog.className = "command-palette";
@@ -61,6 +61,13 @@ export function createCommandPalette({ getCommands, onError = console.error }) {
   const results = dialog.querySelector(".command-palette-results");
   const empty = dialog.querySelector(".command-palette-empty");
   const count = dialog.querySelector(".command-palette-count");
+  dialog.querySelector('h2').textContent = title;
+  dialog.querySelector('.command-palette-heading > span').textContent = subtitle;
+  input.placeholder = placeholder;
+  input.setAttribute('aria-label', `搜索${title}`);
+  empty.querySelector('strong').textContent = emptyTitle;
+  empty.querySelector('span').textContent = emptyDescription;
+  dialog.querySelector('.command-palette-footer > span:first-child').lastChild.textContent = ` ${actionLabel}`;
   let commands = [];
   let visible = [];
   let selectedIndex = -1;

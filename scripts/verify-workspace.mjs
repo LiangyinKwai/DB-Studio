@@ -388,7 +388,7 @@ await check("browse page 1 has 500 rows, next sends OFFSET 500, and last page di
   expect(!(await page.locator("#nextPage").isEnabled()), "next page remains enabled on final page");
 });
 
-await check("PostgreSQL cells edit only in write mode and keep the primary key read-only", async () => {
+await check("PostgreSQL cells and primary key values edit only in write mode", async () => {
   // The browse check above leaves the table on its final page. Return to the
   // first page so the fixture's first row gives us a stable id/status pair.
   if (await page.locator("#previousPage").isEnabled()) await page.locator("#previousPage").click();
@@ -422,8 +422,8 @@ await check("PostgreSQL cells edit only in write mode and keep the primary key r
     const primaryKeyCell = page.locator("#resultGrid .db-grid-row[data-row-index='0'] [data-column-index='0']");
     await inspectCell(primaryKeyCell);
     await waitFor(() => page.locator("#cellModal").isVisible(), "PostgreSQL primary-key cell modal");
-    expect(!(await page.locator("#cellValue").isEditable()), "primary-key cell became editable");
-    expect(!(await page.locator("#saveCell").isVisible()), "primary-key cell exposed a save action");
+    expect(await page.locator("#cellValue").isEditable(), "primary-key value is not editable");
+    expect(await page.locator("#saveCell").isVisible(), "primary-key value has no save action");
     await closeCell();
 
     await page.locator("#modeBadge").click();
@@ -510,6 +510,7 @@ await check("result filter changes the visible count and exported data per tab",
   await page.locator("#resultFilter").fill("needle");
   await waitFor(() => page.locator("#resultCount").innerText().then((value) => value.trim() === "2/4"), "filtered result count");
   const before = calls("save_text_file").length;
+  await page.locator("#resultMore").click();
   await page.locator("#exportResults").click();
   await waitFor(() => calls("save_text_file").length > before, "filtered export");
   const contents = calls("save_text_file").at(-1).args.contents;

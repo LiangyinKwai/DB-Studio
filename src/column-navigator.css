@@ -1,0 +1,35 @@
+body dialog.column-navigator {
+  position: fixed;
+  inset: auto;
+  width: min(380px, calc(100vw - 24px));
+  max-height: calc(100dvh - 24px);
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  border: 1px solid var(--app-border);
+  border-radius: 10px;
+  color: var(--app-text);
+  background: var(--app-surface);
+  box-shadow: 0 16px 48px #0005;
+}
+body dialog.column-navigator[open] { display: flex; flex-direction: column; }
+body dialog.column-navigator::backdrop { background: #080c1420; }
+.column-navigator-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 13px 15px 4px; flex: none; }
+.column-navigator-heading h2 { margin: 0; color: var(--app-text); font-size: 12px; font-weight: 600; }
+body .column-navigator-close { padding: 3px 5px; min-height: 24px; border: 1px solid var(--app-border); border-radius: 4px; color: var(--app-muted); background: transparent; font-size: 10px; }
+body .column-navigator-search { width: calc(100% - 24px); height: 34px; min-height: 34px; margin: 8px 12px 10px; padding: 0 10px; flex: none; border: 1px solid var(--app-border); border-radius: 6px; color: var(--app-text); background: var(--app-panel); font-size: 12px; }
+body .column-navigator-search:focus { border-color: var(--accent-focus); outline: 2px solid color-mix(in srgb, var(--accent-focus) 18%, transparent); outline-offset: 0; }
+.column-navigator-list { min-height: 0; max-height: min(340px, calc(100dvh - 170px)); overflow: auto; overscroll-behavior: contain; padding: 0 6px 6px; scrollbar-width: thin; }
+body .column-navigator-option { display: flex; align-items: center; gap: 10px; width: 100%; min-height: 39px; padding: 7px 9px; border: 1px solid transparent; border-radius: 5px; text-align: left; color: var(--app-text); background: transparent; }
+body .column-navigator-option:hover { background: var(--hover-bg); }
+body .column-navigator-option[aria-selected="true"] { border-color: color-mix(in srgb, var(--accent-focus) 35%, transparent); background: color-mix(in srgb, var(--accent) 14%, var(--app-surface)); }
+.column-navigator-number { width: 25px; flex: none; text-align: right; color: var(--app-muted); font-size: 10px; font-variant-numeric: tabular-nums; }
+.column-navigator-copy { display: grid; gap: 3px; min-width: 0; flex: 1; }
+.column-navigator-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
+.column-navigator-type { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--app-muted); font-size: 10px; }
+.column-navigator-state { flex: none; color: var(--app-muted); font-size: 10px; }
+.column-navigator-footer { display: flex; justify-content: space-between; gap: 10px; padding: 9px 14px; flex: none; border-top: 1px solid var(--app-border); color: var(--app-muted); background: var(--app-panel); font-size: 10px; }
+.column-navigator-empty { margin: 0; padding: 30px 16px 38px; text-align: center; color: var(--app-muted); font-size: 12px; }
+.db-grid-column-located { animation: db-column-locate 550ms ease-out; }
+@keyframes db-column-locate { from { background: color-mix(in srgb, var(--accent-focus) 28%, var(--app-panel)); } to { background: var(--app-panel); } }
+@media (prefers-reduced-motion: reduce) { .db-grid-column-located { animation: none; outline: 2px solid var(--accent-focus); outline-offset: -2px; } }

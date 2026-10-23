@@ -196,10 +196,121 @@ try {
     await page.locator(`.tab-select[data-tab-id="${original}"]`).click();
     assert.equal(await text(), 'sel', 'previous tab was not reconciled before switching');
   });
+  await reset('SELECT 1;');
+  await page.locator('#runQuery').click();
+  await page.locator('#resultFilter').waitFor();
+  async function nativeCommit(input, value = 'se l', key = 'CapsLock') {
+    await input.focus();
+    await preedit(value);
+    if (key) await page.keyboard.press(key);
+    await cdp.send('Input.insertText', { text: value });
+    await page.waitForTimeout(100);
+  }
+  await check('native result and connection filters share the SQL switch repair', async () => {
+    for (const selector of ['#resultFilter', '#connectionSearch']) {
+      const input = page.locator(selector);
+      for (const key of ['CapsLock', 'Shift', 'Control+Space']) {
+        await input.fill(''); await nativeCommit(input, 'se l', key);
+        assert.equal(await input.inputValue(), 'sel', `${selector}/${key}`);
+      }
+      await input.fill('');
+    }
+  });
+  await check('native selected spans preserve surrounding text and following typing', async () => {
+    const input = page.locator('#resultFilter');
+    await input.fill('before old after');
+    await input.evaluate(control => control.setSelectionRange(7, 10));
+    await nativeCommit(input, 'use r');
+    assert.equal(await input.inputValue(), 'before user after');
+    await input.fill(''); await input.focus();
+    await preedit(); await page.keyboard.press('CapsLock');
+    await cdp.send('Input.insertText', { text: 'se l' });
+    await page.keyboard.insertText('ect ');
+    await page.waitForTimeout(100);
+    assert.equal(await input.inputValue(), 'select ');
+    await input.fill('');
+  });
+  await check('native controls reconcile WebKit ordering and switch keys after compositionend', async () => {
+    const input = page.locator('#resultFilter');
+    await input.fill('prefix ');
+    await input.evaluate(control => {
+      control.focus(); control.setSelectionRange(control.value.length, control.value.length);
+      control.dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true }));
+      control.dispatchEvent(new CompositionEvent('compositionend', { data: 'se l', bubbles: true }));
+      document.execCommand('insertText', false, 'se l');
+      control.dispatchEvent(new KeyboardEvent('keydown', { key: 'CapsLock', bubbles: true }));
+    });
+    await page.waitForTimeout(100);
+    assert.equal(await input.inputValue(), 'prefix sel');
+    await input.fill('');
+  });
+  await check('native Chinese, explicit spaces and pasted content remain unchanged', async () => {
+    const input = page.locator('#resultFilter');
+    await input.fill(''); await nativeCommit(input, '中文', null);
+    assert.equal(await input.inputValue(), '中文');
+    await input.fill(''); await input.focus();
+    await page.keyboard.type('hello  world');
+    assert.equal(await input.inputValue(), 'hello  world');
+    await input.fill(''); await page.keyboard.insertText('se l');
+    await page.waitForTimeout(100);
+    assert.equal(await input.inputValue(), 'se l');
+    await input.fill(''); await input.focus();
+    await preedit();
+    await input.evaluate(control => control.dispatchEvent(new KeyboardEvent('keydown', { key: ' ', code: 'Space', bubbles: true, isComposing: true })));
+    await page.keyboard.press('CapsLock');
+    await cdp.send('Input.insertText', { text: 'se l' });
+    await page.waitForTimeout(100);
+    assert.equal(await input.inputValue(), 'se l');
+    await input.fill('');
+  });
+  await check('dynamically created funnel inputs repair before applying their value', async () => {
+    await page.locator('[data-filter-column="0"]').click();
+    const input = page.locator('.db-grid-filter-panel input');
+    await nativeCommit(input, 'ac tive');
+    assert.equal(await input.inputValue(), 'active');
+    await input.fill(''); await input.focus();
+    await preedit('ac tive'); await page.keyboard.press('CapsLock');
+    await cdp.send('Input.insertText', { text: 'ac tive' });
+    await page.locator('.db-grid-filter-panel').getByRole('button', { name: '应用筛选', exact: true }).click();
+    assert.ok((await page.locator('.db-grid-filter-bar').innerText()).includes('active'));
+    assert.ok(!(await page.locator('.db-grid-filter-bar').innerText()).includes('ac tive'));
+    await page.locator('[data-remove-filter="all"]').click();
+  });
+  await check('dynamic textareas repair compositions while passwords and readonly fields stay untouched', async () => {
+    await page.evaluate(() => {
+      for (const kind of ['textarea', 'password', 'readonly']) {
+        const control = document.createElement(kind === 'password' ? 'input' : 'textarea');
+        control.dataset.nativeImeTest = kind;
+        if (kind === 'password') control.type = 'password';
+        if (kind === 'readonly') control.readOnly = true;
+        control.style.cssText = 'position:fixed;top:60px;left:10px;z-index:9999;width:200px;height:45px';
+        document.body.append(control);
+      }
+    });
+    const textarea = page.locator('[data-native-ime-test="textarea"]');
+    await nativeCommit(textarea, 'use r');
+    assert.equal(await textarea.inputValue(), 'user');
+    for (const kind of ['password', 'readonly']) {
+      const control = page.locator(`[data-native-ime-test="${kind}"]`);
+      await control.evaluate(control => {
+        control.focus(); control.dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true }));
+        control.dispatchEvent(new KeyboardEvent('keydown', { key: 'CapsLock', bubbles: true }));
+        control.value = 'se l';
+        control.dispatchEvent(new CompositionEvent('compositionend', { data: 'se l', bubbles: true }));
+      });
+      await page.waitForTimeout(100);
+      assert.equal(await control.inputValue(), 'se l', kind);
+    }
+    const revealed = page.locator('[data-native-ime-test="password"]');
+    await revealed.evaluate(control => { control.type = 'text'; control.value = ''; });
+    await nativeCommit(revealed, 'se l');
+    assert.equal(await revealed.inputValue(), 'se l', 'revealed passwords must stay unchanged');
+    await page.locator('[data-native-ime-test]').evaluateAll(controls => controls.forEach(control => control.remove()));
+  });
   await page.locator('[data-connection-id="redis-local"]').click();
   await page.locator('.redis-database[data-redis-db="0"] > summary').click({ button: 'right' });
   await page.locator('[data-redis-database-context-action="console"]').click();
-  editor = page.locator('#redisConsoleInput');
+  editor = page.locator('#redisCommandEditor .cm-content');
   await check('Redis console repairs segmented command and key commits with undo', async () => {
     await reset(); await preedit('ge t'); await commit('ge t');
     assert.equal(await text(), 'get');

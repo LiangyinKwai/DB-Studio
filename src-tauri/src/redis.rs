@@ -5,7 +5,7 @@ use serde_json::Value as JsonValue;
 use std::collections::BTreeMap;
 use std::time::Duration;
 use std::{fs, path::Path};
-use tokio::time::timeout;
+use tokio::time::{timeout, timeout_at, Instant};
 
 const REDIS_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_ITEMS: usize = 500;
@@ -25,6 +25,8 @@ pub struct RedisDatabaseInfo {
 pub struct RedisKeyPage {
     pub cursor: u64,
     pub keys: Vec<String>,
+    pub key_types: BTreeMap<String, String>,
+    pub key_count: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -238,6 +240,7 @@ pub async fn scan_keys(
     pattern: &str,
     count: usize,
 ) -> Result<RedisKeyPage, String> {
+    let deadline = Instant::now() + REDIS_TIMEOUT;
     let count = count.clamp(1, MAX_ITEMS);
     let mut command = redis::cmd("SCAN");
     command.arg(cursor).arg("COUNT").arg(count);
@@ -245,11 +248,38 @@ pub async fn scan_keys(
         command.arg("MATCH").arg(pattern);
     }
     let (cursor, keys): (u64, Vec<String>) =
-        timeout(REDIS_TIMEOUT, command.query_async(connection))
+        timeout_at(deadline, command.query_async(connection))
             .await
             .map_err(|_| "扫描 Redis key 超时（10 秒）".to_string())?
             .map_err(|error| redis_error("扫描 Redis key 失败", error))?;
-    Ok(RedisKeyPage { cursor, keys })
+    // DBSIZE is scoped to this same selected DB and independent of MATCH.
+    // Missing permission must not turn a successful scan into a failure.
+    let key_count = timeout_at(deadline, redis::cmd("DBSIZE").query_async::<u64>(connection))
+        .await.ok().and_then(Result::ok);
+    // SCAN's COUNT is a hint, so Redis may return more keys than requested.
+    // Preserve every key/cursor, but bound optional TYPE work to one batch.
+    // Use this same (already SELECTed) connection so equal names in different
+    // databases cannot pick up each other's type. Never fetch key values.
+    let typed_keys = keys.iter().take(MAX_ITEMS).collect::<Vec<_>>();
+    let mut key_types = BTreeMap::new();
+    if !typed_keys.is_empty() {
+        let mut pipeline = redis::pipe();
+        for key in &typed_keys {
+            pipeline.cmd("TYPE").arg(key);
+        }
+        // Type metadata is best effort: denied TYPE permission or a timeout
+        // must not discard a successful SCAN page. Share the original scan
+        // deadline instead of adding another 10 seconds of potential delay.
+        if let Ok(Ok(types)) = timeout_at(
+            deadline,
+            pipeline.query_async::<Vec<String>>(connection),
+        )
+        .await
+        {
+            key_types.extend(typed_keys.into_iter().cloned().zip(types));
+        }
+    }
+    Ok(RedisKeyPage { cursor, keys, key_types, key_count })
 }
 
 fn value_text(value: &Value) -> String {

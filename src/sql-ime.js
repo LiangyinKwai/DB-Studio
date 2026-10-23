@@ -1,20 +1,10 @@
 import { Transaction } from '@codemirror/state';
 import { syntaxTree, syntaxTreeAvailable } from '@codemirror/language';
 import { ViewPlugin } from '@codemirror/view';
+import { normalizeImeCommit } from './ime-commit.js';
+export { normalizeImeCommit } from './ime-commit.js';
 
-const splitLatin = /^[a-z]+(?:[ \u00a0\u3000]+[a-z]+)+$/i;
 const letters = /^[a-z]+$/i;
-
-/** Only an IME's segmented Latin commit may be repaired. Never normalize the
- * document, pasted SQL, string literals, quoted names or intentionally typed spaces. */
-export function normalizeImeCommit({ text, switched, typedSpace, protectedContext, rawKeys = '' }) {
-  if (protectedContext || typedSpace || !splitLatin.test(text) || text.length > 128) return text;
-  const compact = text.replace(/[ \u00a0\u3000]+/g, '');
-  // Some input methods consume the switch key before the WebView sees it.
-  // A complete physical-key trace is the alternative evidence, not a timeout.
-  if (!switched && (!letters.test(rawKeys) || rawKeys.toLowerCase() !== compact.toLowerCase())) return text;
-  return compact;
-}
 
 function protectedAt(state, position) {
   const guards = state.languageDataAt('imeProtectedContext', position);

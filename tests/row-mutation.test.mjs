@@ -2,11 +2,12 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import vm from "node:vm";
-import { cellColumnName, sqlValueLiteral } from "../src/cell-edit.js";
+import { cellColumnName, sqlValueLiteral, sqlTypedValueLiteral } from "../src/cell-edit.js";
 import { formatCellValue } from "../src/result-grid.js";
 
 const mainSource = readFileSync(new URL("../src/main.js", import.meta.url), "utf8");
 const mutationSource = mainSource.slice(mainSource.indexOf("function sqlLiteral(value"), mainSource.indexOf("function resultData() {"));
+const transactionSource = mainSource.slice(mainSource.indexOf("function transactionDidRollback("), mainSource.indexOf("function cellWritePending("));
 
 function fixture(type, { driver = "mysql", row = ["001", "001", { ok: true }, true], values = {} } = {}) {
   const columns = ["id", "code", "payload", "active"];
@@ -19,6 +20,7 @@ function fixture(type, { driver = "mysql", row = ["001", "001", { ok: true }, tr
     dataset: { mutationColumn: name }, value: Object.hasOwn(values, name) ? values[name] : row[index] == null ? "" : formatCellValue(row[index]),
   }));
   const state = {
+    tabs: [tab],
     mutation: { type, tab, columns, primaryKeys: ["id"], selectedRows: type === "insert" ? [] : [row] },
     activeConnectionId: "db", transactionKeys: new Set(["db/app"]),
   };
@@ -31,9 +33,9 @@ function fixture(type, { driver = "mysql", row = ["001", "001", { ok: true }, tr
     mutationModal: { showModal() {}, close() {} },
   };
   const sandbox = {
-    refs, state, sqlValueLiteral, cellColumnName, cellText: formatCellValue,
+    refs, state, sqlValueLiteral, sqlTypedValueLiteral, cellColumnName, cellText: formatCellValue,
     activeTab: () => tab, driverForTab: () => driver, cellWritePending: () => false,
-    resultGrid: { getSelectedRows: () => [row] },
+    resultGrid: { getSelectedRows: () => [tab.result.rows[0]], getCellEditDraft: () => null },
     quoteIdentForDriver: (name, selectedDriver) => {
       const quote = selectedDriver === "mysql" ? "`" : '"';
       return quote + name.replaceAll(quote, quote + quote) + quote;
@@ -46,7 +48,7 @@ function fixture(type, { driver = "mysql", row = ["001", "001", { ok: true }, tr
     errorText: error => error.message, escapeHtml: value => String(value).replaceAll('"', "&quot;"),
   };
   const runtime = vm.createContext(sandbox);
-  vm.runInContext(mutationSource, runtime, { filename: "main-row-mutation.js" });
+  vm.runInContext(transactionSource + mutationSource, runtime, { filename: "main-row-mutation.js" });
   return { tab, state, refs, calls, confirmations, runtime, submit: () => runtime.applyMutation() };
 }
 
@@ -79,6 +81,34 @@ test("real PostgreSQL delete handler preserves actual numeric and text key types
     const f = fixture("delete", { driver: "postgres", row: [key, "001", { ok: true }, true] });
     await f.submit();
     assert.equal(f.calls[0].args.request.sql, `DELETE FROM "public"."items"\nWHERE ("id" IS NOT DISTINCT FROM ${sqlValueLiteral(key)});`);
+  }
+});
+
+test("MySQL row deletion locates BIT and binary primary keys without coercing them to text", async () => {
+  for (const [value, dataType, literal] of [['255', 'bit(8)', '255'], [{ $dbStudio: 'mysql-binary', hex: '00ff' }, 'varbinary(8)', "X'00ff'"]]) {
+    const f = fixture('delete', { row: [value, '001', {}, true] });
+    f.tab.browse.columns[0].dataType = dataType;
+    await f.submit();
+    assert.ok(f.calls[0].args.request.sql.includes('`id` <=> ' + literal));
+  }
+});
+
+test("MySQL row mutation synchronizes a confirmed rollback while retaining an unexecuted rejection", async () => {
+  for (const [message, retained] of [['[TX_ROLLED_BACK] conflict', false], ['current transaction retained; DDL blocked', true]]) {
+    const f = fixture('edit', { values: { code: 'changed' } });
+    f.tab.result.cellEditsInTransaction = true;
+    f.runtime.call = async () => { throw new Error(message); };
+    await f.submit();
+    assert.equal(f.state.transactionKeys.has('db/app'), retained);
+    assert.equal(Boolean(f.tab.result.transactionRolledBack), !retained);
+  }
+});
+
+test("row mutation refuses stale results, readonly state and nontransactional MySQL writes in a transaction", async () => {
+  for (const change of [f => { f.tab.mode = 'read'; }, f => { f.tab.result.schemaChanged = true; }, f => { f.tab.result.transactionRolledBack = true; }, f => { f.tab.browse.engine = 'MyISAM'; }, f => { f.state.mutation.result = {}; }]) {
+    const f = fixture('edit', { values: { code: 'changed' } }); change(f); await f.submit();
+    assert.equal(f.calls.length, 0); assert.equal(f.confirmations.length, 0);
+    assert.match(f.refs.mutationFeedback.textContent, /状态已改变|引擎不能保证回滚/);
   }
 });
 
@@ -130,12 +160,41 @@ test("row dialogs follow actual result column order and format JSON as editable 
   assert.ok(!f.refs.mutationFields.innerHTML.includes("[object Object]"));
 });
 
-test("insert dialogs allow manual primary keys while edit dialogs keep them locked", () => {
+test("insert and edit dialogs allow primary key values", () => {
   const f = fixture("insert", { driver: "postgres" });
   f.runtime.openMutation("insert");
   assert.match(f.refs.mutationFields.innerHTML, /data-mutation-column="id" value=""\/>/);
   f.runtime.openMutation("edit");
-  assert.match(f.refs.mutationFields.innerHTML, /data-mutation-column="id" value="001" disabled/);
+  assert.match(f.refs.mutationFields.innerHTML, /data-mutation-column="id" value="001"\/>/);
+});
+
+test('row edit updates a primary key using its old value and later delete uses its new value within the transaction', async () => {
+  const f = fixture('edit', { values: { id: '9007199254740995', code: 'changed' } });
+  f.tab.browse.columns[0] = { name: 'id', primaryKey: true, identity: true, dataType: 'bigint' };
+  await f.submit();
+  const sql = f.calls[0].args.request.sql;
+  assert.match(sql, /SET `id` = CONVERT\(X'39303037313939323534373430393935'/);
+  assert.match(sql, /WHERE `id` <=> CONVERT\(X'303031'/);
+  assert.equal(f.tab.result.rows[0][0], '9007199254740995');
+  assert.equal(f.tab.result.cellEditsInTransaction, true);
+  f.runtime.openMutation('delete'); await f.submit();
+  assert.match(f.calls[1].args.request.sql, /WHERE \(`id` <=> CONVERT\(X'39303037313939323534373430393935'/);
+});
+
+test('row edit can update both composite key components in one statement with the original predicate', async () => {
+  const f = fixture('edit', { driver: 'postgres', values: { id: '9007199254740995', code: 'tenant-new' } });
+  f.tab.browse.primaryKeys = f.state.mutation.primaryKeys = ['id', 'code'];
+  await f.submit();
+  assert.equal(f.calls[0].args.request.sql, 'UPDATE "public"."items"\nSET "id" = E\'9007199254740995\', "code" = E\'tenant-new\'\nWHERE "id" IS NOT DISTINCT FROM E\'001\' AND "code" IS NOT DISTINCT FROM E\'001\';');
+  assert.deepEqual(Array.from(f.tab.result.rows[0]).slice(0, 2), ['9007199254740995', 'tenant-new']);
+});
+
+test('a missing row cannot apply a new key locally or incorrectly close a live PostgreSQL transaction', async () => {
+  const f = fixture('edit', { driver: 'postgres', values: { id: 'new-key' } });
+  f.runtime.call = async () => ({ row_count: 0 }); await f.submit();
+  assert.equal(f.tab.result.rows[0][0], '001');
+  assert.equal(f.state.transactionKeys.has('db/app'), true);
+  assert.match(f.refs.mutationFeedback.textContent, /未报告唯一匹配行/);
 });
 
 test("inserts exclude generated and ALWAYS identity fields even if disabled inputs contain text", async () => {

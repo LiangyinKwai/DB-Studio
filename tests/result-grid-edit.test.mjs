@@ -20,6 +20,61 @@ function editableGrid() {
 }
 const cell = (position, columnIndex = 1) => ({ dataset: { position: String(position), columnIndex: String(columnIndex) } });
 
+test('table save includes hidden drafts, removes only successes and keeps failures for retry', async () => {
+  const grid = editableGrid();
+  grid.startCellEdit(cell(0)); grid.editSession.draftValue = 'first';
+  grid.startCellEdit(cell(1)); grid.editSession.draftValue = 'second';
+  grid.visibleOrder = [1];
+  let payloads;
+  grid.onCommitCells = async drafts => {
+    payloads = drafts;
+    assert.equal(grid.startCellEdit(cell(0)), false);
+    assert.equal(grid.discardCellEdit(), false);
+    assert.equal(await grid.commitAllCellEdits(), false);
+    return [{ saved: true }, { saved: false, error: 'conflict' }];
+  };
+  assert.equal(await grid.commitAllCellEdits(), false);
+  assert.deepEqual(payloads.map(draft => [draft.rowIndex, draft.newValue]), [[0, 'first'], [1, 'second']]);
+  assert.equal(grid.getCellEditDrafts().length, 1);
+  assert.equal(grid.cellEditSession(1, 1).error, 'conflict');
+  grid.onCommitCells = async () => [{ saved: true }];
+  assert.equal(await grid.commitAllCellEdits(), true);
+  assert.equal(grid.getCellEditDraft(), null);
+});
+
+test('table save completion and cancel only affect their captured result', async () => {
+  const grid = editableGrid();
+  grid.startCellEdit(cell(0)); grid.editSession.draftValue = 'first';
+  grid.startCellEdit(cell(1)); grid.editSession.draftValue = 'second';
+  const originalRows = grid.rows;
+  let finish;
+  grid.onCommitCells = () => new Promise(resolve => { finish = resolve; });
+  const saving = grid.commitAllCellEdits();
+  grid.suspendCellEdit();
+  grid.rows = [[20, 'other table']]; grid.visibleOrder = [0];
+  grid.startCellEdit(cell(0)); grid.editSession.draftValue = 'keep other table draft';
+  const otherSession = grid.editSession;
+  finish([{ saved: true }, { saved: true }]);
+  assert.equal(await saving, true);
+  assert.equal(grid.getCellEditDraft(originalRows), null);
+  assert.equal(grid.editSession, otherSession);
+  assert.equal(grid.getCellEditDraft().draftValue, 'keep other table draft');
+  assert.equal(grid.discardCellEdit(), true);
+  assert.equal(grid.getCellEditDraft(), null);
+  assert.deepEqual(grid.rows, [[20, 'other table']]);
+});
+
+test('table save skips clean editors and preserves every draft if validation rejects the set', async () => {
+  const grid = editableGrid();
+  grid.startCellEdit(cell(0)); grid.editSession.draftValue = 'first';
+  grid.startCellEdit(cell(1)); // clean current editor, dirty draft elsewhere
+  grid.onCommitCells = async drafts => { assert.equal(drafts.length, 1); throw new Error('invalid JSON'); };
+  assert.equal(await grid.commitAllCellEdits(), false);
+  assert.equal(grid.getCellEditDraft().draftValue, 'first');
+  assert.equal(grid.cellEditSession(0, 1).error, 'invalid JSON');
+  assert.equal(grid.savingResults.has(grid.rows), false);
+});
+
 test('editing captures the original row through a sort and passes its context to commit', async () => {
   const grid = editableGrid();
   grid.visibleOrder = [2, 0, 1];

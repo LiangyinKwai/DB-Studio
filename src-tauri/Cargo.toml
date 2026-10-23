@@ -23,3 +23,4 @@ tokio = { version = "1", features = ["time", "macros", "rt-multi-thread"] }
 keyring = { version = "3", features = ["apple-native"] }
 uuid = { version = "1", features = ["v4"] }
 rfd = { version = "0.17", default-features = false }
+arboard = { version = "3.7", default-features = false }

@@ -56,7 +56,7 @@ import { estimateResultBytes, selectResultsToRelease } from "./query-memory.js";
 import { createCommandPalette } from "./command-palette.js";
 import { matchesWorkspaceSearch, historyTimeLabel, emptyResultAction, runEmptyResultAction } from "./workspace-ux.js";
 import { createSqlExecutionKeymap } from "./sql-shortcuts.js";
-import { getCellEditCapability, buildCellUpdateSql, validateCellDraft, cellColumnName, sqlValueLiteral } from "./cell-edit.js";
+import { getCellEditCapability, buildCellUpdateSql, validateCellDraft, cellColumnName, sqlValueLiteral, sqlTypedValueLiteral } from "./cell-edit.js";
 import { buildTableDdl } from "./table-ddl.js";
 import { setSelectableText } from "./selectable-text.js";
 import { initDesktopMenu } from "./desktop-menu.js";
@@ -64,14 +64,34 @@ import { redisCompletionSource, redisCommandHint } from "./redis-completion.js";
 import { createRedisTypePicker } from "./redis-type-picker.js";
 import { createRedisEditor, redisLanguage } from "./redis-editor.js";
 import { resolveRedisDatabase } from "./redis-target.js";
+import { initResultControls } from "./result-controls.js";
+import { initTextInputIme } from "./text-input-ime.js";
+import { writeClipboardText } from "./clipboard.js";
+import { createExport, readTransferFile } from "./data-transfer.js";
+import { openDataImport } from "./data-import-ui.js";
+import { postgresIcon, redisIcon } from "./driver-icons.js";
+import { mysqlIcon } from "./mysql-icon.js";
+import { mysqlColumns, mysqlDdlTargets } from "./mysql-ddl.js";
+import { objectActionPlan } from "./object-actions.js";
+import { createObjectQuickOpen, collectQuickOpenEntries } from './object-quick-open.js';
+import { createColumnNavigator } from './column-navigator.js';
+import { summarizeWorkspaceAttention } from './workspace-attention.js';
+import { formatShortcut } from './shortcut-labels.js';
+import { redisKeyTypePresentation, redisKeyIcon } from './redis-key-icons.js';
+import { mergeRedisKeyPage, redisPageKeyType } from './redis-key-metadata.js';
+import { initConnectionReorder, moveConnection, orderConnections, readConnectionOrder, saveConnectionOrder } from "./connection-order.js";
 import { orderedObjectGroups, syncTreeToggle, setTreeRowExpanded, treeBranchForDoubleClick } from "./object-tree.js";
 
+const shortcutPlatform = navigator.userAgentData?.platform || navigator.platform || '';
+function shortcut(label) { return formatShortcut(String(label || '').replaceAll('⌘/Ctrl', '⌘'), shortcutPlatform); }
 const invoke = window.__TAURI__?.core?.invoke;
 const refs = Object.fromEntries(
   [...document.querySelectorAll("[id]")].map((node) => [node.id, node]),
 );
 const confirmAction = createConfirmationDialog(refs.confirmActionModal);
 const passwordFields = initPasswordFields();
+const resultControls = initResultControls(refs);
+const textInputIme = initTextInputIme();
 const querySchemaSelect = createSchemaSelect({
   trigger: refs.querySchema, label: refs.querySchemaLabel, panel: refs.querySchemaMenu,
   search: refs.querySchemaSearch, list: refs.querySchemaList, empty: refs.querySchemaEmpty,
@@ -132,15 +152,6 @@ const schemaIcon = svgIcon(
 const instanceIcon = svgIcon(
   '<rect x="4" y="4" width="16" height="16" rx="3"/><path d="M8 8h8M8 12h5M8 16h8"/><circle cx="16" cy="12" r="1" fill="currentColor" stroke="none"/>',
 );
-const postgresIcon = svgIcon(
-  '<path d="M7 18.5c-2.4-.8-3-3-3-6V8.7C4 5.6 6.8 3 12 3s8 2.6 8 5.7v3.8c0 2.3-.9 4.1-2.7 5.3"/><path d="M8 9c.7-1.1 1.7-1.6 4-1.6s3.3.5 4 1.6M9 17.5c0 1.9 1.1 3.5 3 3.5s3-1.6 3-3.5v-6.4c0-.9-.8-1.6-3-1.6s-3 .7-3 1.6v6.4Z"/><path d="M9 14.2c-1.4.1-2.3-.3-2.8-1.2M15 14.2c1.4.1 2.3-.3 2.8-1.2"/>',
-);
-const redisIcon = svgIcon(
-  '<path d="m12 3 9 4.2-9 4.2-9-4.2L12 3Z"/><path d="m3 11 9 4.2 9-4.2M3 15 12 19l9-4"/><path d="m3 7.2 9 4.2 9-4.2"/><circle cx="12" cy="7.2" r=".8" fill="currentColor" stroke="none"/>',
-);
-const mysqlIcon = svgIcon(
-  '<path d="M3 8.5c2.5-4 5.2-4 7.7 0s5.2 4 7.7 0"/><path d="M3 8.5v5c2.5 4 5.2 4 7.7 0 2.5 4 5.2 4 7.7 0v-5"/><path d="M3 13.5c2.5 4 5.2 4 7.7 0 2.5 4 5.2 4 7.7 0"/><path d="M17 8.5h4v10h-4"/>',
-);
 const driverIcon = (driver) => driver === "redis" ? redisIcon : driver === "mysql" ? mysqlIcon : postgresIcon;
 // The gap between the database and the plug is the connection state. Keep the
 // short cable in both variants so the symbol reads as a connection, not power.
@@ -190,6 +201,7 @@ function matchesObjectTab(tab, target, view) {
   const opened = tab.openedObject || tab.browse;
   const openedView = tab.openedObjectView || (tab.browse ? "data" : null);
   return openedView === view && opened?.connectionId === target.connectionId &&
+    (!opened.kind || !target.kind || opened.kind === target.kind) && (!opened.id || !target.id || opened.id === target.id) &&
     (opened?.database ?? null) === target.database && opened?.schema === target.schema && opened?.name === target.name;
 }
 function findObjectTab(target, view) {
@@ -498,35 +510,20 @@ function redisTabDatabase(tab = activeTab()) {
   const profile = state.profiles.find((item) => item.id === tab?.connectionId);
   return resolveRedisDatabase(tab, profile);
 }
-function showToast(message, type = "info") {
+function showToast(message, type = "info", duration = type === "error" ? 7000 : 4000) {
   refs.toast.textContent = message;
   refs.toast.dataset.type = type;
   refs.toast.classList.add("visible");
   clearTimeout(showToast.timer);
   showToast.timer = setTimeout(
     () => refs.toast.classList.remove("visible"),
-    type === "error" ? 7000 : 4000,
+    duration,
   );
 }
 async function copyText(text, { allowEmpty = false } = {}) {
   const value = String(text ?? "");
   if (!value && !allowEmpty) throw new Error("复制内容为空");
-  try {
-    if (navigator.clipboard?.writeText) {
-      await navigator.clipboard.writeText(value);
-      return;
-    }
-  } catch {}
-  const textarea = document.createElement("textarea");
-  textarea.value = value;
-  textarea.setAttribute("readonly", "");
-  textarea.style.position = "fixed";
-  textarea.style.opacity = "0";
-  document.body.appendChild(textarea);
-  textarea.select();
-  const copied = document.execCommand("copy");
-  textarea.remove();
-  if (!copied) throw new Error("系统剪贴板不可用");
+  await writeClipboardText(value, { invoke });
 }
 function cellText(value) {
   return formatCellValue(value);
@@ -628,6 +625,7 @@ const state = {
   activeConnectionId: null,
   connectionStatuses: {},
   connectionErrors: {},
+  disconnectingConnections: new Set(),
   treeSessions: new Map(),
   transactionKeys: new Set(),
   queryTargets: new Map(),
@@ -898,7 +896,7 @@ function renderConnections() {
         const toggleLabel = status === "connected" ? "断开连接" : status === "connecting" ? "连接中" : "连接";
         const toggleIcon = status === "connecting" ? '<span class="spinner"></span>' : svgIcon('<path d="M9 3v5m6-5v5M7 8h10v3a5 5 0 0 1-10 0V8Zm5 8v5"/>');
         const description = `${driver} · ${profile.host}:${profile.port}${profile.database ? ` / ${profile.database}` : ""}`;
-        return `<div class="connection-card ${profile.id === state.activeConnectionId ? "selected" : ""}" data-driver="${escapeHtml(profile.driver || "postgres")}"><button class="connection-select" data-connection-id="${escapeHtml(profile.id)}" title="${escapeHtml(description)}" aria-label="${escapeHtml(profile.name)}，${driver}，${statusLabel}" ${profile.id === state.activeConnectionId ? 'aria-current="true"' : ''}><span class="connection-icon connection-driver-icon">${driverIcon(profile.driver)}</span><span class="connection-copy"><strong>${escapeHtml(profile.name)}</strong><small><span class="connection-state-label" data-status="${status}">${statusLabel}</span> · ${driver}</small></span></button><button class="icon-btn connection-toggle" data-connection-toggle="${escapeHtml(profile.id)}" data-status="${status}" title="${toggleLabel}" aria-label="${toggleLabel}：${escapeHtml(profile.name)}" aria-pressed="${status === "connected"}" ${status === "connecting" ? "disabled" : ""}>${toggleIcon}</button><button class="icon-btn connection-edit" data-edit-id="${escapeHtml(profile.id)}" title="编辑连接" aria-label="编辑连接：${escapeHtml(profile.name)}">•••</button></div>`;
+        return `<div class="connection-card ${profile.id === state.activeConnectionId ? "selected" : ""}" data-driver="${escapeHtml(profile.driver || "postgres")}" data-connection-card="${escapeHtml(profile.id)}" draggable="true"><button class="connection-select" data-connection-id="${escapeHtml(profile.id)}" title="${escapeHtml(description)} · 拖动排序；Alt+↑/↓ 移动" aria-label="${escapeHtml(profile.name)}，${driver}，${statusLabel}" ${profile.id === state.activeConnectionId ? 'aria-current="true"' : ''}><span class="connection-icon connection-driver-icon">${driverIcon(profile.driver)}</span><span class="connection-copy"><strong>${escapeHtml(profile.name)}</strong><small><span class="connection-state-label" data-status="${status}">${statusLabel}</span> · ${driver}</small></span></button><button class="icon-btn connection-toggle" data-connection-toggle="${escapeHtml(profile.id)}" data-status="${status}" title="${toggleLabel}" aria-label="${toggleLabel}：${escapeHtml(profile.name)}" aria-pressed="${status === "connected"}" ${status === "connecting" ? "disabled" : ""}>${toggleIcon}</button><button class="icon-btn connection-edit" data-edit-id="${escapeHtml(profile.id)}" title="编辑连接" aria-label="编辑连接：${escapeHtml(profile.name)}">•••</button></div>`;
       }).join("");
   refs.connectionMode.textContent = state.activeConnectionId
     ? {
@@ -928,7 +926,10 @@ function renderConnections() {
       : "PostgreSQL · 选中 SQL 可单独执行";
   if (refs.collapseTree) refs.collapseTree.hidden = active?.driver === "redis";
   if (refs.refreshSchema) refs.refreshSchema.title = active?.driver === "redis" ? "刷新 Redis key" : "刷新数据库对象";
-  if (refs.objectSearch) refs.objectSearch.placeholder = active?.driver === "redis" ? "搜索 Redis key…" : "搜索表、字段或 schema…";
+  if (refs.objectSearch) {
+    refs.objectSearch.placeholder = active?.driver === "redis" ? "搜索 Redis key…" : active?.driver === "mysql" ? "搜索表、字段或备注…" : "搜索表、字段或 schema…";
+    refs.objectSearch.setAttribute("aria-label", active?.driver === "mysql" ? "搜索 MySQL 表、字段或备注" : active?.driver === "redis" ? "搜索 Redis key" : "搜索表、字段或 schema");
+  }
   refs.refreshSchema.disabled = state.connectionStatuses[state.activeConnectionId] !== "connected";
   if (!activeTab()) renderOutput();
 }
@@ -940,7 +941,7 @@ async function loadConnections({ restore = true } = {}) {
     return;
   }
   try {
-    state.profiles = await call("list_connections");
+    state.profiles = orderConnections(await call("list_connections"), readConnectionOrder());
     // Missing profiles must never delete restored SQL drafts. Their original
     // binding stays visible and runQuery refuses to execute until it exists.
     renderConnections();
@@ -1013,6 +1014,12 @@ async function restoreTreeSession(session, profile, request, redisRequest) {
   if (profile.driver === "redis") {
     await Promise.all([...state.redisExpanded].filter((database) => pendingRedis.includes(database) || !state.redisPages.get(database)?.loaded)
       .map((database) => loadRedisKeys(database, 0, state.redisPattern, profile.id, redisRequest)));
+  } else if (profile.driver === "mysql") {
+    await Promise.all([...state.expandedDatabases].map(database => {
+      state.schemasByDatabase.set(database, [{ name: database }]);
+      state.visibleSchemasByDatabase.set(database, new Set([database]));
+      return loadSchemaObjects(database, database);
+    }));
   } else {
     await Promise.all([...state.expandedDatabases].filter((database) => !state.schemasByDatabase.has(database))
       .map((database) => loadSchemas(database, profile.id, request)));
@@ -1024,6 +1031,7 @@ async function restoreTreeSession(session, profile, request, redisRequest) {
   return current();
 }
 async function selectConnection(id) {
+  if (state.disconnectingConnections.has(id)) { showToast('连接正在断开，请稍后重试'); return false; }
   const profile = state.profiles.find((p) => p.id === id);
   if (!profile) return false;
   closeRedisConsole();
@@ -1056,7 +1064,7 @@ async function selectConnection(id) {
   state.redisScanGenerations.clear();
   state.redisPattern = "";
   refs.objectSearch.value = "";
-  refs.objectSelection.textContent = "展开数据库和 schema，浏览对象";
+  refs.objectSelection.textContent = driverForConnection(state.activeConnectionId) === "mysql" ? "展开数据库，浏览表和视图" : "展开数据库和 schema，浏览对象";
   state.visibleDatabases.clear();
   state.visibleSchemasByDatabase.clear();
   state.expandedDatabases.clear();
@@ -1090,7 +1098,7 @@ async function selectConnection(id) {
         state.redisDatabases = redisDatabases
           .map((database) => ({
             index: Number(database.index),
-            keyCount: Number.isFinite(Number(database.keyCount)) ? Number(database.keyCount) : null,
+            keyCount: database.keyCount != null && Number.isFinite(Number(database.keyCount)) ? Number(database.keyCount) : null,
             current: Boolean(database.current),
           }))
           .filter((database) => Number.isInteger(database.index) && database.index >= 0);
@@ -1219,6 +1227,7 @@ function renderSchemaPicker() {
     refs.schemaSelectionCount.textContent = `${visible.size} 个已显示`;
 }
 function openSchemaPicker(database) {
+  if (driverForConnection(state.activeConnectionId) === "mysql") return;
   const schemas = state.schemasByDatabase.get(database) || [];
   if (!schemas.length) return;
   state.schemaPickerDatabase = database;
@@ -1259,13 +1268,14 @@ async function applySchemaPicker() {
   ) {
     state.selectedObject = null;
     state.selectedTreeKey = null;
-    refs.objectSelection.textContent = "展开数据库和 schema，浏览对象";
+    refs.objectSelection.textContent = driverForConnection(state.activeConnectionId) === "mysql" ? "展开数据库，浏览表和视图" : "展开数据库和 schema，浏览对象";
   }
   updateEditorSchema();
   renderTree();
 }
 async function disconnectConnection(connectionId = state.activeConnectionId) {
   if (!connectionId) return;
+  if (state.disconnectingConnections.has(connectionId)) return;
   if (anyQueryRunning()) {
     showToast("有查询正在执行，请先停止后再断开连接", "error");
     return;
@@ -1273,6 +1283,20 @@ async function disconnectConnection(connectionId = state.activeConnectionId) {
   const id = connectionId;
   const isActive = state.activeConnectionId === id;
   const profile = state.profiles.find((item) => item.id === id);
+  const transactions = [...state.transactionKeys].filter(key => key.startsWith(`${id}\0`));
+  if (state.tabs.some(tab => tab.connectionId === id && (tab.cellSaving || tab.cellBatchSaving || tab.changingTransaction))) {
+    showToast('当前连接有保存或事务操作正在执行，请完成后再断开', 'error'); return;
+  }
+  if (transactions.length) {
+    if (!await confirmAction(`断开「${profile?.name || id}」会回滚以下数据库中尚未提交的修改：\n${transactions.map(key => key.slice(id.length + 1) || '默认数据库').join('、')}\n\n本地尚未保存的单元格草稿会保留。`, { title: '断开并回滚事务？', acceptLabel: '断开并回滚' })) return;
+    const current = [...state.transactionKeys].filter(key => key.startsWith(`${id}\0`));
+    if (anyQueryRunning() || state.tabs.some(tab => tab.connectionId === id && (tab.cellSaving || tab.cellBatchSaving || tab.changingTransaction)) || current.length !== transactions.length || current.some(key => !transactions.includes(key))) {
+      showToast('当前操作或事务状态已改变，请重新确认断开', 'error'); return;
+    }
+  }
+  state.disconnectingConnections.add(id);
+  renderTabs();
+  renderOutput();
   if (isActive) {
     ++state.schemaRequest;
     ++state.redisRequest;
@@ -1282,7 +1306,10 @@ async function disconnectConnection(connectionId = state.activeConnectionId) {
     await call("disconnect_connection", { connectionId: id });
     state.connectionStatuses[id] = "idle";
     state.treeSessions.delete(id);
+    for (const key of transactions) invalidateTransactionResults(id, key.slice(id.length + 1));
     clearTransactionKeys(id);
+    renderTabs();
+    renderOutput();
     if (state.redisConsole?.connectionId === id) closeRedisConsole();
     if (state.activeConnectionId !== id) {
       renderConnections();
@@ -1302,7 +1329,7 @@ async function disconnectConnection(connectionId = state.activeConnectionId) {
     state.expandedSchemas.clear();
     state.selectedObject = null;
     state.selectedTreeKey = null;
-    refs.objectSelection.textContent = "展开数据库和 schema，浏览对象";
+    refs.objectSelection.textContent = driverForConnection(state.activeConnectionId) === "mysql" ? "展开数据库，浏览表和视图" : "展开数据库和 schema，浏览对象";
     state.schemaPickerDatabase = null;
     state.schemaPickerDraft = null;
     state.schemasByDatabase.clear();
@@ -1314,9 +1341,46 @@ async function disconnectConnection(connectionId = state.activeConnectionId) {
     showToast(`已断开${profile ? `「${profile.name}」` : "连接"}`);
   } catch (error) {
     showToast(`断开失败：${errorText(error)}`, "error");
+  } finally {
+    state.disconnectingConnections.delete(id);
+    renderTabs();
+    renderOutput();
   }
 }
 
+function mysqlObjectRow(object, database, query) {
+  const fields = matchingColumns(object, query).map(column => column.name);
+  const label = (object.signature || object.name) + (fields.length ? ` · ${fields.join(", ")}` : "");
+  return `<div class="tree-object" data-object-id="${escapeHtml(object.id)}" data-database="${escapeHtml(database)}" data-schema="${escapeHtml(object.schema)}" data-name="${escapeHtml(object.name)}" data-kind="${escapeHtml(object.kind)}"><span class="object-kind-icon">${kindIcons[object.kind] || "•"}</span><button class="object-main" title="${escapeHtml(object.qualifiedName)}">${escapeHtml(label)}</button><button class="object-open" title="打开数据">↗</button></div>`;
+}
+function mysqlDatabaseTree(database, query) {
+  const key = schemaKey(database.name, database.name);
+  const loaded = state.objectsBySchema.has(key), objects = state.objectsBySchema.get(key) || [];
+  const loading = state.objectRequests.has(key), error = state.schemaErrors.get(database.name);
+  const databaseMatch = query && database.name.toLowerCase().includes(query);
+  if (query && !databaseMatch && !objects.some(object => objectMatchesSearch(object, query)) && loaded) return "";
+  const open = Boolean(query) || state.expandedDatabases.has(database.name);
+  const parts = [`<details class="tree-database mysql-database" data-database="${escapeHtml(database.name)}"${open ? " open" : ""}><summary>${treeToggle(database.name, open)}<span class="database-icon">${databaseIcon}</span><span class="tree-label">${escapeHtml(database.name)}</span><span class="count">${loaded ? objects.length : "…"}</span></summary><div class="database-children mysql-database-objects" data-object-schema="${escapeHtml(database.name)}" data-database="${escapeHtml(database.name)}">`];
+  if (error) parts.push(`<div class="tree-status">${loaded ? "刷新" : "读取"}对象失败：${escapeHtml(error)}<br/><button data-retry-mysql-db="${escapeHtml(database.name)}">重试</button></div>`);
+  if (loading) parts.push(`<div class="tree-status">${loaded ? "刷新" : "读取"}对象…</div>`);
+  if (!loaded && !loading && !error) parts.push('<div class="tree-status">展开数据库以读取表和视图</div>');
+  if (loaded) {
+    const filter = databaseMatch ? "" : query;
+    const visible = objects.filter(object => objectMatchesSearch(object, filter));
+    if (!visible.length) parts.push(`<div class="tree-status">${query ? "没有匹配的对象" : "没有可见对象"}</div>`);
+    for (const [kind, items] of orderedObjectGroups(visible)) {
+      if (["table", "partitioned_table"].includes(kind)) {
+        parts.push(items.map(object => mysqlObjectRow(object, database.name, filter)).join(""));
+        continue;
+      }
+      const categoryKey = JSON.stringify([database.name, database.name, kind]);
+      const expanded = Boolean(query) || (!state.collapsedCategories.has(categoryKey) && state.expandedCategories.has(categoryKey));
+      parts.push(`<div class="tree-category${expanded ? "" : " collapsed"}" data-kind="${escapeHtml(kind)}"><div class="category-summary" tabindex="0" aria-expanded="${expanded}">${treeToggle(kindLabels[kind] || kind, expanded)}<span class="category-kind-icon">${kindIcons[kind] || "•"}</span><span class="tree-label">${kindLabels[kind] || kind}</span><span class="count">${items.length}</span></div><div class="category-items">${items.map(object => mysqlObjectRow(object, database.name, filter)).join("")}</div></div>`);
+    }
+  }
+  parts.push('</div></details>');
+  return parts.join("");
+}
 function renderTree() {
   const activeProfile = state.profiles.find((profile) => profile.id === state.activeConnectionId);
   if (activeProfile?.driver === "redis") {
@@ -1347,6 +1411,11 @@ function renderTree() {
   }
   for (const database of state.databases) {
     if (!state.visibleDatabases.has(database.name)) continue;
+    if (activeProfile.driver === "mysql") {
+      const html = mysqlDatabaseTree(database, query);
+      if (html) chunks.push(html);
+      continue;
+    }
     const schemas = state.schemasByDatabase.get(database.name) || [];
     const schemaLoading = state.schemaLoading.has(database.name);
     const schemaError = state.schemaErrors.get(database.name);
@@ -1432,7 +1501,11 @@ function renderTree() {
         if (!database || query) return;
         if (node.open) {
           state.expandedDatabases.add(database);
-          if (!state.schemasByDatabase.has(database) && !state.schemaLoading.has(database)) void loadSchemas(database);
+          if (activeProfile.driver === "mysql") {
+            state.schemasByDatabase.set(database, [{ name: database }]);
+            state.visibleSchemasByDatabase.set(database, new Set([database]));
+            void loadSchemaObjects(database, database);
+          } else if (!state.schemasByDatabase.has(database) && !state.schemaLoading.has(database)) void loadSchemas(database);
         } else {
           state.expandedDatabases.delete(database);
         }
@@ -1471,6 +1544,8 @@ function treeTargetFromNode(node) {
   if (redis) return { ...scope, type: "redis-database", database: Number(redis.dataset.redisDb) };
   const schema = row.closest(".tree-schema");
   if (schema) return { ...scope, type: row.matches(".category-summary") ? "category" : "schema", database: schema.dataset.database, schema: schema.dataset.schema, kind: row.closest(".tree-category")?.dataset.kind };
+  const mysqlScope = row.closest('[data-object-schema]');
+  if (mysqlScope && row.matches('.category-summary')) return { ...scope, type: "category", database: mysqlScope.dataset.database, schema: mysqlScope.dataset.objectSchema, kind: row.closest('.tree-category')?.dataset.kind };
   const database = row.closest(".tree-database");
   return database ? { ...scope, type: "database", database: database.dataset.database } : null;
 }
@@ -1501,7 +1576,7 @@ function toggleTreeRow(row, expanded) {
 function clearTreeSelection() {
   state.selectedTreeKey = null;
   state.selectedObject = null;
-  refs.objectSelection.textContent = "展开数据库和 schema，浏览对象";
+  refs.objectSelection.textContent = driverForConnection(state.activeConnectionId) === "mysql" ? "展开数据库，浏览表和视图" : "展开数据库和 schema，浏览对象";
   applyTreeSelection();
   if (refs.objectTree.contains(document.activeElement)) document.activeElement?.blur();
 }
@@ -1514,7 +1589,7 @@ function selectTreeTarget(target) {
 function redisPage(database, pattern = state.redisPattern) {
   const existing = state.redisPages.get(database);
   if (!existing || existing.pattern !== pattern) {
-    const page = { keys: [], cursor: 0, pattern, loading: false, loaded: false, error: null };
+    const page = { keys: [], keyTypes: new Map(), cursor: 0, pattern, loading: false, loaded: false, error: null };
     state.redisPages.set(database, page);
     return page;
   }
@@ -1537,17 +1612,17 @@ function renderRedisTree() {
       const page = redisPage(index);
       const keys = page.keys.filter((key) => !query || key.toLowerCase().includes(query));
       const open = expanded.has(index) ? " open" : "";
-      const count = database.keyCount ?? (page.keys.length ? `${page.keys.length}${page.cursor ? "+" : ""}` : "—");
+      const count = database.keyCount ?? (page.loaded ? `已加载 ${page.keys.length}` : "—");
       chunks.push(`<details class="tree-database redis-database" data-redis-db="${index}"${open}><summary>${treeToggle(`DB ${index}`, Boolean(open))}<span class="database-icon redis-db-icon">${databaseIcon}</span><span class="tree-label">DB ${index}</span><span class="count">${escapeHtml(count)}</span></summary><div class="database-children redis-database-children">`);
       if (page.loading && !page.keys.length) chunks.push('<div class="tree-status">读取 key…</div>');
       else {
-        if (page.loading) chunks.push('<div class="tree-status">正在刷新 key…</div>');
         if (page.error) chunks.push(`<div class="tree-status">刷新 key 失败，保留已加载结果：${escapeHtml(page.error)}</div>`);
         if (!keys.length && !page.error) chunks.push(`<div class="tree-status">${query ? "没有匹配的 Redis key" : "没有 Redis key"}</div>`);
         if (keys.length) {
         chunks.push('<div class="redis-key-list">');
         for (const key of keys) {
-          chunks.push(`<div class="tree-object redis-key-object" data-redis-key="${escapeHtml(key)}" data-redis-db="${index}"><span class="object-kind-icon redis-key-icon">◇</span><button class="object-main" title="${escapeHtml(key)}">${escapeHtml(key)}</button></div>`);
+          const type = redisKeyTypePresentation(redisPageKeyType(page, key));
+          chunks.push(`<div class="tree-object redis-key-object" data-redis-key="${escapeHtml(key)}" data-redis-db="${index}" data-redis-type="${type.type}"><span class="object-kind-icon redis-key-kind" title="${type.label}">${type.icon}</span><button class="object-main" title="${escapeHtml(`${key} · ${type.label}`)}">${escapeHtml(key)}</button></div>`);
         }
         chunks.push('</div>');
         }
@@ -1571,7 +1646,7 @@ function renderRedisTree() {
       if (node.open) {
         state.redisExpanded.add(database);
         const page = redisPage(database);
-        if (!page.keys.length && !page.loading) void loadRedisKeys(database, 0, state.redisPattern);
+        if (!page.loading) void loadRedisKeys(database, 0, state.redisPattern);
       } else {
         state.redisExpanded.delete(database);
       }
@@ -1592,7 +1667,7 @@ async function refreshRedisTree() {
   state.redisDatabases = databases
     .map((database) => ({
       index: Number(database.index),
-      keyCount: Number.isFinite(Number(database.keyCount)) ? Number(database.keyCount) : null,
+      keyCount: database.keyCount != null && Number.isFinite(Number(database.keyCount)) ? Number(database.keyCount) : null,
       current: Boolean(database.current),
     }))
     .filter((database) => Number.isInteger(database.index) && database.index >= 0);
@@ -1624,12 +1699,15 @@ async function loadRedisKeys(database = state.redisActiveDatabase, cursor = 0, p
       count: 200,
     });
     if (!isCurrentConnectionRequest(requestId, state.redisRequest, connectionId, state.activeConnectionId) || generation !== state.redisScanGenerations.get(database)) return;
-    if (cursor === 0) pageState.keys = [];
-    pageState.keys.push(...(page.keys || []));
+    const merged = mergeRedisKeyPage(pageState, page, cursor === 0);
+    pageState.keys = merged.keys;
+    pageState.keyTypes = merged.keyTypes;
     pageState.cursor = Number(page.cursor || 0);
     pageState.pattern = pattern;
     pageState.loading = false;
     pageState.loaded = true;
+    const info = state.redisDatabases.find(item => item.index === database);
+    if (info) info.keyCount = page.keyCount != null && Number.isSafeInteger(page.keyCount) && page.keyCount >= 0 ? page.keyCount : null;
     state.redisPattern = pattern;
     state.redisActiveDatabase = database;
     renderRedisTree();
@@ -1646,11 +1724,14 @@ async function openRedisValueTab(key, database = state.redisActiveDatabase) {
   const connectionId = state.activeConnectionId;
   const requestId = state.redisRequest;
   const redisDb = Number(database);
+  const existing = state.tabs.find(tab => tab.connectionId === connectionId && tab.redisKey === key && redisTabDatabase(tab) === redisDb && tab.tableView !== false && !tab.console);
+  if (existing) { activateTab(existing.id); return existing; }
   const tab = addTab("", connectionId);
   if (!tab) return;
   tab.title = key;
   tab.redisKey = key;
   tab.redisDb = Number.isInteger(redisDb) && redisDb >= 0 ? redisDb : redisProfileDatabase(state.profiles.find((profile) => profile.id === connectionId));
+  tab.redisType = redisPageKeyType(state.redisPages.get(tab.redisDb), key);
   tab.database = String(tab.redisDb);
   tab.tableView = true;
   tab.mode = "write";
@@ -1689,11 +1770,32 @@ function applyRedisValueResult(tab, value, connectionId, database = redisTabData
   tab.database = String(database);
   tab.redisType = value.keyType;
   tab.redisTtl = value.ttl;
+  const pages = connectionId === state.activeConnectionId ? state.redisPages : state.treeSessions.get(connectionId)?.redisPages;
+  const page = pages?.get(Number(database));
+  if (page?.keys.includes(tab.redisKey)) {
+    if (!(page.keyTypes instanceof Map)) page.keyTypes = new Map();
+    page.keyTypes.set(tab.redisKey, value.keyType);
+    if (connectionId === state.activeConnectionId && refs.objectTree.dataset.driver === 'redis') {
+      const type = redisKeyTypePresentation(value.keyType);
+      for (const node of refs.objectTree.querySelectorAll('[data-redis-key]')) {
+        if (node.dataset.redisKey !== tab.redisKey || Number(node.dataset.redisDb) !== Number(database)) continue;
+        node.dataset.redisType = type.type;
+        const icon = node.querySelector('.redis-key-kind');
+        if (icon) { icon.innerHTML = type.icon; icon.title = type.label; }
+        node.querySelector('.object-main').title = `${tab.redisKey} · ${type.label}`;
+      }
+    }
+  }
   tab.message = `Redis ${value.keyType} · TTL ${value.ttl}`;
   tab.outputTab = "result";
 }
 async function loadSchemas(database, connectionId = state.activeConnectionId, request = state.schemaRequest) {
   if (request !== state.schemaRequest || state.activeConnectionId !== connectionId) return false;
+  if (driverForConnection(connectionId) === "mysql") {
+    state.schemasByDatabase.set(database, [{ name: database }]);
+    state.visibleSchemasByDatabase.set(database, new Set([database]));
+    return loadSchemaObjects(database, database, { force: true });
+  }
   state.schemaLoading.add(database);
   state.schemaErrors.delete(database);
   renderTree();
@@ -1774,9 +1876,13 @@ async function loadSchemaObjects(database, schemaName, { force = false } = {}) {
       const objects = await call("get_schema_objects", { connectionId, schemaName, database });
       if (!isCurrent()) return false;
       state.objectsBySchema.set(key, objects.map((object) => ({ ...object, database })));
+      if (driverForConnection(connectionId) === "mysql") state.schemaErrors.delete(database);
       return true;
     } catch (error) {
-      if (isCurrent()) showToast(`读取 ${database}.${schemaName} 失败：${errorText(error)}`, "error");
+      if (isCurrent()) {
+        if (driverForConnection(connectionId) === "mysql") state.schemaErrors.set(database, errorText(error));
+        showToast(`读取 ${database}${driverForConnection(connectionId) === "mysql" ? "" : `.${schemaName}`} 失败：${errorText(error)}`, "error");
+      }
       return false;
     } finally {
       if (state.objectRequests.get(key) === request) {
@@ -1837,6 +1943,7 @@ function openSavedQuery(entry) {
   showToast(missing ? "SQL 已打开，原连接不可用；可复制 SQL 到新建查询中继续。" : "已在新标签打开查询");
 }
 function renderTabs() {
+  scheduleWorkspaceAttention();
   if (refs.saveQueryFavorite) {
     const tab = activeExecutionTab();
     refs.saveQueryFavorite.disabled = !tab || !tab.sql?.trim() || Boolean(tab.console || tab.structureOnly || driverForTab(tab) === "redis");
@@ -1847,7 +1954,7 @@ function renderTabs() {
   refs.queryTabs.innerHTML = state.tabs
     .map(
       (tab) =>
-        `<div class="query-tab ${!state.redisConsole && tab.id === state.activeTabId ? "active" : ""} ${tab.running ? "running" : ""}" data-tab-id="${escapeHtml(tab.id)}" role="presentation"><button class="tab-select" data-tab-id="${escapeHtml(tab.id)}" role="tab" aria-selected="${!state.redisConsole && tab.id === state.activeTabId}" tabindex="${tab.id === state.activeTabId ? 0 : -1}" title="${escapeHtml(`${tab.title} · ${queryTargetDescription(tab)}`)}"><span class="tab-glyph">${tab.console ? "CLI" : tab.redisKey ? "KV" : tab.structureOnly ? "DDL" : tab.browse ? "表" : "SQL"}</span><span class="tab-label">${escapeHtml(tab.title)}</span></button><button class="tab-close" data-close-tab="${escapeHtml(tab.id)}" title="关闭标签" aria-label="关闭 ${escapeHtml(tab.title)}">×</button></div>`,
+        `<div class="query-tab ${!state.redisConsole && tab.id === state.activeTabId ? "active" : ""} ${tab.running ? "running" : ""}" data-tab-id="${escapeHtml(tab.id)}" role="presentation"><button class="tab-select" data-tab-id="${escapeHtml(tab.id)}" role="tab" aria-selected="${!state.redisConsole && tab.id === state.activeTabId}" tabindex="${tab.id === state.activeTabId ? 0 : -1}" title="${escapeHtml(`${tab.title} · ${queryTargetDescription(tab)}`)}"><span class="tab-glyph${tab.redisKey != null ? ' redis-tab-glyph' : ''}">${tab.console ? "CLI" : tab.redisKey != null ? redisKeyIcon(tab.redisType) : tab.structureOnly ? "DDL" : tab.browse ? "表" : "SQL"}</span><span class="tab-label">${escapeHtml(tab.title)}</span></button><button class="tab-close" data-close-tab="${escapeHtml(tab.id)}" title="关闭标签" aria-label="关闭 ${escapeHtml(tab.title)}">×</button></div>`,
     )
     .join("");
   if (focusedTabId) refs.queryTabs.querySelector(`.tab-select[data-tab-id="${CSS.escape(focusedTabId)}"]`)?.focus({ preventScroll: true });
@@ -1862,6 +1969,8 @@ function renderTabs() {
     refs.editorHint.textContent = `${activeDriver === "mysql" ? "MySQL" : "PostgreSQL"} · ${queryTargetDescription(tab)} · 选中 SQL 可单独执行`;
   }
   const isRedis = activeDriver === "redis";
+  refs.structureTab.hidden = isRedis;
+  refs.transactionState.hidden = true;
   if (isRedis) refs.editorHint.textContent = "Redis 命令 · 只读锁定后仅允许安全读取命令";
   const isConsole = tab?.console === true;
   if (refs.beginTransaction) refs.beginTransaction.hidden = isRedis;
@@ -1907,7 +2016,9 @@ function renderTabs() {
   const txOpen = Boolean(
     tab?.connectionId && state.transactionKeys.has(transactionKey(tab.connectionId, tabDatabase(tab))),
   );
-  refs.beginTransaction.hidden = isRedis || (mode === "read" && !txOpen);
+  refs.transactionState.hidden = isRedis || !txOpen;
+  refs.transactionState.title = `事务按连接与数据库共享：${queryTargetDescription(tab)}；提交后才会生效`;
+  refs.beginTransaction.hidden = isRedis || txOpen || mode === "read";
   refs.commitTransaction.hidden = isRedis || !txOpen;
   refs.rollbackTransaction.hidden = isRedis || !txOpen;
   if (refs.modeBadge) {
@@ -1915,7 +2026,7 @@ function renderTabs() {
     refs.modeBadge.setAttribute("aria-pressed", String(mode === "read"));
     refs.modeBadge.title = mode === "read" ? "已锁定为只读，点击解锁" : "当前可执行写入，点击锁定为只读";
   }
-  const busy = Boolean(tab?.running || tab?.confirming || tab?.resolvingTarget || tab?.changingTransaction || cellWritePending(tab));
+  const busy = Boolean(tab?.paging || tab?.running || tab?.confirming || tab?.resolvingTarget || tab?.changingTransaction || cellWritePending(tab));
   if (refs.modeBadge) refs.modeBadge.disabled = cellWritePending(tab);
   if (refs.beginTransaction) refs.beginTransaction.disabled = !tab?.connectionId || txOpen || mode === "read" || busy || Boolean(queryTargetData(tab)?.loading || queryTargetData(tab)?.error);
   if (refs.commitTransaction) refs.commitTransaction.disabled = !txOpen || busy;
@@ -1928,6 +2039,13 @@ function renderWorkspaceMode(tab = activeExecutionTab()) {
   document.body.classList.toggle("empty-workspace-mode", !tab);
   document.body.classList.toggle("structure-only-mode", Boolean(tab?.structureOnly));
   const tableView = Boolean((tab?.browse || tab?.redisKey) && tab.tableView !== false);
+  const actionHost = tableView ? refs.tableActionHost : refs.resultActionHost;
+  if (refs.resultActions.parentElement !== actionHost) actionHost.append(refs.resultActions);
+  const transactionButtons = [refs.transactionState, refs.beginTransaction, refs.commitTransaction, refs.rollbackTransaction];
+  if (tableView && refs.beginTransaction.parentElement !== refs.tableTransactionActions) refs.tableTransactionActions.append(...transactionButtons);
+  else if (!tableView && refs.beginTransaction.parentElement !== refs.queryToolbar) refs.queryTransactionAnchor.after(...transactionButtons);
+  refs.tableTransactionActions.hidden = !tableView || !['postgres', 'mysql'].includes(driverForTab(tab));
+  refs.refreshTableData.hidden = !tableView;
   document.body.classList.toggle("table-browse-mode", tableView);
   if (refs.queryToolbar) refs.queryToolbar.hidden = !tab || tableView || Boolean(tab?.console);
   if (refs.tableToolbar) refs.tableToolbar.hidden = !tableView;
@@ -1935,14 +2053,12 @@ function renderWorkspaceMode(tab = activeExecutionTab()) {
     const browse = tab.browse;
     refs.tableToolbarTitle.textContent = tab.redisKey || `${browse.schema}.${browse.name}`;
     refs.tableToolbarMeta.textContent = tab.redisKey ? "Redis" : `${browse.pageSize} 行/页`;
-    if (refs.openTableDdl) refs.openTableDdl.hidden = Boolean(tab.redisKey);
     if (refs.openTableSql) refs.openTableSql.hidden = Boolean(tab.redisKey);
     if (refs.newRow) refs.newRow.hidden = Boolean(tab.redisKey);
     if (refs.editRow) refs.editRow.hidden = Boolean(tab.redisKey);
     if (refs.deleteRows) refs.deleteRows.hidden = Boolean(tab.redisKey);
     if (refs.refreshTableData) refs.refreshTableData.disabled = Boolean(tab.running || tab.refreshing || cellWritePending(tab));
   } else {
-    if (refs.openTableDdl) refs.openTableDdl.hidden = false;
     if (refs.openTableSql) refs.openTableSql.hidden = false;
     if (refs.refreshTableData) refs.refreshTableData.disabled = false;
   }
@@ -2058,7 +2174,7 @@ function addTab(
 async function closeTab(id) {
   const target = state.tabs.find((tab) => tab.id === id);
   if (!target) return;
-  if (target.running || target.opening || target.confirming || target.resolvingTarget || target.cellSaving) {
+  if (target.paging || target.running || target.opening || target.confirming || target.resolvingTarget || target.cellSaving || target.cellBatchSaving) {
     showToast("请先停止此查询，再关闭标签");
     return;
   }
@@ -2077,12 +2193,23 @@ async function closeTab(id) {
 function updatePageControls() {
   const tab = activeTab();
   const browse = tab?.browse;
+  const paging = Boolean(tab?.paging);
+  refs.resultContent.dataset.paging = String(paging && tab.outputTab === "result");
+  refs.resultGrid.setAttribute("aria-busy", String(paging));
+  refs.pageControls.setAttribute("aria-busy", String(paging));
   refs.pageControls.hidden =
     !browse || (tab.outputTab || "result") !== "result";
   if (!browse) return;
-  refs.pageLabel.textContent = `第 ${browse.page + 1} 页 · ${browse.pageSize} 行/页`;
-  refs.previousPage.disabled = browse.page === 0 || Boolean(tab.running);
-  refs.nextPage.disabled = !browse.hasNext || Boolean(tab.running);
+  const busy = Boolean(paging || tab.running || tab.confirming || tab.resolvingTarget || tab.refreshing || tab.changingTransaction || cellWritePending(tab));
+  const page = (tab.paging?.page ?? browse.page) + 1;
+  refs.pageLabel.textContent = paging ? `加载第 ${page} 页…` : `第 ${page} 页`;
+  refs.pageJumpToggle.title = `每页 ${browse.pageSize} 行 · 点击跳转到指定页`;
+  refs.pageJumpToggle.disabled = busy;
+  refs.previousPage.disabled = browse.page === 0 || busy;
+  refs.nextPage.disabled = !browse.hasNext || busy;
+  if (refs.pageJumpInput.dataset.tabId !== tab.id || document.activeElement !== refs.pageJumpInput) refs.pageJumpInput.value = String(page);
+  refs.pageJumpInput.dataset.tabId = tab.id;
+  refs.pageJumpInput.disabled = refs.pageJumpButton.disabled = busy;
 }
 function trimResultMemory(current) {
   const tabs = selectResultsToRelease(state.tabs, {
@@ -2098,6 +2225,11 @@ function trimResultMemory(current) {
 }
 
 function renderOutput() {
+  if (refs.locateColumn) refs.locateColumn.disabled = !activeTab()?.result?.columns?.length || (activeTab()?.outputTab || 'result') !== 'result' || Boolean(state.redisConsole);
+  resultControls.close();
+  refs.resultSelection.hidden = true;
+  refs.saveTableChanges.hidden = refs.discardTableChanges.hidden = true;
+  refs.dataImportButton.disabled = true;
   const tab = activeTab();
   resultGrid.closeFilter(false);
   if (state.redisConsole) {
@@ -2130,6 +2262,7 @@ function renderOutput() {
     refs.resultMeta.textContent = "尚未打开查询";
     refs.resultMeta.classList.remove("error");
     refs.copyResults.disabled = refs.exportResults.disabled = true;
+    refs.resultMore.disabled = true;
     if (state.gridResult) resultGrid.clear();
     state.gridResult = null;
     state.gridFilter = null;
@@ -2147,6 +2280,7 @@ function renderOutput() {
   refs.redisConsolePanel.hidden = true;
   const result = tab.result;
   resultGrid.viewport.setAttribute("aria-readonly", String(tab.mode !== "write" || (!tab.browse && !tab.redisKey)));
+  if (driverForTab(tab) === 'redis' && tab.outputTab === 'structure') tab.outputTab = 'result';
   const mode = tab.outputTab || "result";
   renderWorkspaceMode(tab);
   const filter = (tab.filter || "").trim().toLowerCase();
@@ -2219,7 +2353,8 @@ function renderOutput() {
     result.connectionLabel ||
     state.profiles.find((p) => p.id === tab.connectionId)?.name ||
     "未选择连接";
-  refs.resultMeta.textContent = result.transactionRolledBack
+  refs.resultMeta.textContent = result.schemaChanged ? "表结构已改变，请刷新数据后继续编辑"
+    : result.transactionRolledBack
     ? "事务已回滚 · 当前结果已失效，请刷新数据"
     : tab.running
     ? `${source} · 执行中…`
@@ -2233,10 +2368,28 @@ function renderOutput() {
         ? "尚未执行查询"
         : `${source} · ${Number(result.elapsedMs || 0).toFixed(1)} ms · ${result.rowCount} 行${filtered ? ` · 已过滤为 ${count} 行（已加载数据）` : ""}${result.truncated ? ` · 已达${result.truncatedReason === "result_size" ? " 8 MiB" : " 1000 行"}上限` : ""}${tab.browse?.orderNotice ? ` · ${tab.browse.orderNotice}` : ""}`;
   refs.resultMeta.title = refs.resultMeta.textContent;
-  refs.resultMeta.classList.toggle("error", Boolean(tab.error || result.transactionRolledBack));
+  if (driverForTab(tab) === 'redis' && tab.redisKey != null && result.executed && !tab.error) {
+    const ttl = tab.redisTtl;
+    const ttlLabel = ttl === -1 ? '无过期时间' : ttl === -2 ? 'Key 已不存在' : Number.isFinite(ttl) ? `TTL ${ttl} 秒（读取时）` : '';
+    refs.resultMeta.textContent += ` · ${redisKeyTypePresentation(tab.redisType).label}${ttlLabel ? ` · ${ttlLabel}` : ''}`;
+    refs.resultMeta.title = refs.resultMeta.textContent;
+  }
+  refs.resultMeta.classList.toggle("error", Boolean(tab.error || result.transactionRolledBack || result.schemaChanged));
   setSelectableText(refs.messagePanel, tab.message || "执行查询后显示数据库消息");
   refs.copyResults.disabled = refs.exportResults.disabled =
     mode !== "result" || !result.columns.length;
+  refs.resultMore.disabled = refs.copyResults.disabled;
+  const transferDriver = driverForTab(tab);
+  const transferTable = Boolean(tab.browse && ["table", "partitioned_table"].includes(tab.browse.kind) && ["postgres", "mysql"].includes(transferDriver));
+  refs.resultMoreMenu.querySelectorAll('[data-export-format]').forEach(button => {
+    button.disabled = refs.copyResults.disabled || (button.dataset.exportFormat === "sql" && !transferTable);
+    if (button.dataset.exportFormat === "sql") button.title = transferTable ? "导出 INSERT 语句" : "请从数据表导出 SQL";
+  });
+  refs.dataImportButton.disabled = !tab.connectionId || !["postgres", "mysql"].includes(transferDriver) || Boolean(tab.running || tab.paging || tab.refreshing || cellWritePending(tab));
+  refs.dataImportMenu.querySelectorAll('[data-import-format]').forEach(button => {
+    button.disabled = button.dataset.importFormat !== "sql" && (!transferTable || tab.mode !== "write" || tab.result.transactionRolledBack);
+  });
+  refs.resultSelection.hidden = mode !== "result" || !(resultGrid.selected.size || resultGrid.selectedColumns?.size);
   const editableTable = Boolean(
     tab.mode === "write" && tab.browse && ["table", "partitioned_table"].includes(tab.browse.kind),
   );
@@ -2244,14 +2397,19 @@ function renderOutput() {
     ? resultGrid.getSelectedRows()
     : [];
   const hasPrimaryKey = Boolean(tab.browse?.primaryKeys?.length);
-  if (refs.newRow) refs.newRow.hidden = !editableTable || mode !== "result";
+  refs.saveTableChanges.hidden = refs.discardTableChanges.hidden = mode !== "result" || !(tab.browse || tab.redisKey);
+  resultGrid.updateFooter();
+  if (refs.newRow) {
+    refs.newRow.hidden = !editableTable || mode !== "result";
+    refs.newRow.disabled = Boolean(tab.paging || tab.running || tab.refreshing);
+  }
   if (refs.editRow) {
-    refs.editRow.hidden = !editableTable || !hasPrimaryKey || mode !== "result";
-    refs.editRow.disabled = selectedRows.length !== 1;
+    refs.editRow.hidden = !editableTable || !hasPrimaryKey || mode !== "result" || !selectedRows.length;
+    refs.editRow.disabled = selectedRows.length !== 1 || Boolean(tab.paging || tab.running || tab.refreshing);
   }
   if (refs.deleteRows) {
     refs.deleteRows.hidden = !editableTable || !hasPrimaryKey || mode !== "result";
-    refs.deleteRows.disabled = selectedRows.length === 0;
+    refs.deleteRows.disabled = selectedRows.length === 0 || Boolean(tab.paging || tab.running || tab.refreshing);
   }
   if (mode === "structure") {
     if (tab.structure && state.structureRendered !== tab.structure) {
@@ -2263,6 +2421,14 @@ function renderOutput() {
           structurePlaceholder(tab),
       );
       state.structureRendered = null;
+    }
+    refs.structurePanel.setAttribute("aria-busy", String(Boolean(tab.structurePending)));
+    const refresh = refs.structurePanel.querySelector("[data-refresh-structure]");
+    if (refresh) refresh.disabled = Boolean(tab.running || tab.confirming);
+    const status = refs.structurePanel.querySelector(".structure-refresh-status");
+    if (status) {
+      status.textContent = tab.structureError ? `刷新失败：${tab.structureError} · 当前显示上次加载的结构` : "";
+      status.classList.toggle("error", Boolean(tab.structureError));
     }
   }
   updatePageControls();
@@ -2379,16 +2545,17 @@ function renderStructure(details) {
   const columns = details.columns || [];
   const indexes = details.indexes || [];
   const constraints = details.constraints || [];
+  const nativeColumns = details.mysql && ["table", "partitioned_table"].includes(details.kind) ? mysqlColumns(details) : null;
   const text = value => `<span class="selectable-text">${escapeHtml(value)}</span>`;
   const code = value => `<code class="selectable-text">${escapeHtml(value)}</code>`;
   refs.structurePanel.innerHTML = `
     <h2 class="structure-title"><span class="schema-icon">${kindIcons[details.kind] || "◇"}</span>${text(details.qualifiedName)} <span class="object-kind-icon">${escapeHtml(kindLabels[details.kind] || details.kind)}</span></h2>
     ${details.signature ? `<div class="structure-comment">${text(details.signature)}</div>` : ""}
     ${details.comment ? `<p class="structure-comment">${text(details.comment)}</p>` : ""}
-    <div class="structure-section">列 · ${columns.length}</div>
+    ${["function", "procedure"].includes(details.kind) ? "" : `<div class="structure-section">列 · ${columns.length}</div>
     <table class="structure-table"><thead><tr><th>名称</th><th>类型</th><th>可为空</th><th>默认值</th><th>备注</th></tr></thead><tbody>
-      ${columns.map(c => `<tr><td>${code(c.name)}${c.primaryKey ? '<span class="pk-badge">PK</span>' : ""}</td><td>${text(c.dataType)}</td><td>${text(c.nullable ? "是" : "否")}</td><td>${code(c.defaultValue ?? "—")}</td><td>${text(c.comment || "—")}</td></tr>`).join("") || '<tr><td colspan="5">此对象没有列信息</td></tr>'}
-    </tbody></table>
+      ${columns.map(c => `<tr><td>${code(c.name)}${c.primaryKey ? '<span class="pk-badge">PK</span>' : ""}</td><td>${text(c.dataType)}</td><td>${text(c.nullable ? "是" : "否")}</td><td>${code(nativeColumns?.get(c.name)?.defaultValue || c.defaultValue || "—")}</td><td>${text(c.comment || "—")}</td></tr>`).join("") || '<tr><td colspan="5">此对象没有列信息</td></tr>'}
+    </tbody></table>`}
     ${indexes.length ? `<div class="structure-section">索引 · ${indexes.length}</div><table class="structure-table"><thead><tr><th>名称</th><th>属性</th><th>定义</th></tr></thead><tbody>${indexes.map(i => `<tr><td>${code(i.name)}</td><td>${text(i.primary ? "主键" : i.unique ? "唯一" : "普通")}</td><td>${code(i.definition)}</td></tr>`).join("")}</tbody></table>` : ""}
     ${constraints.length ? `<div class="structure-section">约束 · ${constraints.length}</div><table class="structure-table"><thead><tr><th>名称</th><th>类型</th><th>定义</th></tr></thead><tbody>${constraints.map(c => `<tr><td>${code(c.name)}</td><td>${text(c.kind)}</td><td>${code(c.definition)}</td></tr>`).join("")}</tbody></table>` : ""}
     ${details.definition ? `<div class="structure-section">定义</div><pre class="definition">${text(details.definition)}</pre>` : ""}`;
@@ -2425,10 +2592,20 @@ function renderStructure(details) {
     toolbar.append(sql);
   }
   refs.structurePanel.prepend(toolbar);
-
+  const status = document.createElement("span");
+  status.className = "structure-refresh-status";
+  status.setAttribute("role", "status");
+  status.setAttribute("aria-live", "polite");
+  toolbar.append(status);
 }
 async function inspectObject(object, { connectionId = state.activeConnectionId, tab = activeTab() } = {}) {
   if (!tab) return openObjectStructureTab(object, connectionId);
+  const previous = tab.inspectedObject || tab.browse;
+  const sameObject = previous && previous.id === object.id && previous.kind === object.kind &&
+    (previous.connectionId || tab.connectionId) === connectionId &&
+    (previous.database || tabDatabase(tab)) === (object.database || tabDatabase(tab));
+  if (sameObject && tab.structurePending) return false;
+  const previousStructure = sameObject ? tab.structure : null;
   const request = ++state.structureRequest;
   tab.structureRequest = request;
   tab.inspectedObject = { ...object, connectionId };
@@ -2436,12 +2613,16 @@ async function inspectObject(object, { connectionId = state.activeConnectionId, 
   refs.objectSelection.textContent = `${object.schema}.${object.name}`;
   tab.outputTab = "structure";
   tab.structurePending = true;
-  tab.structure = null;
+  tab.structure = previousStructure;
   tab.structureError = null;
-  renderOutput();
-  renderStructureLoading(
-    `正在读取 ${object.signature || object.qualifiedName}`,
-  );
+  if (activeTab() === tab) renderOutput();
+  if (previousStructure && activeTab() === tab && !window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+    refs.structurePanel.getAnimations().forEach(animation => animation.cancel());
+    refs.structurePanel.animate(
+      [{ opacity: 1 }, { opacity: 0.88, offset: 0.4 }, { opacity: 1 }],
+      { duration: 160, easing: "ease-out" },
+    );
+  }
   let pending;
   try {
     pending = call("get_object_details", {
@@ -2453,11 +2634,19 @@ async function inspectObject(object, { connectionId = state.activeConnectionId, 
     tab.structureLoad = pending;
     const details = await pending;
     if (tab.structureRequest === request) {
-      tab.structure = details;
+      // Keep the same DOM, text selection and scroll position for unchanged metadata.
+      tab.structure = previousStructure && JSON.stringify(previousStructure) === JSON.stringify(details) ? previousStructure : details;
       tab.structurePending = false;
       if (activeTab() === tab) {
+        const view = previousStructure && tab.outputTab === "structure"
+          ? { top: refs.structurePanel.scrollTop, left: refs.structurePanel.scrollLeft } : null;
         renderTabs();
         renderOutput();
+        if (view) {
+          refs.structurePanel.scrollTop = view.top;
+          refs.structurePanel.scrollLeft = view.left;
+          showToast("已刷新", "info", 1200);
+        }
       }
       return true;
     }
@@ -2465,7 +2654,10 @@ async function inspectObject(object, { connectionId = state.activeConnectionId, 
     if (tab.structureRequest !== request) return false;
     tab.structurePending = false;
     tab.structureError = errorText(error);
-    if (activeTab() === tab) renderOutput();
+    if (activeTab() === tab) {
+      renderOutput();
+      if (previousStructure) showToast(`结构刷新失败：${tab.structureError}，已保留上次加载的内容`, "error");
+    }
   } finally {
     if (tab.structureLoad === pending) tab.structureLoad = null;
   }
@@ -2627,17 +2819,6 @@ function contextSchemaDdl(target, driver) {
     : `CREATE SCHEMA ${contextIdentifier(name, driver)};`;
 }
 
-function openContextDdlQuery(sql, title, target) {
-  if (!sql) return;
-  const tab = addTab(sql, target.connectionId, null, {
-    title,
-    database: target.object?.database || target.database,
-    schema: target.object?.schema || target.schema || null,
-  });
-  if (!tab) return;
-  showToast("已创建 DDL 查询，请确认后执行");
-}
-
 async function copyContextDdl(target) {
   const driver = target?.driver || contextDriver(target);
   let ddl = "";
@@ -2661,42 +2842,97 @@ async function copyContextDdl(target) {
   }
 }
 
-function openContextCreateQuery(target, action) {
+function openContextObjectDialog(target, action) {
   if (action === "create-table") return openCreateTableEditor(target);
-  state.pendingObjectCreate = { target, action };
+  const profile = state.profiles.find((item) => item.id === target.connectionId);
+  target = { ...target, database: target.object?.database || target.database || profile?.database || null, object: target.object ? { ...target.object } : null };
+  state.pendingObjectCreate = { target, action, driver: target.driver || contextDriver(target), busy: false };
   const rename = action === "rename-table";
   const kind = action.replace("create-", "");
   const labels = { database: "数据库", schema: "schema", table: "表" };
   refs.createObjectTitle.textContent = rename ? "重命名表" : `新建${labels[kind]}`;
   refs.createObjectNameLabel.textContent = rename ? "新表名" : `${labels[kind]}名称`;
-  const profile = state.profiles.find((item) => item.id === target.connectionId);
   refs.createObjectContext.textContent = `${profile?.name || ""} / ${target.object?.database || target.database || profile?.database || "服务器"}${rename ? ` / ${target.object.schema}.${target.object.name}` : ""}`;
-  refs.createObjectHint.textContent = `填写名称后打开 SQL 编辑器，检查语句并点击「执行」完成${rename ? "重命名" : "创建"}。`;
+  refs.createObjectHint.textContent = `点击「${rename ? "重命名" : "创建"}」直接完成${rename ? "重命名" : "创建"}，成功后自动刷新目录。`;
+  refs.applyCreateObject.textContent = rename ? "重命名" : "创建";
+  refs.createObjectFeedback.textContent = "";
+  refs.createObjectPreview.open = false;
   refs.createObjectName.value = rename ? target.object.name : "";
   refs.createObjectName.placeholder = rename ? "new_table_name" : `new_${kind}`;
   refs.createObjectName.setCustomValidity("");
+  updateObjectActionPreview();
   refs.createObjectModal.showModal();
   refs.createObjectName.focus();
   if (rename) refs.createObjectName.select();
 }
 
-function submitContextCreateQuery(target, action, name) {
-  const driver = target?.driver || contextDriver(target);
-  const scope = target?.type === "object"
-    ? { ...target, schema: target.object?.schema, database: target.object?.database }
-    : target;
-  if (action === "create-database") {
-    openContextDdlQuery(`CREATE DATABASE ${contextIdentifier(name, driver)};`, `新建数据库 · ${name}`, scope);
-  } else if (action === "create-schema") {
-    openContextDdlQuery(`CREATE SCHEMA ${contextIdentifier(name, driver)};`, `新建 schema · ${name}`, scope);
-  } else if (action === "rename-table") {
-    const quote = (value) => contextIdentifier(value, driver);
-    const qualified = `${quote(target.object.schema)}.${quote(target.object.name)}`;
-    const sql = driver === "mysql"
-      ? `RENAME TABLE ${qualified} TO ${quote(target.object.schema)}.${quote(name)};`
-      : `ALTER TABLE ${qualified} RENAME TO ${quote(name)};`;
-    openContextDdlQuery(sql, `重命名 · ${target.object.name}`, scope);
+function updateObjectActionPreview() {
+  const pending = state.pendingObjectCreate;
+  if (!pending) return;
+  refs.createObjectFeedback.textContent = "";
+  refs.createObjectPreview.hidden = !refs.createObjectName.value.trim();
+  try { setSelectableText(refs.createObjectSql, objectActionPlan(pending.target, pending.action, refs.createObjectName.value, pending.driver).sql); }
+  catch (error) { setSelectableText(refs.createObjectSql, errorText(error)); }
+}
+
+function renameObjectTabs(target, name, driver) {
+  const old = target.object, object = { ...old, name, qualifiedName: `${old.schema}.${name}`, id: driver === "mysql" ? `${old.schema}.${name}` : old.id };
+  for (const tab of state.tabs) {
+    if (tab.connectionId !== target.connectionId || tabDatabase(tab) !== old.database) continue;
+    let changed = false;
+    for (const key of ["browse", "openedObject", "inspectedObject"]) {
+      if (tab[key]?.id !== old.id || tab[key]?.schema !== old.schema || (tab[key]?.kind && tab[key].kind !== old.kind)) continue;
+      tab[key] = { ...tab[key], ...object }; changed = true;
+    }
+    if (!changed) continue;
+    if (tab.title === old.name) tab.title = name;
+    else if (tab.title === `结构 · ${old.name}`) tab.title = `结构 · ${name}`;
+    tab.structure = null; tab.structureRequest = ++state.structureRequest;
+    if (tab.browse) {
+      tab.browse.detailsLoaded = false; tab.result = emptyResult(); tab.gridState = null;
+      tab.sql = browseSql(tab.browse); tab.editorState = null;
+      if (tab === activeTab()) state.editor.setState(tab.editorState = makeEditorState(tab));
+    }
+    tab.message = `表已重命名为 ${name}，刷新后读取最新数据或结构`;
   }
+  persistTabs(); renderTabs(); renderOutput();
+  return object;
+}
+
+async function submitContextObjectAction(pending, name) {
+  const { target, action, driver } = pending, connectionId = target.connectionId;
+  const plan = objectActionPlan(target, action, name, driver);
+  const key = transactionKey(connectionId, plan.database);
+  if (state.connectionStatuses[connectionId] !== "connected") throw new Error("连接已断开，请重新连接后重试");
+  if (state.transactionKeys.has(key)) throw new Error("请先提交或回滚当前数据库的事务，再执行此操作");
+  if (state.tabs.some(tab => tab.connectionId === connectionId && tabDatabase(tab) === plan.database && (tab.running || tab.changingTransaction || tab.cellSaving || tab.cellBatchSaving))) throw new Error("当前数据库有操作正在执行，请稍后重试");
+  if (action === "rename-table" && state.tabs.some(tab => tab.connectionId === connectionId && tabDatabase(tab) === plan.database && (tab.browse?.id === target.object.id || tab.inspectedObject?.id === target.object.id) && resultGrid.getCellEditDraft(tab.result.rows))) throw new Error("目标表还有未保存的修改，请先保存或取消后再重命名");
+  await call("execute_mutation", { request: { connectionId, database: plan.database, schema: plan.schema, sql: plan.sql, queryId: makeId(action), readOnly: false } });
+  // Everything below is refresh work. Its failure must never invite a second
+  // CREATE/RENAME execution after the server has already succeeded.
+  let refreshError = false;
+  try {
+    recordHistory(plan.sql, { connectionId, database: plan.database, schema: plan.schema });
+    state.queryTargets.delete(key);
+    if (action === "rename-table") renameObjectTabs(target, plan.name, driver);
+    if (state.activeConnectionId === connectionId) {
+      if (action === "create-database") refreshError = !await refreshDatabaseList(target, { notify: false });
+      else if (action === "create-schema") {
+        refreshError = !await loadSchemas(plan.database, connectionId);
+        if (!refreshError) { const selected = state.visibleSchemasByDatabase.get(plan.database); selected?.add(plan.name); persistVisibleSchemas(connectionId, plan.database, selected || new Set([plan.name])); renderTree(); }
+      } else {
+        state.objectsBySchema.delete(schemaKey(plan.database, plan.schema));
+        refreshError = !await loadSchemaObjects(plan.database, plan.schema, { force: true });
+        const renamed = state.objectsBySchema.get(schemaKey(plan.database, plan.schema))?.find(object => object.name === plan.name && object.kind === target.object.kind);
+        if (renamed) selectTreeTarget({ ...target, object: renamed });
+        const tab = activeTab();
+        if (tab?.structureOnly && tab.inspectedObject?.id === (driver === "mysql" ? `${plan.schema}.${plan.name}` : target.object.id)) refreshError ||= !await inspectObject(tab.inspectedObject, { connectionId, tab });
+      }
+      rememberTreeSession();
+    } else state.treeSessions.delete(connectionId);
+    updateEditorSchema();
+  } catch { refreshError = true; }
+  return { message: plan.success + (refreshError ? "；目录刷新失败，请手动刷新，不要重复执行" : ""), refreshError };
 }
 
 async function openCreateTableEditor(context) {
@@ -2759,7 +2995,7 @@ async function openTableStructureEditor(target) {
 
 async function editTableStructure(tab) {
   const object = tab?.inspectedObject || tab?.browse;
-  if (!object || !tab.structure || tab.running || tab.confirming || tab.editingStructure) return;
+  if (!object || !tab.structure || tab.structurePending || tab.running || tab.confirming || tab.editingStructure) return;
   const connectionId = object.connectionId || tab.connectionId;
   const database = object.database || tabDatabase(tab);
   const schema = object.schema;
@@ -2768,6 +3004,8 @@ async function editTableStructure(tab) {
   const guard = () => {
     if (tab.mode !== "write") throw new Error("当前窗口为只读，请先点击顶部锁切换为可写");
     if (state.transactionKeys.has(key)) throw new Error("请先提交或回滚当前数据库的事务，再编辑表结构");
+    if (state.tabs.some(item => item.connectionId === connectionId && tabDatabase(item) === database &&
+        (item.browse?.id === object.id || item.inspectedObject?.id === object.id) && resultGrid.getCellEditDraft(item.result.rows))) throw new Error("目标表还有未保存的单元格修改，请先保存或取消后再编辑结构");
     if (state.tabs.some((item) => item.connectionId === connectionId && tabDatabase(item) === database && (item.running || item.changingTransaction)))
       throw new Error("当前数据库有操作正在执行，请完成后再编辑结构");
   };
@@ -2967,7 +3205,7 @@ function hideContextMenus() {
 }
 async function closeTabsByIds(ids) {
   const idSet = new Set(ids);
-  const blocked = state.tabs.filter((tab) => idSet.has(tab.id) && (tab.running || tab.opening || tab.confirming || tab.resolvingTarget || tab.changingTransaction || tab.cellSaving));
+  const blocked = state.tabs.filter((tab) => idSet.has(tab.id) && (tab.running || tab.opening || tab.confirming || tab.resolvingTarget || tab.changingTransaction || tab.cellSaving || tab.cellBatchSaving));
   if (blocked.length) {
     showToast("有查询正在执行，请先停止后再关闭标签", "error");
     return;
@@ -3017,7 +3255,8 @@ async function confirmWrite(sql, tab = activeTab()) {
   const dangerous = info.keywords.some((keyword) => /^(DROP|TRUNCATE|ALTER|CREATE|GRANT|REVOKE|DELETE)$/i.test(keyword));
   const scope = dangerous ? "这可能改变数据库结构、权限或删除数据。" : "这会修改数据库中的数据。";
   const profile = state.profiles.find((profile) => profile.id === (tab?.connectionId || state.activeConnectionId));
-  return confirmAction(`执行位置：${queryTargetDescription(tab)}\n${profile?.host || ""}:${profile?.port || ""}${profile?.user ? ` · ${profile.user}` : ""}\n\n即将执行 ${info.count || 1} 条 SQL。${scope}`, { title: "确认执行 SQL", detail: sql });
+  const execution = profile?.driver === "mysql" ? `即将执行 MySQL SQL。${scope}${info.keywords.some(keyword => /^(CREATE|ALTER|DROP|TRUNCATE|RENAME)$/i.test(keyword)) ? " MySQL DDL 会隐式提交，不能回滚。" : ""}` : `即将执行 ${info.count || 1} 条 SQL。${scope}`;
+  return confirmAction(`执行位置：${queryTargetDescription(tab)}\n${profile?.host || ""}:${profile?.port || ""}${profile?.user ? ` · ${profile.user}` : ""}\n\n${execution}`, { title: "确认执行 SQL", detail: sql });
 }
 function firstRedisCommand(sql) {
   return sql.trim().match(/^[^\s]+/)?.[0]?.toUpperCase() || "";
@@ -3060,13 +3299,26 @@ async function loadBrowseDetails(tab, prefetched = null) {
   browse.columns = details.columns || [];
   browse.primaryKeys = browse.columns.filter((column) => column.primaryKey).map((column) => column.name);
   browse.detailsLoaded = true;
+  browse.engine = details.mysql?.engine || null;
   tab.structure = details;
   tab.structurePending = false;
   tab.structureError = null;
   return details;
 }
 
-async function openObjectQuery(object, { previewTab = null } = {}) {
+async function showTableData() {
+  const tab = activeTab();
+  if (!tab) return;
+  const object = tab.inspectedObject || tab.openedObject;
+  if (tab.structureOnly && object && ["table", "partitioned_table", "view", "materialized_view", "foreign_table"].includes(object.kind)) {
+    await openObjectQuery(object, { previewTab: tab, connectionId: tab.connectionId });
+    return;
+  }
+  tab.outputTab = "result";
+  renderOutput();
+}
+
+async function openObjectQuery(object, { previewTab = null, connectionId = state.activeConnectionId } = {}) {
   if (
     ![
       "table",
@@ -3079,7 +3331,6 @@ async function openObjectQuery(object, { previewTab = null } = {}) {
     openObjectStructureTab(object);
     return;
   }
-  const connectionId = state.activeConnectionId;
   const target = objectTabTarget(object, connectionId);
   const existing = findObjectTab(target, "data");
   if (existing) {
@@ -3104,8 +3355,7 @@ async function openObjectQuery(object, { previewTab = null } = {}) {
   const tab = promote ? previewTab : addTab(browseSql(browse), connectionId, browse, { openedObject: target, openedObjectView: "data" });
   if (!tab) return;
   if (promote) {
-    // The first click already opened this preview. Promote it on double-click
-    // instead of delaying all single clicks or leaving an extra structure tab.
+    // Reuse the structure preview when opening data, including a double-click.
     tab.structureRequest = ++state.structureRequest;
     Object.assign(tab, { title: object.name, sql: browseSql(browse), browse,
       tableView: true, structureOnly: false, structurePending: false,
@@ -3221,22 +3471,57 @@ async function runRedisCommand(tab, sqlText, connectionId) {
     if (isActive()) renderOutput();
   }
 }
+async function jumpBrowsePage(value) {
+  const text = String(value).trim();
+  if (!/^[1-9]\d*$/.test(text)) {
+    showToast("请输入大于 0 的整数页码", "error");
+    return;
+  }
+  await changeBrowsePage(Number(text) - 1);
+}
 async function moveBrowsePage(delta) {
   const tab = activeTab();
-  if (!tab?.browse || tab.running || cellWritePending(tab)) return;
-  if (!await confirmDiscardCellEdits([tab]) || activeTab() !== tab) return;
-  const page = Math.max(0, tab.browse.page + delta);
+  if (tab?.browse) await changeBrowsePage(Math.max(0, tab.browse.page + delta));
+}
+async function changeBrowsePage(page) {
+  const tab = activeTab();
+  if (!tab?.browse || tab.paging || tab.running || tab.refreshing || tab.confirming || tab.resolvingTarget || tab.changingTransaction || cellWritePending(tab)) return;
+  if (!Number.isSafeInteger(page) || page < 0 || !Number.isSafeInteger(page * tab.browse.pageSize)) {
+    showToast("页码超出可查询范围", "error");
+    return;
+  }
   if (page === tab.browse.page) return;
-  tab.browse.page = page;
-  state.applyingBrowse = true;
-  setEditorValue(browseSql(tab.browse));
-  state.applyingBrowse = false;
+  const previousSql = tab.sql;
+  const view = resultGrid.getViewState();
+  const paging = { page, view: { widths: view.widths, scrollLeft: view.scrollLeft, scrollTop: 0 } };
+  tab.paging = paging;
   renderOutput();
-  await runQuery();
+  let success = false;
+  try {
+    if (!await confirmDiscardCellEdits([tab]) || activeTab() !== tab) return;
+    state.applyingBrowse = true;
+    try { setEditorValue(browseSql({ ...tab.browse, page })); }
+    finally { state.applyingBrowse = false; }
+    success = await runQuery({ preserveResult: true, pagingRequest: paging });
+    if (success) {
+      tab.browse.page = page;
+      if (!tab.result.rows.length && activeTab() === tab) showToast(`第 ${page + 1} 页没有数据，可返回前面的页码`);
+    }
+  } finally {
+    if (!success && tab.sql !== previousSql) {
+      tab.sql = previousSql;
+      tab.editorState = makeEditorState(tab);
+      if (activeTab() === tab) state.editor.setState(tab.editorState);
+    }
+    if (tab.paging === paging) tab.paging = null;
+    if (activeTab() === tab) renderOutput();
+    persistTabs();
+  }
 }
 
-async function runQuery({ preserveResult = false } = {}) {
+async function runQuery({ preserveResult = false, pagingRequest = null } = {}) {
   const tab = activeExecutionTab();
+  if (tab?.paging && tab.paging !== pagingRequest) return;
   if (!tab || tab.running || tab.confirming || tab.resolvingTarget || tab.changingTransaction || cellWritePending(tab)) return;
   if (!await confirmDiscardCellEdits([tab]) || activeExecutionTab() !== tab) return;
   if (tab.console) redisEditor?.finishComposition();
@@ -3282,6 +3567,7 @@ async function runQuery({ preserveResult = false } = {}) {
     showToast(`无法确认执行位置：${target?.error || "请刷新执行位置"}`, "error");
     return;
   }
+  if (cellWritePending(tab)) { renderTabs(); return; }
   // Capture the destination before confirmation/connection awaits; never read
   // the active browser or another tab when dispatching or recording history.
   const executionTarget = { connectionId, database: tabDatabase(tab) || target.context.database || null, schema: tabSchema(tab) };
@@ -3342,21 +3628,41 @@ async function runQuery({ preserveResult = false } = {}) {
       truncatedReason,
       executed: true,
       ...executionTarget,
+      cellEditsInTransaction: txOpen,
     };
     tab.result.finishedAt = Date.now();
     tab.result.bytes = estimateResultBytes(tab.result);
     trimResultMemory(tab);
     tab.refreshing = false;
-    tab.gridState = null;
+    tab.gridState = tab.paging ? tab.paging.view : null;
     const statementCount = payload.statement_count || 1;
     tab.message = `执行成功${statementCount > 1 ? ` · ${statementCount} 条语句 · 显示最后一条语句的结果` : ""} · ${tab.result.rowCount} 行 · ${Number(tab.result.elapsedMs).toFixed(1)} ms${tab.result.truncated ? `\n结果已限制（${truncatedReason === "result_size" ? "8 MiB" : "1000 行"}）。` : ""}`;
     tab.message += `\n执行位置：${targetDescription}`;
     recordHistory(sqlText, executionTarget);
+    let catalogRefreshFailed = false;
+    if (profile.driver === "mysql" && sqlExecutionInfo(sqlText, "mysql").keywords.some(keyword => /^(CREATE|ALTER|DROP|RENAME|TRUNCATE)$/i.test(keyword))) {
+      for (const object of mysqlDdlTargets(sqlText, executionTarget.database)) {
+        for (const item of state.tabs) {
+          if (item.connectionId !== connectionId || !item.browse || tabDatabase(item)?.toLowerCase() !== object.database?.toLowerCase() || item.browse.name.toLowerCase() !== object.name.toLowerCase()) continue;
+          item.result.schemaChanged = true; item.structure = null; item.structureError = "表结构已改变，请刷新读取最新结构";
+          item.structureRequest = ++state.structureRequest; item.browse.detailsLoaded = false; item.browse.columns = []; item.browse.primaryKeys = [];
+        }
+      }
+      state.queryTargets.delete(transactionKey(connectionId, executionTarget.database));
+      state.treeSessions.get(connectionId)?.objectsBySchema.delete(schemaKey(executionTarget.database, executionTarget.database));
+      try {
+        if (state.activeConnectionId === connectionId) {
+          if (/\b(?:CREATE|DROP)\s+(?:DATABASE|SCHEMA)\b/i.test(sqlText)) await refreshDatabaseList({ connectionId }, { notify: false });
+          else if (state.expandedDatabases.has(executionTarget.database)) catalogRefreshFailed = !await loadSchemaObjects(executionTarget.database, executionTarget.database, { force: true });
+        }
+      } catch { catalogRefreshFailed = true; }
+    }
     tab.outputTab = "result";
     if (isActive()) {
       renderOutput();
-      showToast("查询完成");
+      if (!tab.paging) showToast(catalogRefreshFailed ? "SQL 已执行，目录刷新失败，请手动刷新；不要重复执行" : "查询完成", catalogRefreshFailed ? "error" : "info");
     }
+    return true;
   } catch (error) {
     const cancelled = tab.cancelRequested || isQueryCancellation(error);
     tab.refreshing = false;
@@ -3366,12 +3672,13 @@ async function runQuery({ preserveResult = false } = {}) {
     } else {
       tab.result = emptyResult();
     }
+    if (txOpen && transactionDidRollback(error, profile?.driver)) invalidateTransactionResults(connectionId, executionTarget.database);
     tab.error = !cancelled;
     tab.cancelled = cancelled;
     tab.message = cancelled
       ? `查询已取消\n\n${sqlText}`
       : `查询失败：${errorText(error)}\n执行位置：${targetDescription}\n\n${sqlText}`;
-    tab.outputTab = "message";
+    tab.outputTab = tab.paging && previousResult?.executed ? "result" : "message";
     if (isActive()) {
       renderOutput();
       showToast(cancelled ? "查询已取消" : `查询失败：${errorText(error)}`, cancelled ? "info" : "error");
@@ -3399,6 +3706,12 @@ async function changeTransaction(action) {
   if (action === "begin" && tab?.mode === "read") {
     showToast("当前已锁定为只读，请先点击锁解锁", "error");
     return;
+  }
+  if (action === "begin" && driverForTab(tab) === "mysql" && tab.browse?.engine && !/^innodb$/i.test(tab.browse.engine)) {
+    showToast(`当前表使用 ${tab.browse.engine}，不能保证事务回滚；请使用事务型存储引擎`, "error"); return;
+  }
+  if (state.tabs.some(item => item !== tab && item.connectionId === connectionId && tabDatabase(item) === database && (item.running || item.changingTransaction || item.cellSaving || item.cellBatchSaving))) {
+    showToast("当前数据库有操作正在执行，请完成后再改变事务状态", "error"); return;
   }
   tab.changingTransaction = true;
   renderTabs();
@@ -3428,6 +3741,10 @@ async function changeTransaction(action) {
     renderTabs();
     showToast(action === "begin" ? "事务已开始" : action === "commit" ? "事务已提交" : "事务已回滚");
   } catch (error) {
+    if (errorText(error).includes("[TX_MISSING]")) {
+      invalidateTransactionResults(connectionId, database);
+      renderOutput();
+    }
     showToast(`${action === "begin" ? "开始事务" : action === "commit" ? "提交事务" : "回滚事务"}失败：${errorText(error)}`, "error");
   } finally {
     tab.changingTransaction = false;
@@ -3435,8 +3752,8 @@ async function changeTransaction(action) {
   }
 }
 
-function sqlLiteral(value, driver = driverForTab()) {
-  return sqlValueLiteral(value, driver);
+function sqlLiteral(value, driver = driverForTab(), dataType) {
+  return sqlTypedValueLiteral(value, dataType, driver);
 }
 
 function mutationInputValue(value, original) {
@@ -3454,24 +3771,28 @@ function mutationFieldState(tab, column, type) {
   const field = tab.browse?.columns?.find((item) => item.name === column) || {};
   const isKey = tab.browse?.primaryKeys?.includes(column);
   if (field.generated) return { disabled: true, hint: "生成字段由数据库维护" };
-  if (type === "edit" && isKey) return { disabled: true, hint: "主键用于定位行，不会被修改" };
   if (field.identity) {
-    if (type === "edit" || (driverForTab(tab) === "postgres" && field.identityGeneration !== "byDefault")) {
-      return { disabled: true, hint: "自增字段由数据库自动生成" };
+    if (driverForTab(tab) === "postgres" && field.identityGeneration !== "byDefault") {
+      return { disabled: true, hint: "GENERATED ALWAYS identity 由数据库生成" };
     }
+    if (type === "edit") return { disabled: false, hint: isKey ? "保存时使用原主键定位，成功后更新主键值" : "自增字段可修改已有值" };
     return { disabled: false, hint: "留空由数据库自动生成，也可手动指定" };
   }
+  if (type === "edit" && isKey) return { disabled: false, hint: "保存时使用原主键定位，成功后更新主键值" };
   return { disabled: false, hint: type === "insert" && field.defaultValue ? "留空使用数据库默认值" : "" };
 }
 
 function openMutation(type) {
   const tab = activeTab();
+  if (tab?.paging || tab?.running || tab?.refreshing) return;
   if (tab?.mode !== "write") {
     showToast("当前已锁定为只读，请先点击锁解锁", "error");
     return;
   }
   const browse = tab?.browse;
   if (!browse || !["table", "partitioned_table"].includes(browse.kind)) return;
+  if (tab.result.schemaChanged) { showToast("表结构已改变，请先刷新数据", "error"); return; }
+  if (resultGrid.getCellEditDraft(tab.result.rows)) { showToast("请先保存或取消当前表的单元格修改", "error"); return; }
   const columns = mutationColumns(tab);
   const primaryKeys = browse.primaryKeys || [];
   const selectedRows = resultGrid.getSelectedRows?.() || [];
@@ -3483,7 +3804,7 @@ function openMutation(type) {
     showToast("编辑时只能选择一行", "error");
     return;
   }
-  state.mutation = { type, tab, columns, primaryKeys, selectedRows };
+  state.mutation = { type, tab, columns, primaryKeys, selectedRows, result: tab.result };
   const labels = { insert: "新增行", edit: "编辑行", delete: "删除行" };
   refs.mutationTitle.textContent = labels[type];
   refs.mutationHint.textContent = `${browse.schema}.${browse.name}${type === "delete" ? ` · 将删除 ${selectedRows.length} 行` : " · 空白字段不写入，编辑时仅保存有改动的字段"}`;
@@ -3513,12 +3834,14 @@ async function applyMutation(event) {
   const driver = driverForTab(tab);
   const quote = (identifier) => quoteIdentForDriver(identifier, driver);
   const table = `${quote(browse.schema)}.${quote(browse.name)}`;
-  let sql;
+  let sql, editedRow;
   try {
+    if (tab.mode !== "write" || tab.result.schemaChanged || tab.result.transactionRolledBack || (mutation.result && mutation.result !== tab.result)) throw new Error("表数据或可写状态已改变，请关闭窗口并刷新后重试");
+    if (driver === "mysql" && state.transactionKeys.has(transactionKey(tab.connectionId, tabDatabase(tab))) && browse.engine && !/^innodb$/i.test(browse.engine)) throw new Error("当前表的存储引擎不能保证回滚，请结束事务后再修改数据");
     if (type === "delete") {
       const keyIndexes = primaryKeys.map((key) => columns.indexOf(key));
       const predicates = selectedRows.map((row) =>
-        `(${primaryKeys.map((key, index) => sqlEquality(quote(key), sqlLiteral(row[keyIndexes[index]], driver), driver)).join(" AND ")})`,
+        `(${primaryKeys.map((key, index) => sqlEquality(quote(key), sqlLiteral(row[keyIndexes[index]], driver, browse.columns.find(field => field.name === key)?.dataType), driver)).join(" AND ")})`,
       );
       sql = `DELETE FROM ${table}\nWHERE ${predicates.join(" OR ")};`;
     } else {
@@ -3531,7 +3854,7 @@ async function applyMutation(event) {
       if (type === "insert") {
         const included = columns.filter((column) => !mutationFieldState(tab, column, type).disabled && typeof values[column] === "string" && values[column].trim() !== "");
         sql = included.length
-          ? `INSERT INTO ${table} (${included.map(quote).join(", ")})\nVALUES (${included.map((column) => sqlLiteral(values[column], driver)).join(", ")});`
+          ? `INSERT INTO ${table} (${included.map(quote).join(", ")})\nVALUES (${included.map((column) => sqlLiteral(values[column], driver, tab.browse.columns.find(field => field.name === column)?.dataType)).join(", ")});`
           : driver === "mysql" ? `INSERT INTO ${table} () VALUES ();` : `INSERT INTO ${table} DEFAULT VALUES;`;
       } else {
         if (!changed.length) {
@@ -3541,9 +3864,10 @@ async function applyMutation(event) {
         }
         const keyPredicates = primaryKeys.map((key) => {
           const index = columns.indexOf(key);
-          return sqlEquality(quote(key), sqlLiteral(source[index], driver), driver);
+          return sqlEquality(quote(key), sqlLiteral(source[index], driver, browse.columns.find(field => field.name === key)?.dataType), driver);
         });
-        sql = `UPDATE ${table}\nSET ${changed.map((column) => `${quote(column)} = ${sqlLiteral(mutationInputValue(values[column], source[columns.indexOf(column)]), driver)}`).join(", ")}\nWHERE ${keyPredicates.join(" AND ")};`;
+        sql = `UPDATE ${table}\nSET ${changed.map((column) => `${quote(column)} = ${sqlLiteral(mutationInputValue(values[column], source[columns.indexOf(column)]), driver, tab.browse.columns.find(field => field.name === column)?.dataType)}`).join(", ")}\nWHERE ${keyPredicates.join(" AND ")};`;
+        editedRow = { source, row: source.map((value, index) => changed.includes(columns[index]) ? mutationInputValue(values[columns[index]], value) : value) };
       }
     }
   } catch (error) {
@@ -3553,6 +3877,7 @@ async function applyMutation(event) {
   }
   if (!await confirmWrite(sql, tab)) return;
   refs.applyMutation.disabled = true;
+  let mutationBackendError = false;
   try {
     const payload = await call("execute_mutation", {
       request: {
@@ -3563,13 +3888,28 @@ async function applyMutation(event) {
         queryId: makeId("mutation"),
         readOnly: false,
       },
-    });
+    }).catch(error => { mutationBackendError = true; throw error; });
+    const txOpen = state.transactionKeys.has(transactionKey(tab.connectionId || state.activeConnectionId, tabDatabase(tab)));
+    if (type === "edit") {
+      if (payload.row_count !== 1) throw new Error("数据库未报告唯一匹配行，请刷新核对后再编辑");
+      const index = tab.result.rows.indexOf(editedRow.source);
+      if (index >= 0) {
+        tab.result.rows[index] = editedRow.row;
+        resultGrid.updateCellEditContexts?.(tab.result.rows, draft => {
+          const context = draft.context;
+          if (context?.tab === tab && context.result === tab.result && context.rowRef === editedRow.source && context.value === editedRow.row[context.columnIndex]) {
+            context.rowRef = editedRow.row; context.row = [...editedRow.row];
+          }
+        });
+        if (activeTab() === tab && state.gridResult === tab.result) resultGrid.refreshRows();
+      }
+      if (txOpen) tab.result.cellEditsInTransaction = true;
+    }
     refs.mutationModal.close();
     state.mutation = null;
     tab.message = `写入成功 · ${payload.row_count ?? 0} 行受影响`;
     tab.outputTab = "message";
     showToast(`写入成功 · ${payload.row_count ?? 0} 行受影响`);
-    const txOpen = state.transactionKeys.has(transactionKey(tab.connectionId || state.activeConnectionId, tabDatabase(tab)));
     if (!txOpen) {
       const originalMode = tab.mode;
       tab.mode = "read";
@@ -3580,6 +3920,7 @@ async function applyMutation(event) {
       tab.mode = originalMode;
     }
   } catch (error) {
+    if (mutationBackendError && state.transactionKeys.has(transactionKey(tab.connectionId, tabDatabase(tab))) && transactionDidRollback(error, driver)) invalidateTransactionResults(tab.connectionId, tabDatabase(tab));
     refs.mutationFeedback.textContent = `执行失败：${errorText(error)}`;
     refs.mutationFeedback.classList.add("error");
   } finally {
@@ -3603,44 +3944,103 @@ async function copyResults() {
     showToast("复制失败，请检查剪贴板权限", "error");
   }
 }
-async function exportResults() {
+async function exportResults(format = "csv") {
+  const tab = activeTab();
   const data = resultData();
-  if (!data?.columns.length) return;
-  const csvEscape = (value) => {
-    const text = value === null ? "" : cellText(value);
-    return /[",\r\n]/.test(text) ? `"${text.replaceAll('"', '""')}"` : text;
-  };
-  const csv = [data.columns, ...data.rows]
-    .map((row) => row.map(csvEscape).join(","))
-    .join("\r\n");
-  const name = `${activeTab()?.title || "query"}.csv`;
+  if (!tab || !data?.columns.length || tab.exporting) return;
+  const target = { ...tab.browse, columns: tab.browse?.columns || [] };
+  tab.exporting = true;
   try {
-    const nativeResult = invoke
-      ? await call("save_text_file", {
-          fileName: name,
-          contents: `\ufeff${csv}`,
-        })
-      : null;
+    const output = await createExport(data, format, { table: tab.browse ? target : null, driver: driverForTab(tab), title: tab.title || "query" });
+    const nativeResult = invoke ? await call(output.bytes ? "save_binary_file" : "save_text_file", output.bytes
+      ? { fileName: output.name, contents: Array.from(output.bytes) }
+      : { fileName: output.name, contents: output.contents }) : null;
     const outcome = resolveSaveOutcome(Boolean(invoke), nativeResult);
-    if (outcome === "saved") {
-      showToast(`已导出 ${data.rows.length} 行`);
+    if (outcome === "cancelled") { showToast("已取消导出"); return; }
+    if (outcome === "download") {
+      const anchor = document.createElement("a");
+      const url = URL.createObjectURL(new Blob([output.bytes || output.contents], { type: output.mime }));
+      anchor.href = url; anchor.download = output.name; anchor.click();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    }
+    showToast(`已导出 ${data.rows.length} 行 · ${format.toUpperCase()}`);
+  } catch (error) { showToast(`导出失败：${errorText(error)}`, "error"); }
+  finally { tab.exporting = false; }
+}
+
+let importTarget = null;
+function chooseTableImport(format) {
+  const tab = activeTab();
+  if (!tab?.connectionId || !["postgres", "mysql"].includes(driverForTab(tab)) || tab.running || tab.paging || cellWritePending(tab)) return;
+  if (format !== "sql" && (tab.mode !== "write" || !tab.browse || !["table", "partitioned_table"].includes(tab.browse.kind))) return;
+  if (resultGrid.getCellEditDraft(tab.result.rows)) return showToast("请先保存或取消当前表的单元格修改", "error");
+  importTarget = { tab, format, destination: cellDestination(tab), driver: driverForTab(tab) };
+  refs.tableImportFile.value = "";
+  refs.tableImportFile.accept = `.${format}`;
+  refs.tableImportFile.click();
+}
+async function readTableImport() {
+  const file = refs.tableImportFile.files[0], target = importTarget;
+  if (!file || !target) return;
+  importTarget = null;
+  const { tab, format, driver, destination } = target;
+  const guard = () => {
+    if (!state.tabs.includes(tab) || cellDestination(tab) !== destination) throw new Error("原表或连接已改变，请重新选择导入文件");
+    if (tab.mode !== "write" || tab.running || tab.paging || tab.refreshing || cellWritePending(tab)) throw new Error("当前表不可写或有操作正在执行");
+    if (tab.result.transactionRolledBack) throw new Error("当前事务已回滚，请关闭导入窗口并刷新数据后重试");
+    if (driver === "mysql" && state.transactionKeys.has(transactionKey(tab.connectionId, tabDatabase(tab))) && tab.browse?.engine && !/^innodb$/i.test(tab.browse.engine)) throw new Error("当前表的存储引擎不能保证回滚，请结束事务后再导入");
+    if (resultGrid.getCellEditDraft(tab.result.rows)) throw new Error("请先保存或取消单元格修改");
+  };
+  try {
+    if (!state.tabs.includes(tab) || cellDestination(tab) !== destination) throw new Error("原查询已改变，请重新导入");
+    if (format === "sql") {
+      const { sql } = await readTransferFile(file, { format });
+      if (!state.tabs.includes(tab) || cellDestination(tab) !== destination) throw new Error("原查询已改变，请重新导入");
+      const draft = addTab(sql, tab.connectionId, null, { database: tabDatabase(tab), schema: tabSchema(tab), title: file.name });
+      if (draft) { draft.mode = tab.mode; renderTabs(); renderOutput(); persistTabs(); showToast("SQL 已打开，请查看后执行"); }
       return;
     }
-    if (outcome === "cancelled") {
-      showToast("已取消导出");
-      return;
-    }
-    const a = document.createElement("a");
-    a.href = URL.createObjectURL(
-      new Blob([`\ufeff${csv}`], { type: "text/csv;charset=utf-8" }),
-    );
-    a.download = name;
-    a.click();
-    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
-    showToast(`已导出 ${data.rows.length} 行`);
-  } catch (error) {
-    showToast(`导出失败：${errorText(error)}`, "error");
-  }
+    guard();
+    if (!tab.browse.detailsLoaded) throw new Error("请先加载表结构后再导入");
+    guard();
+    const capturedDestination = cellDestination(tab);
+    const connectionId = tab.connectionId, database = tabDatabase(tab), schema = tabSchema(tab);
+    openDataImport({ file, format, table: { ...tab.browse, columns: tab.browse.columns.map(column => ({ ...column })) }, driver,
+      targetLabel: `${queryTargetDescription(tab)} / ${tab.browse.name}`,
+      onApply: async ({ sql, rowCount }) => {
+        if (cellDestination(tab) !== capturedDestination) throw new Error("目标表结构已改变，请关闭后重新导入");
+        guard();
+        const txKey = transactionKey(connectionId, database), txOpen = state.transactionKeys.has(txKey);
+        tab.importing = true; tab.cellBatchSaving = {};
+        renderTabs();
+        try {
+          const result = await call("execute_mutation", { request: { connectionId, database, schema, sql, queryId: makeId("data-import"), readOnly: false } });
+          recordHistory(sql, { connectionId, database, schema });
+          if (txOpen) tab.result.cellEditsInTransaction = true;
+          return { rowCount: result.row_count ?? rowCount, txOpen };
+        } catch (error) {
+          if (txOpen && transactionDidRollback(error, driver)) {
+            state.transactionKeys.delete(txKey);
+            tab.result.transactionRolledBack = true;
+            for (const item of state.tabs) if (item.connectionId === connectionId && tabDatabase(item) === database && item.result.cellEditsInTransaction) item.result.transactionRolledBack = true;
+          }
+          throw error;
+        } finally { tab.importing = false; tab.cellBatchSaving = null; renderTabs(); }
+      },
+      onComplete: async outcome => {
+        if (outcome.txOpen) {
+          showToast(`已导入 ${outcome.rowCount} 行，尚未提交事务；提交或回滚后刷新查看`);
+          return;
+        }
+        let refreshFailed = false;
+        if (activeTab() === tab) {
+          try { await runQuery({ preserveResult: true }); if (tab.error) throw new Error(tab.message); }
+          catch { refreshFailed = true; }
+        }
+        showToast(`已导入 ${outcome.rowCount} 行${outcome.txOpen ? "，尚未提交事务" : ""}${refreshFailed ? "；刷新失败，请手动刷新，不要重复导入" : ""}`, refreshFailed ? "error" : "info");
+      },
+    });
+  } catch (error) { showToast(`导入失败：${errorText(error)}`, "error"); }
 }
 
 async function confirmDiscardCellEdits(tabs) {
@@ -3660,8 +4060,20 @@ function cellDestination(tab) {
     key: tab.redisKey, keyType: tab.redisType, redisDb: tab.redisKey != null ? redisTabDatabase(tab) : null,
   });
 }
+function transactionDidRollback(error, driver) {
+  return driver !== "mysql" || errorText(error).includes("[TX_ROLLED_BACK]");
+}
+function invalidateTransactionResults(connectionId, database) {
+  state.transactionKeys.delete(transactionKey(connectionId, database));
+  for (const item of state.tabs) {
+    if (item.connectionId === connectionId && tabDatabase(item) === database && item.result?.cellEditsInTransaction) {
+      item.result.transactionRolledBack = true;
+      item.message = "当前事务已回滚，先前未提交的数据结果已失效，请刷新核对。";
+    }
+  }
+}
 function cellWritePending(tab) {
-  return Boolean(tab && state.tabs.some(item => item.cellSaving && item.connectionId === tab.connectionId && tabDatabase(item) === tabDatabase(tab)));
+  return Boolean(tab && (state.disconnectingConnections?.has(tab.connectionId) || state.tabs.some(item => (item.cellSaving || item.cellBatchSaving || item.changingTransaction) && item.connectionId === tab.connectionId && tabDatabase(item) === tabDatabase(tab))));
 }
 function captureCellEdit(tab, cell, capability) {
   const result = tab.result;
@@ -3677,6 +4089,7 @@ function captureCellEdit(tab, cell, capability) {
 function getCellEditState(cell) {
   const tab = activeTab();
   const capability = getCellEditCapability(tab, cell, driverForTab(tab));
+  if (capability.editable && driverForTab(tab) === "mysql" && state.transactionKeys.has(transactionKey(tab.connectionId, tabDatabase(tab))) && tab.browse?.engine && !/^innodb$/i.test(tab.browse.engine)) return { ...capability, editable: false, reason: "当前表引擎不能保证事务回滚，请先结束事务" };
   if (capability.editable && cellWritePending(tab)) return { ...capability, editable: false, reason: "请等待当前单元格保存完成" };
   return { ...capability, context: capability.editable ? captureCellEdit(tab, cell, capability) : null };
 }
@@ -3688,25 +4101,29 @@ function assertCellEditCurrent(context, ownSave = false) {
     throw new Error("原始结果或执行位置已改变，请重新打开单元格后编辑");
   }
   if (tab.result.transactionRolledBack) throw new Error("当前事务已回滚，结果需要刷新；请先复制需要保留的修改后刷新数据");
-  const capability = getCellEditCapability(ownSave ? { ...tab, cellSaving: false } : tab, context, context.driver);
+  if (context.driver === "mysql" && state.transactionKeys.has(transactionKey(context.connectionId, context.database)) && context.browse?.engine && !/^innodb$/i.test(context.browse.engine)) throw new Error("当前表引擎不能保证事务回滚，请先结束事务");
+  const capability = getCellEditCapability(ownSave ? { ...tab, cellSaving: false, cellBatchSaving: false } : tab, context, context.driver);
   if (!capability.editable) throw new Error(capability.reason);
   return capability;
 }
-async function commitCellValue(context, newValue, isNull = false) {
-  const capability = assertCellEditCurrent(context);
-  if (cellWritePending(context.tab)) throw new Error("请等待当前单元格保存完成");
+async function commitCellValue(context, newValue, isNull = false, { confirm = true, quiet = false, batchToken = null } = {}) {
+  const ownBatch = batchToken && context?.tab?.cellBatchSaving === batchToken;
+  const capability = assertCellEditCurrent(context, Boolean(ownBatch));
+  if (!ownBatch && cellWritePending(context.tab)) throw new Error("请等待当前单元格保存完成");
   const value = validateCellDraft(isNull ? null : newValue, capability);
   if ((value === null && context.value === null) || (value !== null && context.value !== null && value === cellText(context.value))) return true;
   const tab = context.tab;
   const txKey = transactionKey(context.connectionId, context.database);
   const txOpen = state.transactionKeys.has(txKey);
   const isRedis = context.driver === "redis";
-  const sql = isRedis ? null : buildCellUpdateSql({ ...context.browse, ...context, value });
+  const sql = isRedis ? null : buildCellUpdateSql({ ...context.browse, ...context, value,
+    keyTypes: Object.fromEntries((context.browse.columns || []).map(field => [field.name, field.dataType])),
+  });
   const field = isRedis && context.keyType === "hash" ? context.row[context.columns.indexOf("field")] : null;
   tab.cellSaving = true;
   renderTabs();
   try {
-    const accepted = await confirmAction(
+    const accepted = !confirm || await confirmAction(
       isRedis
         ? `执行位置：${context.location}\nKey：${context.key}${field !== null ? `\n字段：${field}` : ""}\n\n保存会校验原值，防止覆盖其他操作的修改。`
         : `执行位置：${context.location}\n字段：${context.column}${txOpen ? "\n写入当前事务，提交后才会生效。" : ""}`,
@@ -3731,7 +4148,7 @@ async function commitCellValue(context, newValue, isNull = false) {
       }
     } catch (error) {
       // The SQL backend rolls back and removes a failed transaction.
-      if (!isRedis && txOpen) {
+      if (!isRedis && txOpen && transactionDidRollback(error, context.driver)) {
         state.transactionKeys.delete(txKey);
         for (const item of state.tabs) {
           if (item.connectionId === context.connectionId && tabDatabase(item) === context.database && item.result?.cellEditsInTransaction) {
@@ -3763,7 +4180,7 @@ async function commitCellValue(context, newValue, isNull = false) {
       }
     }
     tab.message = `${isRedis ? "Redis 单元格" : "单元格"}已保存${txOpen ? "，已写入当前事务，尚未提交" : ""}\n执行位置：${context.location}\n字段：${context.column}\n可刷新数据核对数据库返回值。`;
-    showToast(txOpen ? "单元格已写入当前事务，尚未提交" : "单元格已保存");
+    if (!quiet) showToast(txOpen ? "单元格已写入当前事务，尚未提交" : "单元格已保存");
     return true;
   } finally {
     tab.cellSaving = false;
@@ -3775,12 +4192,60 @@ async function commitInlineCell({ context, newValue, isNull }) {
   return commitCellValue(context, newValue, isNull);
 }
 
+async function commitTableCellEdits(drafts) {
+  if (!drafts.length) return [];
+  const tab = drafts[0].context?.tab;
+  const result = drafts[0].context?.result;
+  // Validate the entire captured set before the first write. A batch never
+  // follows the active tab or the visible sort/filter order.
+  if (!tab || cellWritePending(tab)) throw new Error("请等待当前保存完成");
+  for (const draft of drafts) {
+    if (draft.context?.tab !== tab || draft.context?.result !== result) throw new Error("只能保存当前表的修改");
+    const capability = assertCellEditCurrent(draft.context);
+    validateCellDraft(draft.isNull ? null : draft.newValue, capability);
+    if (draft.context.driver !== "redis") buildCellUpdateSql({ ...draft.context.browse, ...draft.context, value: draft.isNull ? null : draft.newValue,
+      keyTypes: Object.fromEntries((draft.context.browse.columns || []).map(field => [field.name, field.dataType])),
+    });
+  }
+  const batchToken = {};
+  tab.cellBatchSaving = batchToken;
+  renderTabs();
+  const outcomes = [];
+  try {
+    for (const draft of drafts) {
+      try {
+        const saved = await commitCellValue(draft.context, draft.newValue, draft.isNull, { confirm: false, quiet: true, batchToken });
+        if (!saved) throw new Error("未能保存，修改已保留");
+        outcomes.push({ saved: true });
+      } catch (error) {
+        const message = errorText(error);
+        if (result.transactionRolledBack) {
+          outcomes.length = 0;
+          while (outcomes.length < drafts.length) outcomes.push({ saved: false, error: "事务已回滚，草稿已保留，请刷新核对" });
+          showToast("保存失败，当前事务已回滚；修改草稿已保留，请刷新核对", "error");
+        } else {
+          const saved = outcomes.length;
+          while (outcomes.length < drafts.length) outcomes.push({ saved: false, error: message });
+          showToast(`已保存 ${saved} 格，剩余 ${drafts.length - saved} 格修改已保留：${message}`, "error");
+        }
+        return outcomes;
+      }
+    }
+    const txOpen = state.transactionKeys.has(transactionKey(tab.connectionId, tabDatabase(tab)));
+    showToast(`已保存 ${outcomes.length} 格${txOpen ? "，已写入当前事务，尚未提交" : ""}`);
+    return outcomes;
+  } finally {
+    if (tab.cellBatchSaving === batchToken) tab.cellBatchSaving = null;
+    renderTabs();
+  }
+}
+
 function openCellInspector({ column, columnIndex, value, rowIndex, context = null, draftValue, draftIsNull }) {
   const tab = context?.tab || activeTab();
   const capability = getCellEditCapability(tab, { column, columnIndex, rowIndex }, driverForTab(tab));
   if (!context && capability.editable) context = captureCellEdit(tab, { column, columnIndex, value, rowIndex }, capability);
   const hasDraft = typeof draftValue === "string";
-  const displayedValue = hasDraft ? draftValue : value;
+  const displayedValue = hasDraft ? draftValue : value?.$dbStudio === "mysql-binary" ? cellText(value) : value;
   const columnMetadata = tab?.browse?.columns?.find((item) => item.name === column);
   const dataType = columnMetadata?.dataType || "";
   const declaredJson = /(?:^|[^a-z0-9_])jsonb?(?:$|[^a-z0-9_])/i.test(dataType);
@@ -3984,6 +4449,7 @@ function dismissDialog(dialog) {
 }
 function dialogIsBusy(dialog) {
   return (dialog === refs.connectionModal && (refs.saveConnection.disabled || refs.testConnection.disabled)) ||
+    (dialog === refs.createObjectModal && state.pendingObjectCreate?.busy) ||
     (dialog === refs.cellModal && refs.saveCell.disabled) ||
     (dialog === refs.redisCreateModal && refs.applyRedisCreate.disabled) ||
     (dialog === refs.mutationModal && refs.applyMutation.disabled);
@@ -4269,15 +4735,15 @@ function bindEvents() {
     });
     dialog.addEventListener("close", () => clearDialogDraft(dialog));
   }
-  refs.createObjectName.addEventListener("input", () => refs.createObjectName.setCustomValidity(""));
+  refs.createObjectName.addEventListener("input", () => { refs.createObjectName.setCustomValidity(""); updateObjectActionPreview(); });
   for (const button of [refs.closeCreateObject, refs.cancelCreateObject]) {
     button.addEventListener("click", () => dismissDialog(refs.createObjectModal));
   }
-  refs.createObjectForm.addEventListener("submit", (event) => {
+  refs.createObjectForm.addEventListener("submit", async (event) => {
     event.preventDefault();
     const pending = state.pendingObjectCreate;
     const name = refs.createObjectName.value.trim();
-    if (!pending) return;
+    if (!pending || pending.busy) return;
     if (!name || name.includes("\0")) {
       refs.createObjectName.setCustomValidity("请输入有效名称");
       refs.createObjectName.reportValidity();
@@ -4288,8 +4754,21 @@ function bindEvents() {
       refs.createObjectName.reportValidity();
       return;
     }
-    dismissDialog(refs.createObjectModal);
-    submitContextCreateQuery(pending.target, pending.action, name);
+    pending.busy = true;
+    for (const input of refs.createObjectForm.querySelectorAll("input,button")) input.disabled = true;
+    refs.createObjectFeedback.textContent = "";
+    try {
+      const result = await submitContextObjectAction(pending, name);
+      pending.busy = false;
+      dismissDialog(refs.createObjectModal);
+      showToast(result.message, result.refreshError ? "error" : "info");
+    } catch (error) {
+      refs.createObjectFeedback.textContent = errorText(error);
+      refs.createObjectFeedback.classList.add("error");
+    } finally {
+      pending.busy = false;
+      for (const input of refs.createObjectForm.querySelectorAll("input,button")) input.disabled = false;
+    }
   });
   const closeThemeMenu = (restoreFocus = false) => {
     refs.themeMenu.hidden = true;
@@ -4453,6 +4932,14 @@ function bindEvents() {
   refs.testConnection.addEventListener("click", testConnection);
   refs.deleteConnection.addEventListener("click", deleteConnection);
   refs.connectionSearch.addEventListener("input", renderConnections);
+  initConnectionReorder(refs.connectionList, (source, target, placement) => {
+    const reordered = moveConnection(state.profiles, source, target, placement);
+    if (reordered.every((profile, index) => profile.id === state.profiles[index]?.id)) return;
+    state.profiles = reordered;
+    const saved = saveConnectionOrder(state.profiles);
+    renderConnections();
+    showToast(saved ? "实例顺序已保存" : "顺序已调整，本地保存失败", saved ? "info" : "error", saved ? 1200 : 7000);
+  });
   refs.historySearch.addEventListener("input", renderHistory);
   refs.connectionList.addEventListener("click", async (event) => {
     if (event.target.closest("[data-clear-connection-search]")) {
@@ -4580,6 +5067,8 @@ function bindEvents() {
       return;
     }
     if (event.target.closest('.category-summary')) return;
+    const mysqlRetry = event.target.closest('[data-retry-mysql-db]');
+    if (mysqlRetry) { await loadSchemas(mysqlRetry.dataset.retryMysqlDb); return; }
     const retrySchema = event.target.closest("[data-retry-schema]");
     if (retrySchema) {
       await loadVisibleSchemas();
@@ -4641,7 +5130,7 @@ function bindEvents() {
     if (action === "refresh-schema" || action === "refresh-object") return refreshTreeObject(target);
     if (action === "edit-structure") return openTableStructureEditor(target);
     if (["create-database", "create-schema", "create-table", "rename-table"].includes(action)) {
-      return openContextCreateQuery(target, action);
+      return openContextObjectDialog(target, action);
     }
     if (!object) return;
     if (action === "open-data") return openObjectQuery(object);
@@ -4693,7 +5182,7 @@ function bindEvents() {
     }
     if (action === "copy") {
       try {
-        await navigator.clipboard.writeText(key);
+        await copyText(key);
         showToast("已复制 Redis key");
       } catch {
         showToast("复制失败", "error");
@@ -4901,22 +5390,13 @@ function bindEvents() {
     renderOutput();
     state.editor?.focus();
   });
-  refs.openTableDdl?.addEventListener("click", () => {
-    const tab = activeTab();
-    const browse = tab?.browse;
-    if (!browse) return;
-    openObjectStructureTab({
-      id: browse.id,
-      database: browse.database,
-      schema: browse.schema,
-      name: browse.name,
-      kind: browse.kind,
-      qualifiedName: `${browse.schema}.${browse.name}`,
-    }, tab.connectionId);
-  });
   refs.refreshTableData?.addEventListener("click", async () => {
     const tab = activeTab();
     if (cellWritePending(tab)) return;
+    if (tab?.outputTab === "structure" && (tab.inspectedObject || tab.browse)) {
+      if (!tab.running && !tab.confirming) await inspectObject(tab.inspectedObject || tab.browse, { connectionId: tab.connectionId, tab });
+      return;
+    }
     if (!tab || !await confirmDiscardCellEdits([tab]) || activeTab() !== tab) return;
     if (tab?.redisKey) {
       if (tab.refreshing) return;
@@ -4958,7 +5438,7 @@ function bindEvents() {
       }
       return;
     }
-    if (!tab?.browse || tab.running) return;
+    if (!tab?.browse || tab.paging || tab.running) return;
     if (!tab.browse.detailsLoaded) {
       try { await loadBrowseDetails(tab); } catch (error) { showToast(errorText(error), "error"); return; }
     }
@@ -5064,10 +5544,7 @@ function bindEvents() {
       showToast(`取消失败：${errorText(error)}`, "error");
     }
   });
-  refs.resultTab.addEventListener("click", () => {
-    activeTab().outputTab = "result";
-    renderOutput();
-  });
+  refs.resultTab.addEventListener("click", () => { void showTableData(); });
   refs.structureTab.addEventListener("click", () => { void showQueryStructure(); });
   refs.messageTab.addEventListener("click", () => {
     activeTab().outputTab = "message";
@@ -5079,8 +5556,14 @@ function bindEvents() {
   });
   refs.previousPage.addEventListener("click", () => moveBrowsePage(-1));
   refs.nextPage.addEventListener("click", () => moveBrowsePage(1));
+  refs.pageJumpForm.addEventListener("submit", (event) => {
+    event.preventDefault();
+    void jumpBrowsePage(refs.pageJumpInput.value);
+  });
   refs.copyResults.addEventListener("click", copyResults);
-  refs.exportResults.addEventListener("click", exportResults);
+  refs.resultMoreMenu.querySelectorAll('[data-export-format]').forEach(button => button.addEventListener("click", () => void exportResults(button.dataset.exportFormat)));
+  refs.dataImportMenu.querySelectorAll('[data-import-format]').forEach(button => button.addEventListener("click", () => chooseTableImport(button.dataset.importFormat)));
+  refs.tableImportFile.addEventListener("change", () => void readTableImport());
   refs.closeCell.addEventListener("click", () => dismissDialog(refs.cellModal));
   const closeRedisRename = () => dismissDialog(refs.redisRenameModal);
   refs.closeRedisRename?.addEventListener("click", closeRedisRename);
@@ -5140,7 +5623,7 @@ function bindEvents() {
       const value = inspector?.jsonInfo && !inspector.jsonEditing
         ? refs.cellJsonPreview.textContent
         : refs.cellValue.value;
-      await navigator.clipboard.writeText(value);
+      await copyText(value, { allowEmpty: true });
       showToast("已复制单元格");
     } catch {
       showToast("复制失败", "error");
@@ -5235,6 +5718,17 @@ function bindEvents() {
     if (button) loadHistoryEntry(Number(button.dataset.historyIndex));
   });
   document.addEventListener("keydown", (event) => {
+    if (!(event.metaKey || event.ctrlKey) || event.key.toLowerCase() !== "s" || event.altKey || event.shiftKey) return;
+    if (event.isComposing || event.keyCode === 229 || resultGrid.editorComposing || document.querySelector('dialog[open]')) return;
+    const tab = activeTab();
+    if (state.redisConsole || !tab || !(tab.browse || tab.redisKey) || (tab.outputTab || "result") !== "result" ||
+        (tab.tableView === false && !event.target.closest?.('#resultGrid'))) return;
+    event.preventDefault();
+    event.stopPropagation();
+    textInputIme.finish();
+    void resultGrid.commitAllCellEdits();
+  }, true);
+  document.addEventListener("keydown", (event) => {
     if (event.isComposing || event.keyCode === 229 || state.editor?.compositionStarted) return;
     if (refs.confirmActionModal.open) return;
     if (event.key === "Escape") {
@@ -5255,11 +5749,6 @@ function bindEvents() {
     )
       return;
     if (document.querySelector('dialog[open]')) return;
-    if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "p") {
-      event.preventDefault();
-      commandPalette.open();
-      return;
-    }
     if (!canHandleGlobalShortcut(event.target)) return;
     if (event.key === "?" && !event.metaKey && !event.ctrlKey && !event.target.closest?.(".cm-editor")) {
       event.preventDefault();
@@ -5284,13 +5773,35 @@ function bindEvents() {
       }
     }
   });
+  // Grid editors deliberately stop bubbling key events. Navigation shortcuts
+  // must be consumed before that boundary, just like save-all, without ever
+  // treating an IME candidate key as a workspace command.
+  document.addEventListener('keydown', event => {
+    if (!(event.metaKey || event.ctrlKey) || event.altKey) return;
+    const key = event.key.toLowerCase();
+    if (!['p', 'k', 'j'].includes(key) || (key === 'j' && event.shiftKey)) return;
+    if (event.isComposing || event.keyCode === 229 || resultGrid.editorComposing || state.editor?.compositionStarted || document.querySelector('dialog[open]')) return;
+    event.preventDefault(); event.stopPropagation(); textInputIme.finish();
+    if (key === 'p') commandPalette.open();
+    else if (key === 'k' && event.shiftKey) { workspaceLayout.showPane('objects'); refs.objectSearch.focus(); }
+    else if (key === 'k') objectQuickOpen.open();
+    else if (!refs.locateColumn.disabled) columnNavigator.open(refs.locateColumn);
+    else showToast('请先打开表数据或执行查询，再定位列');
+  }, true);
 }
 
+let attentionScheduled = false;
 const resultGrid = new ResultGrid(refs.resultGrid, {
+  onDraftChange: () => scheduleWorkspaceAttention(),
   onInspect: openCellInspector,
   onCopyCell: text => copyText(text, { allowEmpty: true }),
   getCellEditState,
   onCommitCell: commitInlineCell,
+  onCommitCells: async drafts => {
+    try { return await commitTableCellEdits(drafts); }
+    catch (error) { showToast(`保存失败：${errorText(error)}`, "error"); throw error; }
+  },
+  editActions: { save: refs.saveTableChanges, cancel: refs.discardTableChanges },
   onTextFilterChange: (value) => {
     const tab = activeTab();
     if (tab) tab.filter = value;
@@ -5304,6 +5815,67 @@ const resultGrid = new ResultGrid(refs.resultGrid, {
     if (state.editor && state.gridResult === activeTab()?.result) renderOutput();
   },
 });
+function scheduleWorkspaceAttention() {
+  if (attentionScheduled) return;
+  attentionScheduled = true;
+  queueMicrotask(() => { attentionScheduled = false; renderWorkspaceAttention(); });
+}
+function workspaceAttentionSummary() {
+  return summarizeWorkspaceAttention({ ...state, getDrafts: rows => resultGrid.getCellEditDrafts(rows) });
+}
+function renderWorkspaceAttention() {
+  const summary = workspaceAttentionSummary();
+  for (const tab of state.tabs) {
+    const element = refs.queryTabs.querySelector(`.query-tab[data-tab-id="${CSS.escape(tab.id)}"]`);
+    if (!element) continue;
+    const count = summary.draftEntries.find(entry => entry.tabId === tab.id)?.dirtyCount || 0;
+    element.dataset.dirtyCount = String(count);
+    let badge = element.querySelector('.tab-dirty');
+    if (!badge) { badge = document.createElement('span'); badge.className = 'tab-dirty'; element.querySelector('.tab-select').append(badge); }
+    badge.hidden = !count; badge.textContent = String(count);
+    badge.title = `${count} 格修改尚未保存`;
+    element.querySelector('.tab-select').setAttribute('aria-label', `${tab.title}${count ? `，${count} 格修改尚未保存` : ''}`);
+  }
+  const parts = [summary.dirtyCount ? `${summary.dirtyCount} 格未保存` : '', summary.transactionCount ? `${summary.transactionCount} 个事务未提交` : ''].filter(Boolean);
+  refs.workspaceAttention.hidden = !parts.length;
+  refs.workspaceAttention.textContent = parts.join(' · ');
+  refs.workspaceAttention.title = '查看待处理事项；每张表单独保存，事务按数据库提交';
+}
+const columnNavigator = createColumnNavigator({ getGrid: () => refs.locateColumn.disabled ? null : resultGrid, getColumnMetadata: () => activeTab()?.browse?.columns || [], onError: error => showToast(errorText(error), 'error') });
+refs.locateColumn.addEventListener('click', () => columnNavigator.toggle(refs.locateColumn));
+const objectQuickOpen = createObjectQuickOpen({
+  getEntries: () => collectQuickOpenEntries(state),
+  onOpen: async (entry, { structure }) => {
+    if (state.connectionStatuses[entry.connectionId] !== 'connected') throw new Error('原连接已断开，请先重新连接');
+    if (state.activeConnectionId !== entry.connectionId && !await selectConnection(entry.connectionId)) return;
+    if (state.activeConnectionId !== entry.connectionId || state.connectionStatuses[entry.connectionId] !== 'connected') return;
+    if (entry.kind === 'redis-key') return openRedisValueTab(entry.key, Number(entry.database));
+    const object = { ...entry.object, schema: entry.schema, database: entry.database };
+    if (structure) return openObjectStructureTab(object, entry.connectionId);
+    return openObjectQuery(object, { connectionId: entry.connectionId });
+  },
+  onError: error => showToast(errorText(error), 'error'),
+});
+const attentionPalette = createCommandPalette({
+  title: '待处理修改', subtitle: '每张表单独保存，事务按数据库提交', placeholder: '搜索表名、连接或数据库…',
+  emptyTitle: '没有待处理修改', emptyDescription: '当前没有未保存的单元格修改或未提交的事务。', actionLabel: '打开',
+  getCommands: () => {
+    const summary = workspaceAttentionSummary();
+    return [
+      ...summary.draftEntries.map(entry => ({ id: `draft-${entry.tabId}`, title: entry.title, description: `${entry.dirtyCount} 格未保存 · ${queryTargetDescription(state.tabs.find(tab => tab.id === entry.tabId))}`, group: '未保存的表', run: () => {
+        const tab = state.tabs.find(tab => tab.id === entry.tabId); if (!tab) return;
+        tab.outputTab = 'result'; activateTab(tab.id); renderOutput();
+      } })),
+      ...summary.transactionEntries.map(entry => ({ id: `tx-${entry.key}`, title: entry.database || '默认数据库', description: `${entry.connectionName} · 事务尚未提交`, group: '未提交的事务', disabled: !state.profiles.some(profile => profile.id === entry.connectionId), run: () => {
+        const existing = state.tabs.find(tab => tab.id === entry.tabId && !tab.structureOnly);
+        if (existing) activateTab(existing.id);
+        else addTab('', entry.connectionId, null, { database: entry.database, title: `事务 · ${entry.database}` });
+      } })),
+    ];
+  }, onError: error => showToast(errorText(error), 'error'),
+});
+refs.workspaceAttention.addEventListener('click', () => attentionPalette.open());
+refs.openObjectQuick.addEventListener('click', () => objectQuickOpen.open());
 const desktopMenu = initDesktopMenu({
   copyText: text => copyText(text, { allowEmpty: true }),
   onError: error => showToast(errorText(error), "error"),
@@ -5351,7 +5923,9 @@ const commandPalette = createCommandPalette({
   getCommands: () => [
     { id: "new-query", title: "新建查询", description: "打开一个 SQL 草稿", keywords: "sql query", shortcut: "⌘ T", group: "常用操作", run: () => addTab() },
     { id: "new-connection", title: "新建连接", description: "PostgreSQL、MySQL 或 Redis", keywords: "connect database", group: "常用操作", run: () => refs.newConnection.click() },
-    { id: "search-objects", title: "搜索数据库对象", description: "按表名、字段或备注查找", shortcut: "⌘ K", group: "常用操作", run: () => { workspaceLayout.showPane("objects"); refs.objectSearch.focus(); } },
+    { id: "search-objects", title: "快速打开对象", description: "搜索已加载的表、字段和 Redis key；Shift+Enter 看结构", shortcut: shortcut('⌘ K'), group: "常用操作", run: () => objectQuickOpen.open() },
+    { id: 'locate-column', title: '定位结果列', description: '按列名、类型或序号定位宽表中的字段', shortcut: shortcut('⌘ J'), group: '当前查询', disabled: refs.locateColumn.disabled, run: () => columnNavigator.open(refs.locateColumn) },
+    { id: 'pending-work', title: '查看待处理修改', description: '查找未保存的表和未提交的事务', group: '常用操作', run: () => attentionPalette.open() },
     { id: "format-sql", title: "格式化 SQL", disabled: refs.formatQuery.disabled || refs.formatQuery.hidden || !activeTab(), group: "当前查询", run: () => refs.formatQuery.click() },
     { id: "open-sql", title: "打开 SQL 文件", disabled: Boolean(activeExecutionTab()?.console || driverForTab(activeExecutionTab()) === "redis"), group: "常用操作", run: () => refs.importSql.click() },
     { id: "save-sql", title: "保存 SQL 文件", shortcut: "⌘ S", disabled: !activeTab() || refs.saveSql.hidden, group: "当前查询", run: () => refs.saveSql.click() },
@@ -5368,9 +5942,11 @@ const commandPalette = createCommandPalette({
     ...Object.entries({ dark: "暗黑", light: "白天", ocean: "海蓝", forest: "森林", contrast: "高对比" }).map(([theme, name]) => ({ id: `theme-${theme}`, title: `切换到${name}主题`, keywords: "theme appearance 外观", group: "外观与布局", run: () => applyTheme(theme) })),
     { id: "reset-layout", title: "重置工作区布局", group: "外观与布局", run: () => refs.resetLayout.click() },
     { id: "shortcuts", title: "键盘快捷键", group: "帮助", run: () => refs.shortcutsModal.showModal() },
-  ],
+  ].map(command => command.shortcut ? { ...command, shortcut: shortcut(command.shortcut) } : command),
   onError: error => showToast(errorText(error), "error"),
 });
+for (const node of document.querySelectorAll('kbd')) if (node.textContent.includes('⌘')) node.textContent = shortcut(node.textContent);
+for (const node of document.querySelectorAll('[title]')) if (node.title.includes('⌘')) node.title = shortcut(node.title);
 applyTheme(readTheme());
 const workspaceLayout = initWorkspaceLayout();
 const queryLibraryUI = createQueryLibrary({

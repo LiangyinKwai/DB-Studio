@@ -32,11 +32,13 @@ let failCommand = "";
 let delayedCatalog = null;
 await context.exposeFunction("__FIXTURE_INVOKE__", async (command, args) => {
   const result = await fixture.invoke(command, args);
+  if (command === 'get_object_details') return { ...result, tableDdl: { columnDefinitions: ['"id" integer NOT NULL', '"status" text'], beforeStatements: [], afterStatements: [], constraintIndexes: [], createPrefix: 'CREATE TABLE', createSuffix: '', unsupportedReason: null } };
   if (command === failCommand) throw new Error("fixture refresh failure");
   if (command === "get_schema_objects" && delayedCatalog) return delayedCatalog;
   return result;
 });
 const page = await context.newPage();
+page.setDefaultTimeout(8000);
 const errors = [];
 page.on("pageerror", (error) => errors.push(error.message));
 const expect = (ok, message) => { if (!ok) throw new Error(message); };
@@ -53,10 +55,11 @@ const selected = async (locator) => {
 const openMenu = async (locator) => { await locator.click({ button: "right" }); await menu.waitFor(); await selected(locator); };
 async function expand(database, schema) {
   const db = page.locator(`.tree-database[data-database='${database}']`);
-  if (!await db.evaluate((node) => node.open)) await db.locator(":scope > summary").click();
+  if (!await db.evaluate((node) => node.open)) await db.locator(":scope > summary [data-tree-toggle]").click();
+  if (await db.evaluate(node => node.classList.contains('mysql-database'))) { await db.locator('.tree-object').first().waitFor(); return db.locator('.mysql-database-objects'); }
   const sc = db.locator(`.tree-schema[data-schema='${schema}']`);
   await sc.waitFor();
-  if (!await sc.evaluate((node) => node.open)) await sc.locator(":scope > summary").click();
+  if (!await sc.evaluate((node) => node.open)) await sc.locator(":scope > summary [data-tree-toggle]").click();
   await sc.locator(".tree-object").first().waitFor({ state: "attached" });
   return sc;
 }
@@ -77,7 +80,7 @@ try {
     [page.locator(".tree-root"), "refresh-databases", "数据库列表已刷新", "list_databases"],
     [page.locator(".tree-database[data-database='app'] > summary"), "refresh-database", "数据库 app 已刷新", "list_schemas"],
     [sc.locator(":scope > summary"), "refresh-schema", "对象列表已刷新", "get_schema_objects"],
-    [sc.locator(".tree-category[data-kind='table'] > button"), "refresh-schema", "对象列表已刷新", "get_schema_objects"],
+    [sc.locator(".tree-category[data-kind='table'] > .category-summary"), "refresh-schema", "对象列表已刷新", "get_schema_objects"],
     [table, "refresh-object", "对象已刷新", "get_schema_objects"],
   ]) {
     const before = fixture.callsFor(command).length;
@@ -112,19 +115,19 @@ try {
   await selected(table);
   failCommand = "";
 
-  const category = sc.locator(".tree-category[data-kind='table'] > button");
-  await category.click();
+  const category = sc.locator(".tree-category[data-kind='table'] > .category-summary");
+  await category.locator('[data-tree-toggle]').click();
   await openMenu(category);
   await action("refresh-schema").click();
   await toast("对象列表已刷新");
   expect(await category.getAttribute("aria-expanded") === "false", "refresh lost category collapse state");
-  await category.click();
-  await sc.locator(".tree-category[data-kind='procedure'] > button").click();
+  await category.locator('[data-tree-toggle]').click();
+  await sc.locator(".tree-category[data-kind='procedure'] > .category-summary [data-tree-toggle]").click();
   await openMenu(sc.locator("[data-object-id='public.refresh_proc']"));
   expect(await action("open-data").isHidden() && await action("rename-table").isHidden() && await action("new-query").isHidden(), "procedure exposes invalid table actions");
   await page.keyboard.press("Escape");
 
-  // Explicitly target a non-default database for both structure and rename drafts.
+  // Explicitly target a non-default database for structure and direct rename.
   await page.locator("[data-display-databases]").click();
   await page.locator("#databaseList input[value='app_reporting']").check();
   await page.locator("#applyDatabasePicker").click();
@@ -151,13 +154,12 @@ try {
   await page.locator("#createObjectForm button[type='submit']").click();
   expect(await page.locator("#createObjectModal").isVisible(), "rename accepted unchanged name");
   await page.locator("#createObjectName").fill('items"new');
+  const tabsBeforeRename = await page.locator('.query-tab').count();
   await page.locator("#createObjectForm button[type='submit']").click();
-  let tab = await savedTab();
-  expect(tab.database === "app_reporting" && tab.sql === 'ALTER TABLE "reporting"."items" RENAME TO "items""new";', `rename quote/target incorrect: ${tab.sql}`);
-  expect(fixture.callsFor("execute_mutation").length === beforeDraft, "rename draft executed immediately");
-  await page.locator("#runQuery").click();
-  await page.locator("#confirmActionAccept").click();
-  await toast("查询完成");
+  await page.locator('#createObjectModal').waitFor({ state: 'hidden' });
+  expect(await page.locator('.query-tab').count() === tabsBeforeRename, 'rename opened an SQL tab');
+  expect(fixture.callsFor('execute_mutation').length === beforeDraft + 1, 'rename must execute once on final submit');
+  expect(fixture.callsFor('execute_mutation').at(-1).args.request.sql === 'ALTER TABLE "reporting"."items" RENAME TO "items""new";', 'PostgreSQL direct rename quote incorrect');
   expect(fixture.callsFor("execute_mutation").at(-1).args.request.database === "app_reporting", "rename execution routed incorrectly");
   const tabCount = await page.locator(".query-tab").count();
   await openMenu(reportTable);
@@ -181,8 +183,9 @@ try {
   await action("rename-table").click();
   await page.locator("#createObjectName").fill("items`new");
   await page.locator("#createObjectForm button[type='submit']").click();
-  tab = await savedTab();
-  expect(tab.database === "warehouse" && tab.sql === "RENAME TABLE `warehouse`.`items` TO `warehouse`.`items``new`;", "MySQL rename quoting/target incorrect");
+  await page.locator('#createObjectModal').waitFor({ state: 'hidden' });
+  const rename = fixture.callsFor('execute_mutation').at(-1).args.request;
+  expect(rename.database === 'warehouse' && rename.sql === "RENAME TABLE `warehouse`.`items` TO `warehouse`.`items``new`;", "MySQL direct rename quoting/target incorrect");
 
   await page.locator("[data-connection-id='redis-local']").click();
   await selected(page.locator(".redis-tree-root"));
@@ -190,7 +193,7 @@ try {
   await action("refresh-redis").click();
   await toast("Redis 数据库和 key 已刷新");
   const redisDb = page.locator(".redis-database[data-redis-db='0']");
-  if (!await redisDb.evaluate((node) => node.open)) await redisDb.locator(":scope > summary").click();
+  if (!await redisDb.evaluate((node) => node.open)) await redisDb.locator(":scope > summary [data-tree-toggle]").click();
   const redisKey = redisDb.locator("[data-redis-key='users:1']");
   await redisKey.locator(".object-main").click();
   await page.locator(".db-grid-cell").first().waitFor();
@@ -212,7 +215,7 @@ try {
   await selected(page.locator(".redis-tree-root"));
   await page.screenshot({ path: resolve(evidence, "instance-selected.png") });
   expect(errors.length === 0, errors.join("\n"));
-  console.log("PASS: tree selection, all refresh scopes, active data refresh, failure/stale guards, category persistence, SQL drafts, PG/MySQL rename, quoting, cancellation, Redis refresh.");
+  console.log("PASS: tree selection, all refresh scopes, active data refresh, failure/stale guards, category persistence, PG/MySQL direct rename without SQL tabs, quoting, cancellation and Redis refresh.");
 } finally {
   await context.close();
   await browser.close();

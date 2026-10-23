@@ -6,7 +6,7 @@
 
 use crate::{
     catalog::{
-        DatabaseInfo, DatabaseSchema, ObjectConstraint, ObjectDetails, ObjectIndex, SchemaColumn,
+        DatabaseInfo, DatabaseSchema, MySqlMetadata, ObjectConstraint, ObjectDetails, ObjectIndex, SchemaColumn,
         SchemaObject,
     },
     timeout_error, ConnectionProfile, QueryResponse, MAX_RESULT_ROWS, QUERY_TIMEOUT,
@@ -16,12 +16,46 @@ use mysql_async::{prelude::Queryable, OptsBuilder, Pool, Row, Value};
 use serde_json::{Number, Value as JsonValue};
 use std::{
     collections::HashMap,
+    sync::{atomic::{AtomicBool, Ordering}, Arc, LazyLock, Mutex},
     time::{Duration, Instant},
 };
 use tokio::time::timeout;
 
 const MAX_RESULT_BYTES: usize = 8 * 1024 * 1024;
 const CLEANUP_TIMEOUT: Duration = Duration::from_secs(2);
+
+#[derive(Clone)]
+struct ActiveQuery { opts: mysql_async::Opts, server_id: u32, live: Arc<tokio::sync::Mutex<bool>>, cancelled: Arc<AtomicBool> }
+static ACTIVE: LazyLock<Mutex<HashMap<String, ActiveQuery>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+struct QueryLease { id: String, query: ActiveQuery }
+impl QueryLease {
+    fn register(conn: &mysql_async::Conn, id: &str) -> Result<Self, String> {
+        let id = query_id_or_default(id);
+        let query = ActiveQuery { opts: conn.opts().clone(), server_id: conn.id(), live: Arc::new(tokio::sync::Mutex::new(true)), cancelled: Arc::new(AtomicBool::new(false)) };
+        let mut queries = ACTIVE.lock().map_err(|_| "读取 MySQL 查询状态失败")?;
+        if queries.contains_key(&id) { return Err("相同 queryId 的 MySQL 查询仍在执行".into()); }
+        queries.insert(id.clone(), query.clone()); Ok(Self { id, query })
+    }
+    async fn finish(&self) -> bool {
+        // A late KILL must finish before this server connection can be reused.
+        *self.query.live.lock().await = false;
+        self.query.cancelled.load(Ordering::Acquire)
+    }
+}
+impl Drop for QueryLease {
+    fn drop(&mut self) { if let Ok(mut queries) = ACTIVE.lock() { queries.remove(&self.id); } }
+}
+pub async fn cancel_query(id: &str) -> Result<Option<bool>, String> {
+    let query = ACTIVE.lock().map_err(|_| "读取 MySQL 查询状态失败")?.get(id).cloned();
+    let Some(query) = query else { return Ok(None); };
+    let mut control = timeout(CLEANUP_TIMEOUT, mysql_async::Conn::new(query.opts.clone())).await.map_err(|_| timeout_error("连接 MySQL 取消通道"))?.map_err(|e| error("连接 MySQL 取消通道失败", e))?;
+    let live = query.live.lock().await;
+    if !*live { return Ok(Some(false)); }
+    query.cancelled.store(true, Ordering::Release);
+    let result = timeout(CLEANUP_TIMEOUT, control.query_drop(format!("KILL QUERY {}", query.server_id))).await.map_err(|_| timeout_error("取消 MySQL 查询"))?.map_err(|e| error("取消 MySQL 查询失败", e));
+    drop(live); let _ = control.disconnect().await;
+    result.map(|_| Some(true))
+}
 
 fn error(context: &str, err: impl std::fmt::Display) -> String {
     format!("{context}：{err}")
@@ -35,7 +69,10 @@ pub fn connect(profile: &ConnectionProfile, password: &str) -> Result<Pool, Stri
         .ip_or_hostname(profile.host.clone())
         .tcp_port(profile.port)
         .user(Some(profile.user.clone()))
-        .pass(Some(password.to_string()));
+        .pass(Some(password.to_string()))
+        // A type-normalized/no-op UPDATE still matched a real row. This keeps
+        // cell saves distinct from a missing/deleted primary key.
+        .client_found_rows(true);
     if !profile.database.trim().is_empty() {
         builder = builder.db_name(Some(profile.database.clone()));
     }
@@ -88,10 +125,9 @@ fn json_value(value: &Value) -> JsonValue {
             micro
         )),
         Value::Time(negative, days, hours, minutes, seconds, micro) => JsonValue::String(format!(
-            "{}{} {:02}:{:02}:{:02}.{:06}",
+            "{}{:02}:{:02}:{:02}.{:06}",
             if *negative { "-" } else { "" },
-            days,
-            hours,
+            *days as u64 * 24 + *hours as u64,
             minutes,
             seconds,
             micro
@@ -101,7 +137,16 @@ fn json_value(value: &Value) -> JsonValue {
 
 fn row_values(row: &Row) -> Vec<JsonValue> {
     (0..row.len())
-        .map(|index| row.as_ref(index).map(json_value).unwrap_or(JsonValue::Null))
+        .map(|index| {
+            use mysql_async::consts::ColumnType;
+            match row.as_ref(index) {
+                Some(Value::Bytes(bytes)) if row.columns_ref()[index].column_type() == ColumnType::MYSQL_TYPE_BIT => {
+                    let bits = bytes.iter().fold(0u64, |value, byte| (value << 8) | *byte as u64); JsonValue::String(bits.to_string())
+                }
+                Some(Value::Bytes(bytes)) if row.columns_ref()[index].character_set() == 63 && matches!(row.columns_ref()[index].column_type(), ColumnType::MYSQL_TYPE_BLOB | ColumnType::MYSQL_TYPE_TINY_BLOB | ColumnType::MYSQL_TYPE_MEDIUM_BLOB | ColumnType::MYSQL_TYPE_LONG_BLOB | ColumnType::MYSQL_TYPE_STRING | ColumnType::MYSQL_TYPE_VAR_STRING | ColumnType::MYSQL_TYPE_VARCHAR | ColumnType::MYSQL_TYPE_GEOMETRY) => serde_json::json!({"$dbStudio": "mysql-binary", "hex": hex::encode(bytes)}),
+                Some(value) => json_value(value), None => JsonValue::Null,
+            }
+        })
         .collect()
 }
 
@@ -164,6 +209,7 @@ pub async fn execute_read_only(
         .await
         .map_err(|_| timeout_error("获取 MySQL 连接"))?
         .map_err(|e| error("获取 MySQL 连接失败", e))?;
+    let lease = QueryLease::register(&conn, query_id)?;
     let result = timeout(QUERY_TIMEOUT, async {
         // COM_STMT_PREPARE accepts exactly one statement. A prefix check alone
         // would allow `SELECT 1; DELETE ...` because text queries support batches.
@@ -243,6 +289,9 @@ pub async fn execute_read_only(
         .await
         .map_err(|_| "清理 MySQL 只读事务超时".to_string())
         .and_then(|result| result.map_err(|e| error("清理 MySQL 只读事务失败", e)));
+    let cancelled = lease.finish().await;
+    if cancelled { return Err("MySQL 查询已取消".into()); }
+    if cleanup.is_err() { let _ = timeout(CLEANUP_TIMEOUT, conn.disconnect()).await; }
     match result {
         Ok(response) => cleanup.map(|_| response),
         Err(error) => Err(error),
@@ -265,80 +314,53 @@ pub async fn execute_write(
     execute_write_conn(&mut conn, sql, query_id, started).await
 }
 
-pub async fn execute_write_conn(
-    conn: &mut mysql_async::Conn,
-    sql: &str,
-    query_id: &str,
-    started: Instant,
-) -> Result<QueryResponse, String> {
-    if sql.trim().is_empty() {
-        return Err("SQL 不能为空".into());
-    }
-    timeout(QUERY_TIMEOUT, async {
-        let mut result = conn
-            .query_iter(sql)
-            .await
-            .map_err(|e| error("执行写入 SQL 失败", e))?;
-        let columns = result
-            .columns_ref()
-            .iter()
-            .map(|c| c.name_str().into_owned())
-            .collect::<Vec<_>>();
-        let mut rows = Vec::new();
-        let mut bytes = 0usize;
-        let mut truncated_reason = None;
-        if let Some(mut stream) = result
-            .stream::<Row>()
-            .await
-            .map_err(|e| error("读取写入结果失败", e))?
-        {
-            while let Some(row) = stream.next().await {
-                let row = row.map_err(|e| error("读取写入结果失败", e))?;
-                if rows.len() >= MAX_RESULT_ROWS {
-                    truncated_reason = Some("row_limit".to_string());
-                    break;
+pub async fn execute_write_conn(conn: &mut mysql_async::Conn, sql: &str, query_id: &str, started: Instant) -> Result<QueryResponse, String> {
+    execute_write_plan(conn, sql, query_id, started, false).await
+}
+pub async fn execute_in_transaction(conn: &mut mysql_async::Conn, sql: &str, query_id: &str, started: Instant) -> Result<QueryResponse, String> {
+    execute_write_plan(conn, sql, query_id, started, true).await
+}
+pub async fn validate_write(conn: &mut mysql_async::Conn, sql: &str, transaction_open: bool) -> Result<Vec<String>, String> {
+    let mode: Option<String> = timeout(QUERY_TIMEOUT, conn.query_first("SELECT @@SESSION.sql_mode")).await
+        .map_err(|_| timeout_error("读取 MySQL SQL 模式"))?.map_err(|e| error("读取 MySQL SQL 模式失败", e))?;
+    let no_backslash = mode.as_deref().unwrap_or("").split(',').any(|mode| mode == "NO_BACKSLASH_ESCAPES");
+    crate::mysql_sql::validate(sql, transaction_open, no_backslash)
+}
+async fn execute_write_plan(conn: &mut mysql_async::Conn, sql: &str, query_id: &str, started: Instant, transaction_open: bool) -> Result<QueryResponse, String> {
+    let statements = validate_write(conn, sql, transaction_open).await?;
+    let count = statements.len();
+    let lease = QueryLease::register(conn, query_id)?;
+    let response = timeout(QUERY_TIMEOUT, async {
+        let mut last = None;
+        for (index, statement) in statements.iter().enumerate() {
+            let mut result = conn.query_iter(statement).await.map_err(|e| format!("第 {} 条 MySQL SQL 执行失败：{e}{}", index + 1, if index > 0 && !transaction_open { "；此前语句可能已提交，请核对后再重试" } else { "" }))?;
+            let mut columns = Vec::new(); let mut rows = Vec::new(); let mut affected_rows = 0; let mut truncated_reason = None;
+            while let Some(mut stream) = result.stream::<Row>().await.map_err(|e| error("读取 MySQL 结果失败", e))? {
+                let set_columns = stream.columns_ref().iter().map(|column| column.name_str().into_owned()).collect::<Vec<_>>();
+                let set_affected = stream.affected_rows() as usize;
+                let mut set_rows = Vec::new(); let mut bytes = 0; let mut limit = None;
+                while let Some(row) = stream.next().await {
+                    let row = row.map_err(|e| error("读取 MySQL 结果行失败", e))?;
+                    if limit.is_some() { continue; }
+                    if set_rows.len() >= MAX_RESULT_ROWS { limit = Some("row_limit".to_string()); continue; }
+                    let values = row_values(&row);
+                    let size = values.iter().map(|value| match value { JsonValue::String(value) => value.len(), value => value.to_string().len() }).sum::<usize>();
+                    if bytes + size > MAX_RESULT_BYTES { limit = Some("result_size".to_string()); continue; }
+                    bytes += size; set_rows.push(values);
                 }
-                let values = row_values(&row);
-                let row_bytes = values
-                    .iter()
-                    .map(|value| match value {
-                        JsonValue::String(value) => value.len(),
-                        value => value.to_string().len(),
-                    })
-                    .sum::<usize>();
-                if bytes + row_bytes > MAX_RESULT_BYTES {
-                    truncated_reason = Some("result_size".to_string());
-                    break;
+                // CALL has a trailing empty status set. Keep its last actual
+                // result, but use the last statement's affected count for DML.
+                if !set_columns.is_empty() || columns.is_empty() {
+                    columns = set_columns; rows = set_rows; affected_rows = set_affected; truncated_reason = limit;
                 }
-                bytes += row_bytes;
-                rows.push(values);
             }
+            last = Some(QueryResponse { statement_count: count, row_count: if columns.is_empty() { affected_rows } else { rows.len() }, columns, rows,
+                elapsed_ms: started.elapsed().as_secs_f64() * 1000.0, truncated: truncated_reason.is_some(), truncated_reason, query_id: query_id_or_default(query_id) });
         }
-        let affected_rows = result.affected_rows() as usize;
-        // Drain remaining rows/results within the same deadline. A later
-        // server or cleanup error must still fail the operation, even after
-        // the displayed result has reached its cap.
-        result
-            .drop_result()
-            .await
-            .map_err(|e| error("清理写入结果失败", e))?;
-        Ok(QueryResponse {
-            statement_count: 1,
-            row_count: if columns.is_empty() {
-                affected_rows
-            } else {
-                rows.len()
-            },
-            columns,
-            rows,
-            elapsed_ms: started.elapsed().as_secs_f64() * 1000.0,
-            truncated: truncated_reason.is_some(),
-            truncated_reason,
-            query_id: query_id_or_default(query_id),
-        })
-    })
-    .await
-    .map_err(|_| timeout_error("执行写入 SQL"))?
+        last.ok_or_else(|| "SQL 不能为空".to_string())
+    }).await.unwrap_or_else(|_| Err(timeout_error("执行 MySQL SQL；结果状态不确定，请先核对，不要直接重试")));
+    if lease.finish().await { return Err("MySQL 查询已取消".into()); }
+    response
 }
 
 #[cfg(test)]
@@ -442,7 +464,7 @@ pub async fn load_schema_objects(
                 qualified_name: format!("{schema}.{name}"),
                 kind,
                 owner: None,
-                comment: row.get(4),
+                comment: row.get::<Option<String>, _>(4).flatten(),
                 columns: Vec::new(),
                 signature: None,
             })
@@ -469,7 +491,7 @@ pub async fn load_schema_objects(
                     .map(|value| value.eq_ignore_ascii_case("YES"))
                     .unwrap_or(true),
                 default_value: None,
-                comment: row.get(6),
+                comment: row.get::<Option<String>, _>(6).flatten(),
                 primary_key: false,
                 identity: false,
                 identity_generation: None,
@@ -481,6 +503,15 @@ pub async fn load_schema_objects(
             .remove(&(object.schema.clone(), object.name.clone()))
             .unwrap_or_default();
     }
+    let routine_rows: Vec<Row> = if let Some(schema) = schema {
+        conn.exec("SELECT ROUTINE_SCHEMA,ROUTINE_NAME,ROUTINE_TYPE,ROUTINE_COMMENT FROM information_schema.ROUTINES WHERE ROUTINE_SCHEMA=? ORDER BY ROUTINE_TYPE,ROUTINE_NAME", (schema,)).await.map_err(|e| error("读取 MySQL 函数和存储过程失败", e))?
+    } else { conn.query("SELECT ROUTINE_SCHEMA,ROUTINE_NAME,ROUTINE_TYPE,ROUTINE_COMMENT FROM information_schema.ROUTINES ORDER BY ROUTINE_SCHEMA,ROUTINE_TYPE,ROUTINE_NAME").await.map_err(|e| error("读取 MySQL 函数和存储过程失败", e))? };
+    for row in routine_rows {
+        let schema: String = row.get(0).unwrap_or_default(); let name: String = row.get(1).unwrap_or_default();
+        let kind = row.get::<String, _>(2).unwrap_or_default().to_ascii_lowercase();
+        let id = format!("mysql:{kind}:{}", serde_json::to_string(&[&schema, &name]).unwrap());
+        objects.push(SchemaObject { id, schema: schema.clone(), name: name.clone(), qualified_name: format!("{schema}.{name}"), kind, owner: None, comment: row.get::<Option<String>, _>(3).flatten(), columns: vec![], signature: None });
+    }
     Ok(objects)
 }
 
@@ -489,15 +520,28 @@ pub async fn load_object_details(
     object_id: &str,
     kind: Option<&str>,
 ) -> Result<ObjectDetails, String> {
-    let (schema, name) = object_id
-        .split_once('.')
-        .ok_or_else(|| "MySQL 对象 ID 无效".to_string())?;
-    let mut conn = pool
-        .get_conn()
-        .await
-        .map_err(|e| error("读取 MySQL 对象详情失败", e))?;
+    let (schema_name, object_name) = if let Some(encoded) = object_id.strip_prefix("mysql:") {
+        let (encoded_kind, pair) = encoded.split_once(':').ok_or("MySQL 对象 ID 无效")?;
+        if Some(encoded_kind) != kind { return Err("MySQL 对象类型不匹配".into()); }
+        let pair: [String; 2] = serde_json::from_str(pair).map_err(|_| "MySQL 对象 ID 无效".to_string())?;
+        (pair[0].clone(), pair[1].clone())
+    } else { let (schema, name) = object_id.split_once('.').ok_or("MySQL 对象 ID 无效")?; (schema.to_string(), name.to_string()) };
+    let (schema, name) = (schema_name.as_str(), object_name.as_str());
+    let mut conn = timeout(QUERY_TIMEOUT, pool.get_conn()).await.map_err(|_| timeout_error("获取 MySQL 目录连接"))?.map_err(|e| error("读取 MySQL 对象详情失败", e))?;
     let table_kind = kind.unwrap_or("table").to_string();
+    let session: (String, String) = conn.query_first("SELECT @@SESSION.sql_mode, VERSION()").await.map_err(|e| error("读取 MySQL 会话模式失败", e))?.ok_or("MySQL 未返回会话模式")?;
+    let mut metadata = MySqlMetadata { sql_mode: session.0, server_version: session.1, engine: None };
+    if matches!(table_kind.as_str(), "function" | "procedure") {
+        let statement = if table_kind == "function" { "SHOW CREATE FUNCTION" } else { "SHOW CREATE PROCEDURE" };
+        let qualified = format!("`{}`.`{}`", schema.replace('`', "``"), name.replace('`', "``"));
+        let row: Option<Row> = conn.query_first(format!("{statement} {qualified}")).await.map_err(|e| error("读取 MySQL 例程定义失败", e))?;
+        let definition = row.and_then(|row| row.get::<Option<String>, _>(2).flatten()).ok_or("MySQL 未返回例程定义，请确认 SHOW_ROUTINE 权限")?;
+        return Ok(ObjectDetails { id: object_id.to_string(), schema: schema.to_string(), name: name.to_string(), qualified_name: format!("{schema}.{name}"), kind: table_kind, owner: None, comment: None, columns: vec![], indexes: vec![], constraints: vec![], definition: Some(definition), signature: None, table_ddl: None, mysql: Some(metadata) });
+    }
     let rows: Vec<Row> = conn.exec("SELECT COLUMN_NAME,ORDINAL_POSITION,COLUMN_TYPE,IS_NULLABLE,COLUMN_DEFAULT,COLUMN_COMMENT,COLUMN_KEY,EXTRA FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=? AND TABLE_NAME=? ORDER BY ORDINAL_POSITION", (schema, name)).await.map_err(|e| error("读取 MySQL 列失败", e))?;
+    let table_info: Option<Row> = conn.exec_first("SELECT ENGINE,TABLE_COMMENT FROM information_schema.TABLES WHERE TABLE_SCHEMA=? AND TABLE_NAME=?", (schema, name)).await.map_err(|e| error("读取 MySQL 表属性失败", e))?;
+    metadata.engine = table_info.as_ref().and_then(|row| row.get::<Option<String>, _>(0).flatten());
+    let table_comment = table_info.as_ref().and_then(|row| row.get::<Option<String>, _>(1).flatten());
     let columns = rows
         .into_iter()
         .filter_map(|r| {
@@ -506,8 +550,8 @@ pub async fn load_object_details(
                 ordinal_position: r.get::<u64, _>(1)? as i16,
                 data_type: r.get(2)?,
                 nullable: r.get::<String, _>(3)?.eq_ignore_ascii_case("YES"),
-                default_value: r.get(4),
-                comment: r.get(5),
+                default_value: r.get::<Option<String>, _>(4).flatten(),
+                comment: r.get::<Option<String>, _>(5).flatten(),
                 primary_key: r.get::<String, _>(6).map(|v| v == "PRI").unwrap_or(false),
                 identity: r
                     .get::<String, _>(7)
@@ -525,7 +569,7 @@ pub async fn load_object_details(
         })
         .collect::<Vec<_>>();
     let index_rows: Vec<Row> = conn.exec("SELECT INDEX_NAME,INDEX_TYPE,NON_UNIQUE FROM information_schema.STATISTICS WHERE TABLE_SCHEMA=? AND TABLE_NAME=? GROUP BY INDEX_NAME,INDEX_TYPE,NON_UNIQUE ORDER BY INDEX_NAME", (schema, name)).await.map_err(|e| error("读取 MySQL 索引失败", e))?;
-    let indexes = index_rows
+    let mut indexes: Vec<ObjectIndex> = index_rows
         .into_iter()
         .filter_map(|r| {
             Some(ObjectIndex {
@@ -540,7 +584,7 @@ pub async fn load_object_details(
         })
         .collect();
     let constraint_rows: Vec<Row> = conn.exec("SELECT CONSTRAINT_NAME,CONSTRAINT_TYPE FROM information_schema.TABLE_CONSTRAINTS WHERE TABLE_SCHEMA=? AND TABLE_NAME=? ORDER BY CONSTRAINT_NAME", (schema, name)).await.map_err(|e| error("读取 MySQL 约束失败", e))?;
-    let constraints = constraint_rows
+    let mut constraints: Vec<ObjectConstraint> = constraint_rows
         .into_iter()
         .filter_map(|r| {
             Some(ObjectConstraint {
@@ -578,6 +622,21 @@ pub async fn load_object_details(
     } else {
         None
     };
+    if let Some(definition) = &definition {
+        let clauses = crate::mysql_sql::definition_clauses(definition, metadata.sql_mode.split(',').any(|mode| mode == "NO_BACKSLASH_ESCAPES"));
+        for index in &mut indexes {
+            let quoted = format!("`{}`", index.name.replace('`', "``"));
+            if let Some(clause) = clauses.iter().find(|clause| {
+                if index.primary { clause.starts_with("PRIMARY KEY") }
+                else { [format!("KEY {quoted}"), format!("UNIQUE KEY {quoted}"), format!("FULLTEXT KEY {quoted}"), format!("SPATIAL KEY {quoted}")].iter().any(|prefix| clause.starts_with(prefix)) }
+            }) { index.definition = clause.clone(); }
+        }
+        for constraint in &mut constraints {
+            let quoted = format!("CONSTRAINT `{}`", constraint.name.replace('`', "``"));
+            if let Some(clause) = clauses.iter().find(|clause| clause.starts_with(&quoted)) { constraint.definition = clause.clone(); }
+            else if let Some(index) = indexes.iter().find(|index| index.name == constraint.name) { constraint.definition = index.definition.clone(); }
+        }
+    }
     Ok(ObjectDetails {
         id: object_id.to_string(),
         schema: schema.to_string(),
@@ -585,12 +644,13 @@ pub async fn load_object_details(
         qualified_name: format!("{schema}.{name}"),
         kind: table_kind,
         owner: None,
-        comment: None,
+        comment: table_comment,
         columns,
         indexes,
         constraints,
         definition,
         signature: None,
         table_ddl: None,
+        mysql: Some(metadata),
     })
 }

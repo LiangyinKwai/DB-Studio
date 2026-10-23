@@ -32,9 +32,14 @@ let failRefresh = false;
 let createdDatabase = false;
 let failTableCreate = false;
 let failTableRefresh = false;
+let failObjectCreate = false, holdObjectCreate = false, releaseObjectCreate;
 const createdTables = [];
 await context.exposeFunction("__FIXTURE_INVOKE__", async (command, args) => {
   const result = await fixture.invoke(command, args);
+  if (command === 'execute_mutation' && /^CREATE (DATABASE|SCHEMA)/.test(args.request.sql)) {
+    if (holdObjectCreate) { holdObjectCreate = false; await new Promise(resolve => { releaseObjectCreate = resolve; }); }
+    if (failObjectCreate) throw new Error('fixture: 没有创建权限');
+  }
   if (failRefresh && command === "list_schemas" && args.database === "app_reporting") throw new Error("fixture refresh failure");
   if (command === "execute_mutation" && args.request.sql === 'CREATE DATABASE "new_app";') createdDatabase = true;
   if (command === "list_databases" && args.connectionId === "conn-dev" && createdDatabase)
@@ -100,6 +105,7 @@ try {
   ]) {
     await openMenu("app_reporting");
     const before = fixture.callsFor("execute_mutation").length;
+    const tabsBefore = await page.locator('.query-tab').count();
     await action(`create-${kind}`).click();
     await page.locator("#createObjectModal").waitFor();
     expect((await page.locator("#createObjectContext").innerText()).includes("app_reporting"), "creation dialog lost target");
@@ -107,15 +113,41 @@ try {
     await page.locator("#createObjectForm button[type='submit']").click();
     expect(await page.locator("#createObjectModal").isVisible(), "blank name accepted");
     await page.locator("#createObjectName").fill(name);
+    await page.locator('#createObjectPreview').evaluate(node => { node.open = true; });
+    expect((await page.locator('#createObjectSql').innerText()) === expected, `bad ${kind} preview`);
     await page.locator("#createObjectForm button[type='submit']").click();
-    tab = await activeSavedTab();
-    expect(tab.database === "app_reporting" && tab.sql.includes(expected), `bad ${kind} DDL target/template: ${tab.sql}`);
-    expect(fixture.callsFor("execute_mutation").length === before, "creating a draft executed SQL");
-    await page.locator("#runQuery").click();
-    await page.locator("#confirmActionAccept").click();
-    await page.locator("#toast").getByText("查询完成", { exact: true }).waitFor();
-    expect(fixture.callsFor("execute_mutation").at(-1).args.request.database === "app_reporting", "DDL executed against default database");
+    await page.locator('#createObjectModal').waitFor({ state: 'hidden' });
+    expect(await page.locator('.query-tab').count() === tabsBefore, 'direct creation opened an SQL tab');
+    expect(fixture.callsFor("execute_mutation").length === before + 1, 'final submit must execute once');
+    const request = fixture.callsFor('execute_mutation').at(-1).args.request;
+    expect(request.database === 'app_reporting' && request.sql === expected, 'direct creation lost database or quoted name');
   }
+  // Failed writes retain the form. While the IPC is pending, Enter/Escape and
+  // repeated submits cannot duplicate or abandon an in-flight CREATE.
+  await openMenu('app_reporting'); await action('create-schema').click();
+  const noWrite = fixture.callsFor('execute_mutation').length;
+  await page.locator('#createObjectName').fill('retry_schema'); failObjectCreate = true; holdObjectCreate = true;
+  await page.locator('#applyCreateObject').click();
+  await page.waitForFunction(() => document.querySelector('#applyCreateObject').disabled);
+  await page.keyboard.press('Escape');
+  expect(await page.locator('#createObjectModal').isVisible(), 'Escape closed an executing CREATE');
+  await page.locator('#createObjectForm').evaluate(node => node.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })));
+  expect(fixture.callsFor('execute_mutation').length === noWrite + 1, 'double submit sent a duplicate CREATE');
+  for (let i = 0; i < 100 && !releaseObjectCreate; i++) await new Promise(done => setTimeout(done, 25));
+  releaseObjectCreate();
+  await page.locator('#createObjectFeedback').filter({ hasText: '没有创建权限' }).waitFor();
+  expect(await page.locator('#createObjectName').inputValue() === 'retry_schema', 'failed CREATE lost the draft');
+  failObjectCreate = false; failRefresh = true;
+  await page.locator('#applyCreateObject').click(); await page.locator('#createObjectModal').waitFor({ state: 'hidden' });
+  await page.locator('#toast').filter({ hasText: '不要重复执行' }).waitFor(); failRefresh = false;
+  expect(fixture.callsFor('execute_mutation').length === noWrite + 2, 'refresh failure retried CREATE');
+  await page.locator('#beginTransaction').click(); await page.waitForFunction(() => !document.querySelector('#rollbackTransaction').disabled);
+  await openMenu('app_reporting'); await action('create-schema').click(); await page.locator('#createObjectName').fill('blocked_in_transaction');
+  const beforeBlocked = fixture.callsFor('execute_mutation').length;
+  await page.locator('#applyCreateObject').click(); await page.locator('#createObjectFeedback').filter({ hasText: '先提交或回滚' }).waitFor();
+  expect(fixture.callsFor('execute_mutation').length === beforeBlocked, 'direct creation dispatched inside active transaction');
+  await page.locator('#cancelCreateObject').click(); await page.locator('#rollbackTransaction').click();
+  await page.waitForFunction(() => !document.querySelector('#beginTransaction').disabled);
   const beforeTable = fixture.callsFor('execute_mutation').length;
   await openMenu('app_reporting');
   await action('create-table').click();
@@ -163,8 +195,8 @@ try {
   const createdRequest = fixture.callsFor('execute_mutation').at(-1).args.request;
   expect(createdRequest.database === 'app_reporting' && createdRequest.schema === 'reporting', 'table was created in the wrong database/schema');
   expect(createdRequest.sql.includes('COMMENT ON COLUMN "reporting"."items""new"."note"'), 'field comment missing');
-  tab = await activeSavedTab();
-  expect(tab.database === 'app_reporting' && tab.schema === 'reporting', 'new table structure opened in wrong context');
+  expect((await page.locator('.query-tab.active').innerText()).includes('items"new'), 'created table structure was not activated');
+  expect(fixture.callsFor('get_object_details').at(-1).args.database === 'app_reporting', 'new table structure opened in wrong database');
   expect((await page.locator('#structurePanel').innerText()).includes('items"new'), 'new table structure did not open');
   await openMenu('app_reporting'); await action('create-table').click();
   await designer.waitFor();
@@ -199,6 +231,12 @@ try {
   await page.locator("[data-connection-id='mysql-local']").click();
   await openMenu("warehouse");
   expect(await action("create-schema").isHidden(), "MySQL exposes redundant PostgreSQL schema action");
+  await action('create-database').click(); await page.locator('#createObjectName').fill('my`database');
+  const mysqlTabs = await page.locator('.query-tab').count();
+  await page.locator('#applyCreateObject').click(); await page.locator('#createObjectModal').waitFor({ state: 'hidden' });
+  expect(await page.locator('.query-tab').count() === mysqlTabs, 'MySQL database creation opened an SQL tab');
+  expect(fixture.callsFor('execute_mutation').at(-1).args.request.sql === 'CREATE DATABASE `my``database`;', 'MySQL database name escaped incorrectly');
+  await openMenu('warehouse');
   await action("create-table").click();
   await designer.getByRole('button', { name: '保存…', exact: true }).click();
   await nameField.fill('items');
@@ -210,7 +248,7 @@ try {
   await page.locator('#toast').filter({ hasText: '已创建，刷新失败' }).waitFor();
   expect(fixture.callsFor('execute_mutation').at(-1).args.request.database === 'warehouse', 'MySQL creation used wrong database');
   expect(errors.length === 0, errors.join("\n"));
-  console.log("PASS: database menu, query/DDL routing, draft execution, quoting, validation, cancel, refresh errors, persistence, PostgreSQL/MySQL actions.");
+  console.log("PASS: direct database/schema creation without SQL tabs, bound requests and quoted preview, duplicate/pending-dismissal guards, failure draft retention, success-versus-refresh distinction, direct table designer, cancel, persistence and PostgreSQL/MySQL routing.");
 } finally {
   await context.close();
   await browser.close();

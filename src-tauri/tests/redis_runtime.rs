@@ -11,6 +11,7 @@ mod redis_mutation;
 
 use redis_adapter::{connect, execute_command, get_value, list_databases, ping, scan_keys};
 use redis_mutation::{create_key, KeyCreate, delete_key, rename_key, save_cell, CellEdit};
+use std::collections::BTreeMap;
 use std::env;
 
 fn required(name: &str) -> String {
@@ -32,6 +33,27 @@ async fn scan_all(
         }
     }
     Err("SCAN did not return cursor 0 within 100 pages".into())
+}
+
+async fn scan_types(
+    connection: &mut redis::aio::MultiplexedConnection,
+    pattern: &str,
+) -> BTreeMap<String, String> {
+    let mut cursor = 0;
+    let mut types = BTreeMap::new();
+    for _ in 0..100 {
+        let page = scan_keys(connection, cursor, pattern, 100).await.unwrap();
+        assert!(page.key_types.keys().all(|key| page.keys.contains(key)));
+        let serialized = serde_json::to_value(&page).unwrap();
+        assert!(serialized["keys"].is_array());
+        assert!(serialized["keyTypes"].is_object());
+        types.extend(page.key_types);
+        cursor = page.cursor;
+        if cursor == 0 {
+            return types;
+        }
+    }
+    panic!("SCAN did not return cursor 0 within 100 pages");
 }
 
 #[tokio::test]
@@ -151,6 +173,53 @@ async fn redis_runtime_contract() {
         .rows
         .iter()
         .any(|row| row.first().and_then(|v| v.as_str()) == Some("field")));
+
+    for command in [
+        format!("LPUSH {prefix}list item"),
+        format!("SADD {prefix}set member"),
+        format!("ZADD {prefix}zset 1 member"),
+        format!("XADD {prefix}stream * field value"),
+    ] {
+        execute_command(&mut connection, &command).await.unwrap();
+    }
+    let types = scan_types(&mut connection, &format!("{prefix}*")).await;
+    let size: u64 = redis::cmd("DBSIZE").query_async(&mut connection).await.unwrap();
+    let filtered_page = scan_keys(&mut connection, 0, &format!("{prefix}string"), 100).await.unwrap();
+    assert_eq!(filtered_page.key_count, Some(size), "MATCH must not turn the DB count into the page size");
+    for kind in ["string", "hash", "list", "set", "zset", "stream"] {
+        assert_eq!(types.get(&format!("{prefix}{kind}")).map(String::as_str), Some(kind));
+    }
+    // The same name in DB 1 has another type, so TYPE must follow SCAN's DB.
+    execute_command(&mut db_one, &format!("HSET {prefix}string field value"))
+        .await.unwrap();
+    let other_types = scan_types(&mut db_one, &format!("{prefix}*")).await;
+    assert_eq!(other_types.get(&format!("{prefix}string")).map(String::as_str), Some("hash"));
+    assert_eq!(types.get(&format!("{prefix}string")).map(String::as_str), Some("string"));
+    execute_command(&mut db_one, &format!("DEL {prefix}string")).await.unwrap();
+
+    // Restricted TYPE must fall back to unknown metadata while preserving the
+    // successful SCAN page and its cursor; never require read-value permission.
+    redis::cmd("ACL").arg("SETUSER").arg("db_studio_scan_only")
+        .arg("reset").arg("on").arg(">runtime-only-password")
+        .arg("~db_studio_runtime:*").arg("+@connection").arg("+scan")
+        .query_async::<()>(&mut connection).await.unwrap();
+    let mut scan_only = connect("localhost", tls_port, 0, "db_studio_scan_only",
+        "runtime-only-password", true, Some(&ca_file)).await.unwrap();
+    let restricted = scan_all(&mut scan_only, &format!("{prefix}*")).await.unwrap();
+    assert!(restricted.contains(&format!("{prefix}string")));
+    assert!(scan_types(&mut scan_only, &format!("{prefix}*")).await.is_empty());
+    assert_eq!(scan_keys(&mut scan_only, 0, &format!("{prefix}*"), 100).await.unwrap().key_count, None);
+    // A failed metadata pipeline must also leave the connection usable.
+    assert_eq!(ping(&mut scan_only).await.unwrap(), "PONG");
+    // SCAN plus TYPE is sufficient; reading any values is still forbidden.
+    redis::cmd("ACL").arg("SETUSER").arg("db_studio_scan_only").arg("+type")
+        .query_async::<()>(&mut connection).await.unwrap();
+    assert_eq!(scan_types(&mut scan_only, &format!("{prefix}*")).await, types);
+    redis::cmd("ACL").arg("DELUSER").arg("db_studio_scan_only")
+        .query_async::<i64>(&mut connection).await.unwrap();
+    execute_command(&mut connection,
+        &format!("DEL {prefix}list {prefix}set {prefix}zset {prefix}stream"))
+        .await.unwrap();
 
     let keys = scan_all(&mut connection, &format!("{prefix}*"))
         .await

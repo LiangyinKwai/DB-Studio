@@ -101,7 +101,7 @@ try {
   expect((await page.locator("#redisConsoleContext").innerText()).includes("本地 Redis · DB 1"), "console connection/DB unclear");
   const sqlCalls = calls("execute_query").length;
   const redisCalls = calls("execute_redis_command").length;
-  await page.locator("#redisConsoleInput").fill("PING");
+  await page.locator("#redisCommandEditor .cm-content").fill("PING");
   await page.locator("#redisConsoleRun").click();
   await until(() => calls("execute_redis_command").length === redisCalls + 1, "Redis command on top of SQL tab");
   await until(() => page.locator("#redisConsoleRun").isEnabled());
@@ -116,8 +116,8 @@ try {
   expect(await page.locator("#sqlEditor .cm-content").innerText() === tableSql, "console command replaced SQL draft");
   await openConsole(1);
   holdCommand = true;
-  await page.locator("#redisConsoleInput").fill("PING");
-  await page.locator("#redisConsoleInput").press("Meta+Enter");
+  await page.locator("#redisCommandEditor .cm-content").fill("PING");
+  await page.locator("#redisCommandEditor .cm-content").press("Meta+Enter");
   await until(() => Boolean(releaseCommand), "held command");
   await connect("conn-dev");
   expect(await page.locator(".tree-database[data-database='app'][open]").count() === 1, "switching back collapsed PostgreSQL database");
@@ -128,7 +128,7 @@ try {
   await until(async () => (await page.locator("#recentQueries").innerText()).includes("PING"));
   await page.waitForTimeout(100);
   expect(await page.locator("#redisConsolePanel").isHidden() && await page.locator("#tableToolbar").isVisible(), "late Redis result resurrected console");
-  await page.locator("#openTableDdl").click();
+  await page.locator("#structureTab").click();
   await page.locator("#structurePanel .structure-title").waitFor();
   expect(await page.locator("#redisConsolePanel").isHidden(), "structure still covered by Redis console");
   await tableTab.click();
