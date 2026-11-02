@@ -33,17 +33,21 @@ export function estimateResultBytes(result) {
 /** Release oldest results until the budget is met, preserving protected work. */
 export function selectResultsToRelease(tabs, { activeTab, currentTab, isProtected } = {}) {
   const cached = (Array.isArray(tabs) ? tabs : []).filter((tab) => tab?.result?.executed);
-  let count = cached.length;
+  // Key inspectors are often just a few bytes. The query-count cap must not
+  // evict those tiny values; they still share the overall byte budget.
+  const countsAsQuery = tab => typeof tab.redisKey !== 'string';
+  let count = cached.filter(countsAsQuery).length;
   let bytes = cached.reduce((sum, tab) => sum + resultBytes(tab.result), 0);
   const candidates = cached.filter((tab) => tab !== activeTab && tab !== currentTab &&
-    !tab.running && !tab.refreshing && !tab.cellSaving && !tab.result.cellEditsInTransaction &&
+    !tab.running && !tab.refreshing && !tab.cellSaving && !tab.cellBatchSaving && !tab.result.cellEditsInTransaction &&
     !isProtected?.(tab));
   candidates.sort((left, right) => finishedAt(left.result) - finishedAt(right.result));
   const release = [];
   for (const tab of candidates) {
     if (count <= MAX_CACHED_RESULTS && bytes <= MAX_RESULT_BYTES) break;
+    if (bytes <= MAX_RESULT_BYTES && !countsAsQuery(tab)) continue;
     release.push(tab);
-    count -= 1;
+    if (countsAsQuery(tab)) count -= 1;
     bytes -= resultBytes(tab.result);
   }
   return release;

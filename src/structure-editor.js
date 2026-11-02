@@ -1,3 +1,4 @@
+import { mysqlCharacterClause, createMysqlCharacterPicker } from './mysql-character-settings.js';
 import { setSelectableText } from './selectable-text.js';
 import { mysqlColumns, mysqlColumnChange, mysqlDefaultClause } from './mysql-ddl.js';
 
@@ -138,7 +139,7 @@ export function buildStructurePlan(details, rows, driver = 'postgres') {
   return { sql: mysql && clauses.length ? `ALTER TABLE ${table}\n  ${clauses.join(',\n  ')};` : statements.join('\n'), changed, dropped };
 }
 
-export function buildCreateTablePlan({ schema, name }, rows, driver = 'postgres') {
+export function buildCreateTablePlan({ schema, name, charset, collation }, rows, driver = 'postgres') {
   if (!['postgres', 'mysql'].includes(driver)) throw new Error('此驱动暂不支持可视化建表');
   const mysql = driver === 'mysql';
   if (!name?.trim()) throw new Error('请输入表名');
@@ -171,7 +172,7 @@ export function buildCreateTablePlan({ schema, name }, rows, driver = 'postgres'
     return `  ${column} ${type}${generated}${row.nullable ? '' : ' NOT NULL'}${def}${mysql && row.comment ? ` COMMENT ${literal(row.comment, true)}` : ''}`;
   });
   if (primary.length) definitions.push(`  PRIMARY KEY (${primary.map(row => q(row.name)).join(', ')})`);
-  const statements = [`CREATE TABLE ${table} (\n${definitions.join(',\n')}\n)${mysql ? ' ENGINE=InnoDB' : ''};`];
+  const statements = [`CREATE TABLE ${table} (\n${definitions.join(',\n')}\n)${mysql ? ` ENGINE=InnoDB${mysqlCharacterClause(charset, collation)}` : ''};`];
   if (!mysql) for (const row of columns) {
     if (row.comment) statements.push(`COMMENT ON COLUMN ${table}.${q(row.name)} IS ${literal(row.comment, false)};`);
   }
@@ -192,7 +193,7 @@ const node = (tag, className = '', text) => {
   return element;
 };
 
-export function openStructureEditor({ details, driver, targetLabel, onApply, onClose, confirmDiscard, create = false }) {
+export function openStructureEditor({ details, driver, targetLabel, onApply, onClose, confirmDiscard, create = false, mysqlCharacterSettings = null }) {
   const rows = create ? [{ name: 'id', dataType: 'bigint', nullable: false, primaryKey: true, identity: true, defaultValue: '', comment: '' }] : createStructureDraft(details);
   const initialRows = JSON.stringify(rows);
   const fields = create ? ['name', 'dataType', 'primaryKey', 'identity', 'nullable', 'defaultValue', 'comment'] : editableKeys;
@@ -228,7 +229,9 @@ export function openStructureEditor({ details, driver, targetLabel, onApply, onC
   const nameLabel = node('label', '', '表名');
   const nameInput = node('input'); nameInput.type = 'text'; nameInput.autocomplete = 'off'; nameInput.placeholder = '例如：orders'; nameInput.setAttribute('aria-label', '表名');
   nameLabel.append(nameInput);
-  naming.append(nameLabel, node('p', 'form-note', '确认表名和下方 SQL 后创建；返回编辑可继续调整字段。'));
+  const characterPicker = create && driver === 'mysql' && mysqlCharacterSettings ? createMysqlCharacterPicker(mysqlCharacterSettings, '继承数据库默认值') : null;
+  if (characterPicker) { naming.append(nameLabel, characterPicker.element); } else naming.append(nameLabel);
+  naming.append(node('p', 'form-note', '确认表名和下方 SQL 后创建；返回编辑可继续调整字段。'));
   footer.append(cancel, submit);
   form.append(header, target, note, toolbar, scroller, naming, previewBox, feedback, footer);
   dialog.append(form, typePopup); document.body.append(dialog);
@@ -296,7 +299,7 @@ export function openStructureEditor({ details, driver, targetLabel, onApply, onC
   };
   const update = () => {
     try {
-      plan = create ? buildCreateTablePlan({ ...details, name: namingTable ? nameInput.value : '<保存时填写表名>' }, rows, driver) : buildStructurePlan(details, rows, driver);
+      plan = create ? buildCreateTablePlan({ ...details, name: namingTable ? nameInput.value : '<保存时填写表名>', ...(characterPicker?.value() || {}) }, rows, driver) : buildStructurePlan(details, rows, driver);
       setSelectableText(preview, plan.sql || '尚未修改结构');
       count.textContent = `${rows.filter((row) => !row.removed).length} 个字段 · ${plan.changed} 项变更${plan.dropped ? ` · 删除 ${plan.dropped} 列` : ''}`;
       submit.disabled = busy || !plan.sql;
@@ -322,6 +325,7 @@ export function openStructureEditor({ details, driver, targetLabel, onApply, onC
     if (value) { nameInput.focus(); nameInput.select(); }
     else submit.focus();
   };
+  characterPicker?.element.addEventListener('change', () => update());
   nameInput.addEventListener('input', () => { feedback.textContent = ''; update(); });
   const renderRows = () => {
     tbody.replaceChildren();
@@ -414,7 +418,7 @@ export function openStructureEditor({ details, driver, targetLabel, onApply, onC
     event.preventDefault(); if (busy || !plan?.sql) return;
     if (create && !namingTable) { setNaming(true); return; }
     busy = true;
-    const fields = [...dialog.querySelectorAll('input, button')].map((element) => [element, element.disabled]);
+    const fields = [...dialog.querySelectorAll('input, select, button')].map((element) => [element, element.disabled]);
     for (const [element] of fields) element.disabled = true;
     feedback.classList.remove('error'); feedback.textContent = '正在准备提交…';
     try {

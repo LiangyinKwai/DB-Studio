@@ -679,3 +679,13 @@ body .create-table-dialog .structure-editor-table th:nth-child(5),
 body .create-table-dialog .structure-editor-table th:nth-child(6) { width: 50px; }
 body .create-table-dialog.naming-table { width: min(720px, calc(100vw - 32px)); }
 body .structure-table-naming { margin: 20px 0; }
+
+body #objectContextMenu .context-menu-danger, body #objectContextMenu .context-menu-danger:hover { color: var(--error); }
+
+body #objectContextMenu button:not([hidden]) { display: flex; align-items: center; gap: 10px; min-height: 32px; }
+body #objectContextMenu button .ui-icon { width: 16px; height: 16px; flex: none; color: var(--app-muted); }
+body #objectContextMenu .context-menu-danger .ui-icon { color: var(--error); }
+
+body #objectContextMenu .context-submenu-arrow { margin-left: auto; font-size: 16px; line-height: 1; }
+body #clearTableSubmenu { min-width: 202px; z-index: 61; }
+body #clearTableSubmenu button { color: var(--error); }

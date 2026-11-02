@@ -79,3 +79,18 @@ test("missing timestamps release before newer results and ties retain workspace 
   const newer = tab(3, 1);
   assert.deepEqual(selectResultsToRelease([newer, first, second]), [first, second]);
 });
+
+test('small Redis key previews do not compete for the SQL result count budget', () => {
+  const keys = Array.from({ length: 30 }, (_, id) => ({ ...tab(id), redisKey: `key:${id}` }));
+  assert.deepEqual(selectResultsToRelease(keys), []);
+  const queries = Array.from({ length: 7 }, (_, id) => tab(id + 30));
+  assert.deepEqual(selectResultsToRelease([...keys, ...queries]), [queries[0]]);
+});
+
+test('Redis key previews still obey the byte budget and protect batch saves', () => {
+  const key = { ...tab(1, MAX_RESULT_BYTES), redisKey: 'key' };
+  const active = { ...tab(2, MAX_RESULT_BYTES), redisKey: 'active' };
+  assert.deepEqual(selectResultsToRelease([key, active], { activeTab: active }), [key]);
+  key.cellBatchSaving = {};
+  assert.deepEqual(selectResultsToRelease([key, active], { activeTab: active }), []);
+});

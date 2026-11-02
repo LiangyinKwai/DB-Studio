@@ -71,11 +71,19 @@ body .connection-card[data-drop-position="before"]::after { top: -3px; }
 body .connection-card[data-drop-position="after"]::after { bottom: -3px; }
 body .connection-card.selected { border-color: var(--hairline); box-shadow: inset 2px 0 var(--accent-line); }
 .connection-select { padding: 12px 8px; gap: 9px; }
+.connection-icon .mysql-driver-icon { transform: scale(1.25); }
 .connection-copy { gap: 6px; }
 .connection-copy strong { font-size: 12px; font-weight: 600; }
 body .connection-copy small { font-size: 10px; line-height: 1.3; color: var(--app-muted); }
-body .connection-card > .connection-toggle { width: 29px; height: 29px; border-radius: 6px; margin-right: 0; background: transparent; border-color: transparent; }
-body .connection-card > .connection-toggle .ui-icon { width: 18px; height: 18px; }
+body .connection-card > .connection-toggle { width: 32px; height: 32px; padding: 0; border-radius: 6px; margin-right: 0; background: transparent; border-color: transparent; }
+body .connection-card > .connection-toggle .connection-state-icon { width: 28px; height: 28px; flex: none; stroke-width: 1.15; stroke-linejoin: round; }
+body .connection-toggle .connection-housing { fill: currentColor; fill-opacity: .06; }
+body .connection-toggle .connection-signal { opacity: .3; stroke-width: 1.5; }
+body .connection-toggle[data-status="connected"] .connection-socket { transform: translateX(-3px); }
+body .connection-toggle[data-status="connected"] .connection-housing { fill-opacity: .14; }
+body .connection-toggle[data-status="connected"] .connection-signal { opacity: 1; filter: drop-shadow(0 0 1px currentColor); }
+body .connection-toggle[data-status="connecting"] .connection-socket { animation: connection-plug-in 1.4s ease-in-out infinite; }
+@keyframes connection-plug-in { 0%, 100% { transform: translateX(0); opacity: .55; } 55%, 75% { transform: translateX(-3px); opacity: 1; } }
 body .connection-card > .connection-toggle[data-status="connected"] { background: transparent; border-color: transparent; }
 body .connection-card > .connection-edit { width: 23px; margin: 0 3px 0 0; font-size: 14px; }
 .connection-state-label { color: var(--app-muted); }
@@ -351,3 +359,43 @@ body .app-context-menu button:disabled { opacity: .4; }
 #redisCreateForm { display: grid; gap: 12px; }
 #redisCreateForm label { display: grid; gap: 6px; }
 #redisCreateForm label[hidden] { display: none; }
+
+/* Connection folders share the sidebar's light outlines and muted hierarchy. */
+.connection-group > summary { display: flex; align-items: center; gap: 7px; min-height: 30px; padding: 4px 8px; list-style: none; cursor: pointer; color: var(--app-muted); font-size: 11px; border-radius: 5px; }
+.connection-group > summary::-webkit-details-marker { display: none; }
+.connection-group > summary:hover { background: var(--hover-bg); color: var(--app-text); }
+.connection-group > summary:focus-visible { outline: 2px solid var(--accent-focus); outline-offset: -2px; }
+.connection-group-chevron { font-size: 16px; line-height: 1; transform: rotate(0deg); }
+.connection-group[open] > summary .connection-group-chevron { transform: rotate(90deg); }
+.connection-group-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.connection-group > summary small { margin-left: auto; font-size: 10px; color: var(--subtle-text); }
+.connection-group-items { padding-left: 5px; }
+.connection-group-empty { margin: 6px 8px 12px; color: var(--subtle-text); font-size: 11px; }
+.connection-groups-dialog { width: min(620px, calc(100vw - 40px)); background: var(--app-surface); color: var(--app-text); border-color: var(--app-border); }
+.connection-groups-dialog .dialog-header { margin-bottom: 16px; }
+.connection-groups-dialog h2 { margin: 0; }
+.connection-groups-dialog .dialog-header p { margin: 8px 0 0; font-size: 12px; color: var(--app-muted); }
+.connection-group-create, .connection-group-setting { display: flex; align-items: center; gap: 8px; }
+.connection-groups-dialog input, .connection-groups-dialog select { min-width: 0; color: var(--app-text); background: var(--app-panel); border-color: var(--app-border); }
+.connection-group-create input, .connection-group-setting input { flex: 1; }
+.connection-group-create button, .connection-group-setting button { flex: none; }
+.connection-group-settings { max-height: 180px; overflow: auto; }
+.connection-group-setting { margin-top: 8px; }
+.connection-group-members-heading { display: flex; align-items: center; gap: 16px; border-top: 1px solid var(--app-border); margin-top: 20px; padding-top: 16px; font-size: 12px; }
+.connection-group-members-heading strong { white-space: nowrap; }
+.connection-group-members-heading input { flex: 1; }
+.connection-group-members { max-height: 260px; overflow: auto; margin-top: 8px; }
+.connection-group-member { display: flex; align-items: center; gap: 16px; padding: 10px 0; border-bottom: 1px solid var(--app-border); }
+.connection-group-member > span { display: grid; gap: 4px; flex: 1; min-width: 0; }
+.connection-group-member strong, .connection-group-member small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.connection-group-member strong { font-size: 12px; font-weight: 500; }
+.connection-group-member small { font-size: 11px; color: var(--app-muted); }
+.connection-group-member select { width: 160px; max-width: 45%; height: 32px; font-size: 12px; }
+.connection-group-feedback { min-height: 18px; margin-bottom: 0; color: var(--success); font-size: 12px; }
+.connection-group-feedback.error { color: var(--error); }
+.connection-groups-dialog .dialog-actions { justify-content: space-between; margin-top: 10px; gap: 12px; }
+.connection-groups-dialog .dialog-actions > span { color: var(--app-muted); font-size: 11px; }
+
+/* A magnifying glass communicates the action: load this object's data. */
+body #objectTree .object-open { width: 28px; height: 28px; flex: none; display: inline-flex; align-items: center; justify-content: center; padding: 0; border-radius: 5px; }
+body #objectTree .object-open .ui-icon { width: 16px; height: 16px; }

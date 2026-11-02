@@ -5,6 +5,7 @@ export function cellColumnName(column) {
 }
 
 const busyFlags = ['running', 'refreshing', 'paging', 'changingTransaction', 'confirming', 'resolvingTarget', 'cellSaving', 'cellBatchSaving'];
+const emptyTextType = dataType => /^(?:(?:pg_catalog\.)?(?:text|character(?: varying)?|varchar|char|bpchar)|(?:tinytext|mediumtext|longtext))(?:\b|\()/i.test(String(dataType || '').trim());
 const jsonType = (dataType) => /^(?:pg_catalog\.)?jsonb?$/i.test(String(dataType || '').trim());
 const safeKeyValue = (value) => typeof value === 'string' || typeof value === 'boolean' ||
   (typeof value === 'number' && Number.isFinite(value) && (!Number.isInteger(value) || Number.isSafeInteger(value)));
@@ -39,15 +40,25 @@ export function getCellEditCapability(tab, { column, columnIndex, rowIndex } = {
       !Array.isArray(row) || row.length !== columns.length || row[columnIndex] === undefined) return deny('无法确定此单元格对应的字段');
 
   if (driver === 'redis') {
-    if (typeof tab.redisKey !== 'string' || name !== 'value' || !['string', 'hash'].includes(tab.redisType)) {
-      return deny('仅支持 Redis string 值和 hash 字段值编辑');
+    const editableColumn = tab.redisType === 'zset' ? 'score' : 'value';
+    if (typeof tab.redisKey !== 'string' || name !== editableColumn || !['string', 'hash', 'list', 'zset'].includes(tab.redisType)) {
+      return deny(tab.redisType === 'stream' ? '消息内容不可修改，可通过消息操作追加或删除' : tab.redisType === 'set' ? '集合成员可通过成员操作添加或移除' : '可编辑字符串、哈希值、列表值和有序集合分数；标识列不可修改');
     }
     if (row[columnIndex] === null) return deny('当前 Redis 值已失效，请重新加载数据');
     if (tab.redisType === 'hash') {
       const fieldIndex = uniqueIndex(columns, 'field');
       if (fieldIndex < 0 || typeof row[fieldIndex] !== 'string') return deny('无法确定要编辑的 Redis 字段');
     }
-    return { editable: true, reason: '', allowNull: false, dataType: '' };
+    if (tab.redisType === 'list') {
+      const index = uniqueIndex(columns, 'index');
+      if (index < 0 || !Number.isSafeInteger(row[index]) || row[index] < 0) return deny('列表下标无效，请刷新数据');
+    }
+    if (tab.redisType === 'zset') {
+      const index = uniqueIndex(columns, 'member');
+      if (index < 0 || typeof row[index] !== 'string') return deny('无法确定有序集合成员');
+      return { editable: true, reason: '', allowNull: false, allowEmpty: false, dataType: 'redis-score' };
+    }
+    return { editable: true, reason: '', allowNull: false, allowEmpty: true, dataType: '' };
   }
 
   if (!['postgres', 'mysql'].includes(driver)) return deny('此数据库暂不支持单元格编辑');
@@ -71,7 +82,7 @@ export function getCellEditCapability(tab, { column, columnIndex, rowIndex } = {
     const index = uniqueIndex(columns, key);
     if (index < 0 || !safeTypedKey(row[index], browse.columns.find(field => field.name === key)?.dataType, driver)) return deny('结果缺少有效主键，无法安全定位要更新的行');
   }
-  return { editable: true, reason: '', allowNull: !primaryKeys.includes(name) && !field.primaryKey && field.nullable === true, dataType: field.dataType || '' };
+  return { editable: true, reason: '', allowNull: !primaryKeys.includes(name) && !field.primaryKey && field.nullable === true, allowEmpty: emptyTextType(field.dataType), dataType: field.dataType || '' };
 }
 
 export function validateCellDraft(value, { dataType = '', allowNull = false } = {}) {
@@ -80,6 +91,7 @@ export function validateCellDraft(value, { dataType = '', allowNull = false } = 
     return null;
   }
   if (typeof value !== 'string') throw new Error('单元格内容必须为文本或 NULL');
+  if (dataType === 'redis-score' && (!value.trim() || !Number.isFinite(Number(value)))) throw new Error('分数必须为有限数值');
   if (jsonType(dataType)) {
     try { JSON.parse(value); }
     catch { throw new Error('JSON 格式无效，请修正后再保存'); }

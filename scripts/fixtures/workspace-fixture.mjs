@@ -113,6 +113,13 @@ export function createWorkspaceFixture() {
           { name: `${profile.database}_reporting`, allowConnections: true, current: false },
         ];
       }
+      case "mysql_character_settings": requireStringConnection(args, command); return {
+        defaults: { charset: 'utf8mb4', collation: 'utf8mb4_0900_ai_ci' },
+        choices: [ { charset: 'utf8mb4', collation: 'utf8mb4_0900_ai_ci', isDefault: true }, { charset: 'utf8mb4', collation: 'utf8mb4_bin', isDefault: false }, { charset: 'latin1', collation: 'latin1_swedish_ci', isDefault: true } ],
+        tableCharset: 'utf8mb4', tableCollation: 'utf8mb4_bin', columns: [{ name: 'title', charset: 'utf8mb4', collation: 'utf8mb4_bin' }],
+      };
+      case "release_mysql_database_pool": requireStringConnection(args, command); return true;
+      case "release_postgres_catalog": requireStringConnection(args, command); return true;
       case "get_query_context": {
         const connectionId = requireStringConnection(args, command);
         const profile = profiles.find((item) => item.id === connectionId) || profiles[0];

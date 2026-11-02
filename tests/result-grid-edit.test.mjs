@@ -13,7 +13,7 @@ function editableGrid() {
     mountCellEditor() {}, unmountCellEditor() {}, updateCellEditor() {},
     updateFilterDisplay() {}, notifySelection() {},
     announce(message) { this.announcement = message; },
-    getCellEditState(payload) { return { editable: true, allowNull: true, context: { row: this.rows[payload.rowIndex] } }; },
+    getCellEditState(payload) { return { editable: true, allowNull: true, allowEmpty: true, context: { row: this.rows[payload.rowIndex] } }; },
     async onCommitCell() { return true; },
   });
   return grid;
@@ -538,13 +538,27 @@ test('the right-click menu transfers current draft and context into details', (t
   emit(grid.editorInput, 'input');
   const context = grid.editSession.payload.context;
   grid.openCellMenu(cellNode(grid));
-  assert.deepEqual(grid.cellMenu.children.map((item) => item.textContent), ['查看详情', '复制值', '编辑单元格', '设为 NULL']);
+  assert.deepEqual(grid.cellMenu.children.map((item) => item.textContent), ['查看详情', '复制值', '编辑单元格', '设为空字符串', '设为 NULL']);
   assert.equal(document.activeElement, grid.cellMenu.querySelector('[data-cell-action="inspect"]'));
   emit(grid.cellMenu.querySelector('[data-cell-action="inspect"]'), 'click');
   assert.equal(grid.cellMenu, null);
   assert.equal(inspected.draftValue, 'Draft for details');
   assert.equal(inspected.context, context);
   assert.equal(grid.editSession, null);
+});
+
+test('empty string shortcut turns NULL into a draft without writing', (t) => {
+  const grid = domGrid(t);
+  let writes = 0; grid.onCommitCell = () => { writes++; };
+  grid.openCellMenu(cellNode(grid, 2));
+  emit(grid.cellMenu.querySelector('[data-cell-action="empty"]'), 'click');
+  assert.equal(grid.editSession.isNull, false);
+  assert.equal(grid.editSession.draftValue, '');
+  assert.equal(writes, 0);
+  grid.cancelCellEdit();
+  grid.getCellEditState = () => ({ editable: true, allowNull: true, allowEmpty: false });
+  grid.openCellMenu(cellNode(grid));
+  assert.equal(grid.cellMenu.querySelector('[data-cell-action="empty"]').disabled, true);
 });
 
 test('context menu NULL stays a draft until save and read-only actions explain their disabled state', (t) => {
@@ -921,4 +935,16 @@ test('column menu copies the exact column name and only visible column data', as
   grid.rows = [[999, 'another result']];
   emit(grid.cellMenu.querySelector('[data-column-action="copy-data"]'), 'click');
   assert.equal(copied.length, 2);
+});
+
+
+test('double-click opens JSON details but edits ordinary values', () => {
+  const grid = editableGrid();
+  const actions = [];
+  grid.shouldInspectCell = ({ value }) => value === 'Alpha';
+  grid.onInspect = ({ value }) => actions.push(['inspect', value]);
+  grid.startCellEdit = cell => actions.push(['edit', grid.cellPayload(cell).value]);
+  grid.handleCellDoubleClick(cell(1));
+  grid.handleCellDoubleClick(cell(0));
+  assert.deepEqual(actions, [['inspect', 'Alpha'], ['edit', 'Gamma']]);
 });

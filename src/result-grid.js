@@ -193,9 +193,10 @@ function element(tag, className, text) {
 /** A dependency-free, two-axis virtual result grid. It retains original row
  * references; only the visible cells and a small overscan exist in the DOM. */
 export class ResultGrid {
-  constructor(container, { onInspect, onSelectionChange, onTextFilterChange, onDraftChange, getCellEditState, onCommitCell, onCommitCells, onCopyCell, editActions } = {}) {
+  constructor(container, { onInspect, shouldInspectCell, onSelectionChange, onTextFilterChange, onDraftChange, getCellEditState, onCommitCell, onCommitCells, onCopyCell, editActions } = {}) {
     this.container = container;
     this.onInspect = onInspect;
+    this.shouldInspectCell = shouldInspectCell;
     this.onSelectionChange = onSelectionChange;
     this.onTextFilterChange = onTextFilterChange;
     this.onDraftChange = onDraftChange;
@@ -284,7 +285,7 @@ export class ResultGrid {
     this.viewport.addEventListener('dblclick', (event) => {
       const resize = event.target.closest('[data-resize-column]');
       if (resize) this.fitColumn(Number(resize.dataset.resizeColumn));
-      else this.startCellEdit(event.target.closest('[data-grid-cell]'));
+      else if (event.target !== this.editorInput) this.handleCellDoubleClick(event.target.closest('[data-grid-cell]'));
     }, options);
     this.viewport.addEventListener('contextmenu', (event) => {
       const header = event.target.closest('[data-column-header]');
@@ -596,7 +597,7 @@ export class ResultGrid {
         cell.textContent = value === '' ? '空字符串' : text.length > 1000 ? `${text.slice(0, 1000)}…` : text;
         // Keep large text/JSON out of native tooltip buffers. The inspector
         // receives the original value without truncation.
-        cell.title = `${value === '' ? '空字符串（长度为 0）' : text.length > 400 ? `${text.slice(0, 400)}…` : text}\n${draft ? draft.pending ? '保存中 · ' : '未保存草稿 · ' : ''}输入文字直接编辑 · 双击 / Enter 编辑 · 右键查看详情`;
+        cell.title = `${value === '' ? '空字符串（长度为 0）' : text.length > 400 ? `${text.slice(0, 400)}…` : text}\n${draft ? draft.pending ? '保存中 · ' : '未保存草稿 · ' : ''}输入文字直接编辑 · 双击查看 JSON 或编辑 · Enter 编辑 · 右键查看详情`;
         row.append(cell);
       }
       fragment.append(row);
@@ -865,6 +866,13 @@ export class ResultGrid {
     this.notifySelection();
   }
 
+  handleCellDoubleClick(cell) {
+    const payload = this.cellPayload(cell);
+    if (!payload) return;
+    if (this.onInspect && this.shouldInspectCell?.(payload)) this.inspectCell(cell);
+    else this.startCellEdit(cell);
+  }
+
   inspectCell(cell) {
     const payload = this.cellPayload(cell);
     if (!payload) return;
@@ -954,7 +962,7 @@ export class ResultGrid {
     cell.classList.toggle('db-grid-number', typeof value === 'number' || typeof value === 'bigint');
     cell.classList.toggle('db-grid-empty-value', value === '');
     cell.classList.toggle('db-grid-boolean', typeof value === 'boolean');
-    cell.title = `${value === '' ? '空字符串（长度为 0）' : text.length > 400 ? `${text.slice(0, 400)}…` : text}\n${draft ? draft.pending ? '保存中 · ' : '未保存草稿 · ' : ''}输入文字直接编辑 · 双击 / Enter 编辑 · 右键查看详情`;
+    cell.title = `${value === '' ? '空字符串（长度为 0）' : text.length > 400 ? `${text.slice(0, 400)}…` : text}\n${draft ? draft.pending ? '保存中 · ' : '未保存草稿 · ' : ''}输入文字直接编辑 · 双击查看 JSON 或编辑 · Enter 编辑 · 右键查看详情`;
   }
 
   updateActiveCellDisplay() {
@@ -1238,6 +1246,9 @@ export class ResultGrid {
       } catch (error) { this.announce(`复制失败：${error instanceof Error ? error.message : String(error)}`); }
     });
     item('edit', '编辑单元格', editable, (source) => this.startCellEdit(source));
+    item('empty', '设为空字符串', editable && state.allowEmpty === true, (source) => {
+      this.startCellEdit(source, { replaceValue: '', isNull: false });
+    }, state.editable && !state.allowEmpty ? '该字段类型不支持空字符串' : reason);
     item('null', '设为 NULL', editable && state.allowNull !== false, (source) => {
       if (!this.startCellEdit(source, { isNull: true })) return;
       this.editSession.isNull = true;

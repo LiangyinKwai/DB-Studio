@@ -148,7 +148,9 @@ try {
   await expand(1);
   expect(await page.locator(".redis-database[open]").count() === 2, "manual expansion failed");
   const scansBeforeRefresh = calls("list_redis_keys").length;
-  await page.locator("[data-refresh-redis]").click();
+  expect(await page.locator("[data-refresh-redis]").count() === 0, "duplicate Redis refresh button remains");
+  expect(await page.locator("#refreshSchema").getAttribute("aria-label") === "刷新 Redis 数据库和 Key", "Redis refresh accessible name missing");
+  await page.locator("#refreshSchema").click();
   await until(() => calls("list_redis_keys").length >= scansBeforeRefresh + 2, "refresh open DBs");
   expect(await page.locator(".redis-database[open]").count() === 2, "ordinary refresh collapsed user's current selection");
   await openConsole(1);

@@ -94,7 +94,12 @@ export function initDesktopMenu({ getItems, copyText, onError, readClipboard = (
     }
   });
   document.addEventListener('pointerdown', event => { if (menu && !menu.contains(event.target)) close(); }, true);
-  document.addEventListener('scroll', event => { if (menu && !menu.contains(event.target)) close(); }, true);
+  document.addEventListener('scroll', event => {
+    // Read-only virtual documents may settle their selection/scroll after a
+    // right click. Their copy menu remains valid while the source is unchanged.
+    const readerScroll = menu?.closest('dialog') && event.target.closest?.('.value-reader');
+    if (menu && !menu.contains(event.target) && !readerScroll) close();
+  }, true);
   window.addEventListener('resize', () => close());
   document.addEventListener('keydown', event => {
     if (isBrowserDevShortcut(event)) { event.preventDefault(); event.stopImmediatePropagation(); }

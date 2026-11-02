@@ -57,8 +57,9 @@ pub async fn cancel_query(id: &str) -> Result<Option<bool>, String> {
     result.map(|_| Some(true))
 }
 
-fn error(context: &str, err: impl std::fmt::Display) -> String {
-    format!("{context}：{err}")
+pub(crate) fn error(context: &str, err: mysql_async::Error) -> String {
+    let prefix = if matches!(err, mysql_async::Error::Io(_) | mysql_async::Error::Driver(_)) { "[MYSQL_CONNECTION_LOST] " } else { "" };
+    format!("{prefix}{context}：{err}")
 }
 
 pub fn connect(profile: &ConnectionProfile, password: &str) -> Result<Pool, String> {
@@ -383,6 +384,23 @@ mod tests {
             assert_eq!(decoded.as_str(), Some(expected));
         }
     }
+}
+
+/// Read supported collations from the connected server, not a hard-coded
+/// version-specific list. Table and column settings are informational only.
+pub async fn character_settings(pool: &Pool, database: Option<&str>, table: Option<&str>) -> Result<JsonValue, String> {
+    let mut conn = pool.get_conn().await.map_err(|e| error("读取字符集失败", e))?;
+    let choices: Vec<(String, String, String)> = conn.query("SELECT CHARACTER_SET_NAME, COLLATION_NAME, IS_DEFAULT FROM information_schema.COLLATIONS ORDER BY CHARACTER_SET_NAME, COLLATION_NAME").await.map_err(|e| error("读取排序规则失败", e))?;
+    let defaults: Option<(String, String)> = if let Some(database) = database {
+        conn.exec_first("SELECT DEFAULT_CHARACTER_SET_NAME, DEFAULT_COLLATION_NAME FROM information_schema.SCHEMATA WHERE SCHEMA_NAME=?", (database,)).await.map_err(|e| error("读取数据库字符集失败", e))?
+    } else { conn.query_first("SELECT @@character_set_server, @@collation_server").await.map_err(|e| error("读取服务器字符集失败", e))? };
+    let (table_charset, table_collation, columns) = if let (Some(database), Some(table)) = (database, table) {
+        let collation: Option<String> = conn.exec_first("SELECT TABLE_COLLATION FROM information_schema.TABLES WHERE TABLE_SCHEMA=? AND TABLE_NAME=?", (database, table)).await.map_err(|e| error("读取表排序规则失败", e))?.flatten();
+        let charset = collation.as_ref().and_then(|name| choices.iter().find(|(_, c, _)| c == name).map(|(c, _, _)| c.clone()));
+        let cols: Vec<(String, Option<String>, Option<String>)> = conn.exec("SELECT COLUMN_NAME, CHARACTER_SET_NAME, COLLATION_NAME FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=? AND TABLE_NAME=? AND CHARACTER_SET_NAME IS NOT NULL ORDER BY ORDINAL_POSITION", (database, table)).await.map_err(|e| error("读取字段字符集失败", e))?;
+        (charset, collation, cols)
+    } else { (None, None, Vec::new()) };
+    Ok(serde_json::json!({ "choices": choices.into_iter().map(|(charset, collation, default)| serde_json::json!({"charset": charset, "collation": collation, "isDefault": default.eq_ignore_ascii_case("yes")})).collect::<Vec<_>>(), "defaults": defaults.map(|(charset, collation)| serde_json::json!({"charset": charset, "collation": collation})), "tableCharset": table_charset, "tableCollation": table_collation, "columns": columns.into_iter().map(|(name, charset, collation)| serde_json::json!({"name": name, "charset": charset, "collation": collation})).collect::<Vec<_>>() }))
 }
 
 pub async fn list_databases(pool: &Pool) -> Result<Vec<DatabaseInfo>, String> {

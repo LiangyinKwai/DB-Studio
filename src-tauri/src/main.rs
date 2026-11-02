@@ -114,6 +114,13 @@ fn default_read_only() -> bool {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct RedisKeyCopyRequest {
+    #[serde(flatten)] target: RedisKeyRenameRequest,
+    preserve_ttl: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct RedisKeyCreateRequest {
     connection_id: String,
     #[serde(default)]
@@ -130,6 +137,15 @@ struct RedisCellEditRequest {
     database: Option<i64>,
     #[serde(flatten)]
     edit: redis_mutation::CellEdit,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RedisKeyOperationRequest {
+    connection_id: String,
+    database: i64,
+    #[serde(flatten)]
+    edit: redis_mutation::KeyOperation,
 }
 
 #[derive(Debug, Serialize)]
@@ -345,6 +361,9 @@ async fn connect_postgres(profile: &ConnectionProfile, password: &str) -> Result
 }
 
 fn postgres_error(context: &str, error: &tokio_postgres::Error) -> String {
+    if error.is_closed() || error.code().is_some_and(|code| code.code().starts_with("08") || matches!(code.code(), "57P01" | "57P02" | "57P03")) {
+        return format!("[PG_CONNECTION_LOST] {context}：{error}");
+    }
     if error.code() == Some(&tokio_postgres::error::SqlState::QUERY_CANCELED) {
         return "查询已取消".into();
     }
@@ -631,6 +650,16 @@ async fn redis_client_for(
         .map_err(|error| state_error("保存 Redis 连接状态失败", error))?
         .insert(key, client.clone());
     Ok(client)
+}
+
+async fn reconnect_redis(
+    app: &AppHandle, state: &BackendState, connection_id: &str, database: Option<i64>,
+) -> Result<redis::aio::MultiplexedConnection, String> {
+    let (profile, password) = find_profile(app, state, connection_id)?;
+    if profile.driver != "redis" { return Err("当前连接不是 Redis 驱动".into()); }
+    let (_, database) = selected_redis_database(&profile, database)?;
+    redis_adapter::connect(&profile.host, profile.port, database, &profile.user,
+        &password, profile.tls, profile.redis_ca_cert_path.as_deref()).await
 }
 
 fn redis_console_key(connection_id: &str, console_id: &str) -> String {
@@ -1270,13 +1299,8 @@ async fn list_redis_keys(
 ) -> Result<redis_adapter::RedisKeyPage, String> {
     let client = redis_client_for(&app, &state, &connection_id, database).await?;
     let mut client = client.lock().await;
-    redis_adapter::scan_keys(
-        &mut client,
-        cursor,
-        pattern.as_deref().unwrap_or(""),
-        count.unwrap_or(200),
-    )
-    .await
+    redis_adapter::scan_with_reconnect(&mut client, cursor, pattern.as_deref().unwrap_or(""), count.unwrap_or(200),
+        || reconnect_redis(&app, &state, &connection_id, database)).await
 }
 
 #[command]
@@ -1292,7 +1316,8 @@ async fn list_redis_databases(
     let database = redis_database(&profile)?;
     let client = redis_client_for(&app, &state, &connection_id, None).await?;
     let mut client = client.lock().await;
-    Ok(redis_adapter::list_databases(&mut client, database).await)
+    redis_adapter::databases_with_reconnect(&mut client, database,
+        || reconnect_redis(&app, &state, &connection_id, None)).await
 }
 
 #[command]
@@ -1344,7 +1369,8 @@ async fn execute_redis_command(
     };
     let mut client = client.lock().await;
     if request.console {
-        redis_adapter::execute_console_command(&mut client, &request.sql).await
+        redis_adapter::console_with_reconnect(&mut client, &request.sql,
+            || reconnect_redis(&app, &state, &request.connection_id, database)).await
     } else {
         redis_adapter::execute_command(&mut client, &request.sql).await
     }
@@ -1397,6 +1423,15 @@ async fn create_redis_key(
 }
 
 #[command]
+async fn copy_redis_key(app: AppHandle, state: State<'_, BackendState>, request: RedisKeyCopyRequest) -> Result<(), String> {
+    let target = request.target;
+    redis_mutation::require_write(target.read_only)?;
+    let client = redis_client_for(&app, &state, &target.connection_id, target.database).await?;
+    let mut client = client.lock().await;
+    redis_mutation::copy_key(&mut client, &target.key, &target.new_key, request.preserve_ttl, target.read_only).await
+}
+
+#[command]
 async fn save_redis_cell(
     app: AppHandle,
     state: State<'_, BackendState>,
@@ -1406,6 +1441,14 @@ async fn save_redis_cell(
     let client = redis_client_for(&app, &state, &request.connection_id, request.database).await?;
     let mut client = client.lock().await;
     redis_mutation::save_cell(&mut client, &request.edit).await
+}
+
+#[command]
+async fn operate_redis_key(app: AppHandle, state: State<'_, BackendState>, request: RedisKeyOperationRequest) -> Result<(), String> {
+    redis_mutation::require_write(request.edit.read_only)?;
+    let client = redis_client_for(&app, &state, &request.connection_id, Some(request.database)).await?;
+    let mut client = client.lock().await;
+    redis_mutation::operate_key(&mut client, &request.edit).await
 }
 
 #[command]
@@ -1441,6 +1484,62 @@ async fn get_query_context(
     query_context::inspect(&client).await
 }
 
+fn invalidate_catalog_client(app: &AppHandle, state: &BackendState, connection_id: &str, database: Option<&str>, failed: &Arc<Client>) -> Result<(), String> {
+    let (profile, _) = find_profile(app, state, connection_id)?;
+    let selected = database.filter(|value| !value.trim().is_empty()).unwrap_or(&profile.database);
+    let key = if selected == profile.database { connection_id.to_string() } else { format!("{connection_id}\u{1f}{selected}") };
+    let mut clients = state.connections.lock().map_err(|error| state_error("更新连接状态失败", error))?;
+    if clients.get(&key).is_some_and(|current| Arc::ptr_eq(current, failed)) { clients.remove(&key); }
+    Ok(())
+}
+
+macro_rules! retry_mysql_catalog {
+    ($operation:expr, $context:expr) => {{
+        let result = timeout(QUERY_TIMEOUT, $operation).await.map_err(|_| timeout_error($context))?;
+        if result.as_ref().err().is_some_and(|error| error.contains("[MYSQL_CONNECTION_LOST]")) {
+            timeout(QUERY_TIMEOUT, $operation).await.map_err(|_| timeout_error($context))?
+        } else { result }
+    }};
+}
+
+// Catalog operations are read-only. Retry once only when the driver has
+// confirmed that the specific connection used by the failed read closed.
+macro_rules! retry_closed_catalog {
+    ($client:ident, $invalidate:expr, $reconnect:expr, $operation:expr) => {{
+        let result = $operation.await;
+        if result.as_ref().err().is_none_or(|error| !$client.is_closed() && !error.contains("[PG_CONNECTION_LOST]")) { result } else {
+            $invalidate?;
+            let $client = $reconnect.await?;
+            $operation.await
+        }
+    }};
+}
+
+#[command]
+async fn release_postgres_catalog(app: AppHandle, state: State<'_, BackendState>, connection_id: String, database: String) -> Result<(), String> {
+    let (profile, _) = find_profile(&app, &state, &connection_id)?;
+    if profile.driver != "postgres" || profile.database == database { return Err("不能删除连接配置中的默认数据库，请先修改连接配置".into()); }
+    let key = format!("{connection_id}\u{1f}{database}");
+    if state.transactions.lock().map_err(|e| state_error("读取事务状态失败", e))?.contains_key(&key) { return Err("该数据库有未提交事务".into()); }
+    state.connections.lock().map_err(|e| state_error("释放数据库连接失败", e))?.remove(&key);
+    Ok(())
+}
+
+#[command]
+fn release_mysql_database_pool(app: AppHandle, state: State<'_, BackendState>, connection_id: String, database: String) -> Result<(), String> {
+    let (profile, _) = find_profile(&app, &state, &connection_id)?;
+    if profile.driver != "mysql" || profile.database == database { return Err("不能移除默认数据库连接池".into()); }
+    let key = format!("{connection_id}\u{1f}{database}");
+    state.mysql_connections.lock().map_err(|e| state_error("释放数据库连接失败", e))?.remove(&key);
+    Ok(())
+}
+
+#[command]
+async fn mysql_character_settings(app: AppHandle, state: State<'_, BackendState>, connection_id: String, database: Option<String>, table: Option<String>) -> Result<Value, String> {
+    let pool = mysql_pool_for_database(&app, &state, &connection_id, None).await?;
+    timeout(QUERY_TIMEOUT, mysql::character_settings(&pool, database.as_deref(), table.as_deref())).await.map_err(|_| timeout_error("读取 MySQL 字符集"))?
+}
+
 #[command]
 async fn list_schemas(
     state: State<'_, BackendState>,
@@ -1452,11 +1551,11 @@ async fn list_schemas(
     if profile.driver.eq_ignore_ascii_case("mysql") {
         let pool =
             mysql_pool_for_database(&app, &state, &connection_id, database.as_deref()).await?;
-        return timeout(QUERY_TIMEOUT, mysql::list_schemas(&pool)).await.map_err(|_| timeout_error("读取 MySQL 数据库"))?;
+        return retry_mysql_catalog!(mysql::list_schemas(&pool), "读取 MySQL 数据库");
     }
     let client =
         catalog_client_for_database(&app, &state, &connection_id, database.as_deref()).await?;
-    catalog::list_schemas(&client).await
+    retry_closed_catalog!(client, invalidate_catalog_client(&app, &state, &connection_id, database.as_deref(), &client), catalog_client_for_database(&app, &state, &connection_id, database.as_deref()), catalog::list_schemas(&client))
 }
 
 #[command]
@@ -1468,10 +1567,10 @@ async fn list_databases(
     let (profile, _) = find_profile(&app, &state, &connection_id)?;
     if profile.driver.eq_ignore_ascii_case("mysql") {
         let pool = mysql_pool_for_database(&app, &state, &connection_id, None).await?;
-        return timeout(QUERY_TIMEOUT, mysql::list_databases(&pool)).await.map_err(|_| timeout_error("读取 MySQL 数据库列表"))?;
+        return retry_mysql_catalog!(mysql::list_databases(&pool), "读取 MySQL 数据库列表");
     }
     let client = catalog_client_for_database(&app, &state, &connection_id, None).await?;
-    catalog::list_databases(&client).await
+    retry_closed_catalog!(client, invalidate_catalog_client(&app, &state, &connection_id, None, &client), catalog_client_for_database(&app, &state, &connection_id, None), catalog::list_databases(&client))
 }
 
 #[command]
@@ -1486,11 +1585,11 @@ async fn get_schema_objects(
     if profile.driver.eq_ignore_ascii_case("mysql") {
         let pool =
             mysql_pool_for_database(&app, &state, &connection_id, database.as_deref()).await?;
-        return timeout(QUERY_TIMEOUT, mysql::load_schema_objects(&pool, schema_name.as_deref())).await.map_err(|_| timeout_error("读取 MySQL 对象目录"))?;
+        return retry_mysql_catalog!(mysql::load_schema_objects(&pool, schema_name.as_deref()), "读取 MySQL 对象目录");
     }
     let client =
         catalog_client_for_database(&app, &state, &connection_id, database.as_deref()).await?;
-    catalog::load_schema_objects(&client, schema_name.as_deref()).await
+    retry_closed_catalog!(client, invalidate_catalog_client(&app, &state, &connection_id, database.as_deref(), &client), catalog_client_for_database(&app, &state, &connection_id, database.as_deref()), catalog::load_schema_objects(&client, schema_name.as_deref()))
 }
 
 #[command]
@@ -1506,11 +1605,11 @@ async fn get_object_details(
     if profile.driver.eq_ignore_ascii_case("mysql") {
         let pool =
             mysql_pool_for_database(&app, &state, &connection_id, database.as_deref()).await?;
-        return timeout(QUERY_TIMEOUT, mysql::load_object_details(&pool, &object_id, kind.as_deref())).await.map_err(|_| timeout_error("读取 MySQL 对象详情"))?;
+        return retry_mysql_catalog!(mysql::load_object_details(&pool, &object_id, kind.as_deref()), "读取 MySQL 对象详情");
     }
     let client =
         catalog_client_for_database(&app, &state, &connection_id, database.as_deref()).await?;
-    catalog::load_object_details(&client, &object_id, kind.as_deref()).await
+    retry_closed_catalog!(client, invalidate_catalog_client(&app, &state, &connection_id, database.as_deref(), &client), catalog_client_for_database(&app, &state, &connection_id, database.as_deref()), catalog::load_object_details(&client, &object_id, kind.as_deref()))
 }
 
 #[command]
@@ -1578,16 +1677,16 @@ async fn commit_transaction(
             .map_err(|error| state_error("读取 MySQL 事务状态失败", error))?
             .remove(&key)
             .ok_or_else(|| "[TX_MISSING] 当前没有未提交事务".to_string())?;
-        let result = timeout(QUERY_TIMEOUT, client.lock().await.query_drop("COMMIT")).await.map_err(|_| "提交 MySQL 事务超时；结果不确定，请核对后重试 COMMIT".to_string()).and_then(|result| result.map_err(|error| error.to_string()));
-        if let Err(error) = result {
-            state
-                .mysql_transactions
-                .lock()
-                .map_err(|lock_error| state_error("恢复 MySQL 事务状态失败", lock_error))?
-                .insert(key, client);
-            return Err(format!("提交 MySQL 事务失败：{error}"));
+        let result = timeout(QUERY_TIMEOUT, client.lock().await.query_drop("COMMIT")).await;
+        match result {
+            Ok(Ok(())) => return Ok(true),
+            Err(_) => return Err("[TX_MISSING] [TX_OUTCOME_UNKNOWN] 提交 MySQL 事务超时；结果未知，请检查数据库后再操作".into()),
+            Ok(Err(error)) if error.is_fatal() => return Err(format!("[TX_MISSING] [TX_OUTCOME_UNKNOWN] 提交 MySQL 事务时连接断开；结果未知，请检查数据库：{error}")),
+            Ok(Err(error)) => {
+                state.mysql_transactions.lock().map_err(|e| state_error("恢复 MySQL 事务状态失败", e))?.insert(key, client);
+                return Err(format!("提交 MySQL 事务失败：{error}"));
+            }
         }
-        return Ok(true);
     }
     let key = transaction_key(&connection_id, database.as_deref(), &profile.database);
     let client = state
@@ -1601,6 +1700,9 @@ async fn commit_transaction(
         guard.batch_execute("COMMIT").await
     };
     if let Err(error) = commit_result {
+        if error.is_closed() || client.lock().await.is_closed() || error.code().is_some_and(|code| code.code().starts_with("08") || matches!(code.code(), "57P01" | "57P02" | "57P03")) {
+            return Err(format!("[TX_MISSING] [TX_OUTCOME_UNKNOWN] 提交事务时连接断开；结果未知，请检查数据库：{error}"));
+        }
         state
             .transactions
             .lock()
@@ -1892,9 +1994,14 @@ pub fn run() {
             rename_redis_key,
             create_redis_key,
             save_redis_cell,
+            operate_redis_key,
+            copy_redis_key,
             list_databases,
             get_query_context,
             cancel_query,
+            release_postgres_catalog,
+            release_mysql_database_pool,
+            mysql_character_settings,
             list_schemas,
             get_schema_objects,
             get_object_details,

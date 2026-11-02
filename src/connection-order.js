@@ -77,7 +77,7 @@ export function initConnectionReorder(root, onMove) {
     if (!event.altKey || event.ctrlKey || event.metaKey || event.shiftKey || event.isComposing || !['ArrowUp', 'ArrowDown'].includes(event.key)) return;
     const button = event.target.closest?.('[data-connection-id]');
     if (!button) return;
-    const cards = [...root.querySelectorAll('[data-connection-card]')];
+    const cards = [...root.querySelectorAll('[data-connection-card]')].filter(card => card.getClientRects().length);
     const index = cards.findIndex(card => card.dataset.connectionCard === button.dataset.connectionId);
     const target = cards[index + (event.key === 'ArrowUp' ? -1 : 1)];
     event.preventDefault(); event.stopPropagation();

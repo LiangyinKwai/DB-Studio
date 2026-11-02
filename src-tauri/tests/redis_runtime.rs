@@ -25,7 +25,7 @@ async fn scan_all(
     let mut cursor = 0;
     let mut keys = Vec::new();
     for _ in 0..100 {
-        let page = scan_keys(connection, cursor, pattern, 100).await?;
+        let page = scan_keys(connection, cursor, pattern, 100).await.map_err(|e| e.to_string())?;
         keys.extend(page.keys);
         cursor = page.cursor;
         if cursor == 0 {
@@ -76,7 +76,32 @@ async fn redis_runtime_contract() {
         .await
         .expect("trusted localhost TLS connection");
     assert_eq!(ping(&mut connection).await.expect("TLS PING"), "PONG");
-    let databases = list_databases(&mut connection, 0).await;
+    // Simulate a server closing an idle socket, while the server remains alive.
+    let mut stale = connect("localhost", tls_port, 1, "", "", true, Some(&ca_file)).await.unwrap();
+    let stale_id: u64 = redis::cmd("CLIENT").arg("ID").query_async(&mut stale).await.unwrap();
+    redis::cmd("CLIENT").arg("KILL").arg("ID").arg(stale_id)
+        .query_async::<u64>(&mut connection).await.unwrap();
+    let error = list_databases(&mut stale, 1).await.unwrap_err();
+    assert!(error.disconnected, "closed connection must not become fallback metadata: {error}");
+    assert!(redis_adapter::databases_with_reconnect(&mut stale, 1, || connect("localhost", tls_port, 1, "", "", true, Some(&ca_file))).await.unwrap().iter().any(|db| db.index == 1 && db.current));
+    let stale_id: u64 = redis::cmd("CLIENT").arg("ID").query_async(&mut stale).await.unwrap();
+    redis::cmd("CLIENT").arg("KILL").arg("ID").arg(stale_id)
+        .query_async::<u64>(&mut connection).await.unwrap();
+    assert!(scan_keys(&mut stale, 0, "", 100).await.unwrap_err().disconnected);
+    assert!(redis_adapter::scan_with_reconnect(&mut stale, 0, "", 100, || connect("localhost", tls_port, 1, "", "", true, Some(&ca_file))).await.is_ok());
+    // A console command with an unknown outcome must never be replayed.
+    let mut console = connect("localhost", tls_port, 1, "", "", true, Some(&ca_file)).await.unwrap();
+    let console_id: u64 = redis::cmd("CLIENT").arg("ID").query_async(&mut console).await.unwrap();
+    redis::cmd("CLIENT").arg("KILL").arg("ID").arg(console_id)
+        .query_async::<u64>(&mut connection).await.unwrap();
+    let failure = redis_adapter::console_with_reconnect(&mut console, "INCR db_studio_runtime:console_retry", || connect("localhost", tls_port, 1, "", "", true, Some(&ca_file))).await.unwrap_err();
+    assert!(failure.contains("未自动重试") && failure.contains("已重新连接"), "{failure}");
+    let value: Option<String> = redis::cmd("GET").arg("db_studio_runtime:console_retry").query_async(&mut console).await.unwrap();
+    assert_eq!(value, None);
+    let db: i64 = redis::cmd("CLIENT").arg("INFO").query_async::<String>(&mut console).await.unwrap().split_whitespace().find_map(|part| part.strip_prefix("db=").and_then(|n| n.parse().ok())).unwrap();
+    assert_eq!(db, 1);
+    assert!(redis_adapter::execute_console_command(&mut console, "PING").await.is_ok());
+    let databases = list_databases(&mut connection, 0).await.unwrap();
     assert!(databases
         .iter()
         .any(|database| database.index == 0 && database.current));
@@ -189,6 +214,38 @@ async fn redis_runtime_contract() {
     for kind in ["string", "hash", "list", "set", "zset", "stream"] {
         assert_eq!(types.get(&format!("{prefix}{kind}")).map(String::as_str), Some(kind));
     }
+    let stream = get_value(&mut connection, &format!("{prefix}stream")).await.unwrap();
+    assert_eq!(stream.columns, ["id", "fields"]);
+    assert_eq!(stream.rows.len(), 1);
+    assert_eq!(get_value(&mut connection, &format!("{prefix}set")).await.unwrap().columns, ["member"]);
+    let large_key = format!("{prefix}large-preview");
+    redis::cmd("RPUSH").arg(&large_key).arg((0..501).collect::<Vec<i32>>())
+        .query_async::<i64>(&mut connection).await.unwrap();
+    let preview = get_value(&mut connection, &large_key).await.unwrap();
+    assert_eq!(preview.rows.len(), 500);
+    assert_eq!(preview.total_count, Some(501));
+    assert!(preview.partial);
+    redis::cmd("DEL").arg(&large_key).query_async::<i64>(&mut connection).await.unwrap();
+    let missing = get_value(&mut connection, &large_key).await.unwrap();
+    assert!(missing.rows.is_empty());
+    assert_eq!(missing.total_count, Some(0));
+    for kind in ["string", "hash", "list", "set", "zset", "stream"] {
+        let source = format!("{prefix}{kind}");
+        let destination = format!("{prefix}copy-{kind}");
+        redis_mutation::copy_key(&mut connection, &source, &destination, true, false).await.unwrap();
+        assert_eq!(get_value(&mut connection, &source).await.unwrap().raw, get_value(&mut connection, &destination).await.unwrap().raw);
+        assert!(redis_mutation::copy_key(&mut connection, &source, &destination, true, false).await.unwrap_err().contains("已存在"));
+        assert!(redis_mutation::copy_key(&mut connection, &source, &destination, true, true).await.unwrap_err().contains("只读"));
+        redis::cmd("DEL").arg(&destination).query_async::<i64>(&mut connection).await.unwrap();
+    }
+    let binary = vec![0u8, 255, 128, b' ', b'\n'];
+    redis::cmd("SET").arg(&large_key).arg(&binary).arg("PX").arg(60000).query_async::<()>(&mut connection).await.unwrap();
+    let copy = format!("{large_key}-copy");
+    redis_mutation::copy_key(&mut connection, &large_key, &copy, true, false).await.unwrap();
+    assert_eq!(redis::cmd("GET").arg(&copy).query_async::<Vec<u8>>(&mut connection).await.unwrap(), binary);
+    assert!(redis::cmd("PTTL").arg(&copy).query_async::<i64>(&mut connection).await.unwrap() > 59000);
+    redis::cmd("DEL").arg(&large_key).arg(&copy).query_async::<i64>(&mut connection).await.unwrap();
+    assert!(redis_mutation::copy_key(&mut connection, &large_key, &copy, true, false).await.unwrap_err().contains("过期"));
     // The same name in DB 1 has another type, so TYPE must follow SCAN's DB.
     execute_command(&mut db_one, &format!("HSET {prefix}string field value"))
         .await.unwrap();
@@ -205,10 +262,23 @@ async fn redis_runtime_contract() {
         .query_async::<()>(&mut connection).await.unwrap();
     let mut scan_only = connect("localhost", tls_port, 0, "db_studio_scan_only",
         "runtime-only-password", true, Some(&ca_file)).await.unwrap();
+    // Denied CONFIG and INFO are valid limited metadata, not a disconnect.
+    assert!(!list_databases(&mut scan_only, 0).await.unwrap().is_empty());
     let restricted = scan_all(&mut scan_only, &format!("{prefix}*")).await.unwrap();
     assert!(restricted.contains(&format!("{prefix}string")));
     assert!(scan_types(&mut scan_only, &format!("{prefix}*")).await.is_empty());
     assert_eq!(scan_keys(&mut scan_only, 0, &format!("{prefix}*"), 100).await.unwrap().key_count, None);
+    // A permission error must be reported directly without attempting reconnect.
+    redis::cmd("ACL").arg("SETUSER").arg("db_studio_scan_only").arg("-scan")
+        .query_async::<()>(&mut connection).await.unwrap();
+    let denied = redis_adapter::scan_with_reconnect(&mut scan_only, 0, "", 100, || async {
+        panic!("permission errors must not reconnect");
+        #[allow(unreachable_code)]
+        Err::<redis::aio::MultiplexedConnection, String>("unexpected reconnect".into())
+    }).await.unwrap_err();
+    assert!(denied.contains("扫描 Redis key 失败"), "{denied}");
+    redis::cmd("ACL").arg("SETUSER").arg("db_studio_scan_only").arg("+scan")
+        .query_async::<()>(&mut connection).await.unwrap();
     // A failed metadata pipeline must also leave the connection usable.
     assert_eq!(ping(&mut scan_only).await.unwrap(), "PONG");
     // SCAN plus TYPE is sufficient; reading any values is still forbidden.

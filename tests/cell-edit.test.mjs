@@ -21,7 +21,7 @@ const update = (overrides = {}) => buildCellUpdateSql({
 
 test('cell capability uses actual result columns and metadata for editable table cells', () => {
   const tab = tableTab();
-  assert.deepEqual(getCellEditCapability(tab, nameCell), { editable: true, reason: '', allowNull: true, dataType: 'text' });
+  assert.deepEqual(getCellEditCapability(tab, nameCell), { editable: true, reason: '', allowNull: true, allowEmpty: true, dataType: 'text' });
   tab.browse.kind = 'partitioned_table';
   tab.result.columns = [{ name: 'name' }, { name: 'id' }];
   assert.equal(getCellEditCapability(tab, nameCell, 'mysql').editable, true);
@@ -76,13 +76,13 @@ test('primary key values can edit but generated fields and incomplete primary ke
   }
 });
 
-test('Redis permits only loaded string and hash values, including empty field names', () => {
+test('Redis permits values with safe type-specific identities and finite scores', () => {
   const tab = {
     connectionId: 'redis-a', mode: 'write', redisKey: '', redisType: 'hash',
     result: { executed: true, columns: ['value', 'field'], rows: [['old', '']] },
   };
   const cell = { column: 'value', columnIndex: 0, rowIndex: 0 };
-  assert.deepEqual(getCellEditCapability(tab, cell, 'redis'), { editable: true, reason: '', allowNull: false, dataType: '' });
+  assert.deepEqual(getCellEditCapability(tab, cell, 'redis'), { editable: true, reason: '', allowNull: false, allowEmpty: true, dataType: '' });
   assert.equal(getCellEditCapability(tab, { column: 'field', columnIndex: 1, rowIndex: 0 }, 'redis').editable, false);
   tab.result.rows[0][1] = null;
   assert.equal(getCellEditCapability(tab, cell, 'redis').editable, false);
@@ -90,6 +90,16 @@ test('Redis permits only loaded string and hash values, including empty field na
   assert.equal(getCellEditCapability(tab, cell, 'redis').editable, true);
   tab.redisType = 'list';
   assert.equal(getCellEditCapability(tab, cell, 'redis').editable, false);
+  tab.result.columns = ['value', 'index']; tab.result.rows = [['value', 0]];
+  assert.equal(getCellEditCapability(tab, cell, 'redis').editable, true);
+  tab.result.rows[0][1] = -1;
+  assert.equal(getCellEditCapability(tab, cell, 'redis').editable, false);
+  tab.redisType = 'zset'; tab.result.columns = ['score', 'member']; tab.result.rows = [['1', 'member']];
+  const capability = getCellEditCapability(tab, { ...cell, column: 'score' }, 'redis');
+  assert.equal(capability.editable, true);
+  assert.equal(validateCellDraft('1.25e3', capability), '1.25e3');
+  for (const value of ['', 'NaN', 'Infinity', '1e999']) assert.throws(() => validateCellDraft(value, capability), /有限数值/);
+  tab.result.columns = ['value']; tab.result.rows = [['value']];
   tab.redisType = 'string'; tab.result.rows[0][0] = null;
   assert.equal(getCellEditCapability(tab, cell, 'redis').editable, false);
 });
@@ -162,4 +172,13 @@ test('draft validation preserves SQL NULL, empty text and raw JSON precision', (
   }
   assert.equal(validateCellDraft('{invalid}', { dataType: 'text' }), '{invalid}');
   assert.equal(validateCellDraft('{"x"}', { dataType: 'jsonb[]' }), '{"x"}');
+});
+
+
+test('empty string shortcut only applies to text fields and Redis text values', () => {
+  const tab = tableTab();
+  for (const [type, allowed] of [['text', true], ['character varying(50)', true], ['varchar(50)', true], ['jsonb', false], ['integer', false], ['timestamp without time zone', false], ['bytea', false]]) {
+    tab.browse.columns.find(column => column.name === 'name').dataType = type;
+    assert.equal(getCellEditCapability(tab, nameCell).allowEmpty, allowed, type);
+  }
 });

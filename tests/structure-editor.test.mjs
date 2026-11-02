@@ -111,3 +111,12 @@ test('new table identity and primary key constraints stay consistent', () => {
   rows[0].identity = false;
   assert.ok(!buildCreateTablePlan(target, rows).sql.includes('PRIMARY KEY'));
 });
+
+test('MySQL new tables inherit database defaults or explicitly choose a matching collation', () => {
+  const rows = [{ name: 'title', dataType: 'varchar(80)', nullable: true, defaultValue: '', comment: '' }];
+  const inherited = buildCreateTablePlan({ schema: 'app', name: 'posts' }, rows, 'mysql').sql;
+  assert.match(inherited, /ENGINE=InnoDB;$/);
+  const explicit = buildCreateTablePlan({ schema: 'app', name: 'posts', charset: 'utf8mb4', collation: 'utf8mb4_bin' }, rows, 'mysql').sql;
+  assert.match(explicit, /ENGINE=InnoDB DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;$/);
+  assert.throws(() => buildCreateTablePlan({ schema: 'app', name: 'posts', charset: 'latin1', collation: 'utf8mb4_bin' }, rows, 'mysql'), /不匹配/);
+});

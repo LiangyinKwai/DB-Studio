@@ -6,6 +6,7 @@ const types = [
   { value: "list", label: "List", icon: "[]", detail: "列表 · 有序元素" },
   { value: "set", label: "Set", icon: "∈", detail: "集合 · 不重复的成员" },
   { value: "zset", label: "Sorted Set", icon: "Z", detail: "有序集合 · 按分数排序" },
+  { value: "stream", label: "Stream", detail: "消息流 · 自动生成消息 ID" },
 ];
 
 export function createRedisTypePicker({ input, trigger, menu, label, icon, detail, dialog }) {

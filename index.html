@@ -10,7 +10,9 @@
     <link rel="stylesheet" href="src/themes.css" />
     <link rel="stylesheet" href="src/workspace.css" />
     <link rel="stylesheet" href="src/redis-workspace.css" />
+    <link rel="stylesheet" href="src/app-select.css" />
     <link rel="stylesheet" href="src/redis-key-icons.css" />
+    <link rel="stylesheet" href="src/value-details.css" />
     <link rel="stylesheet" href="src/command-palette.css" />
     <link rel="stylesheet" href="src/object-quick-open.css" />
     <link rel="stylesheet" href="src/column-navigator.css" />
@@ -67,7 +69,7 @@
         >
           <div class="pane-heading">
             <span>连接 <small class="pane-count" id="connectionCount">0</small></span>
-            <div><button class="icon-btn pane-hide" type="button" data-hide-pane="connections" title="隐藏连接与最近查询" aria-label="隐藏连接与最近查询">‹</button><button
+            <div><button class="icon-btn" id="manageConnectionGroups" type="button" title="管理连接分组" aria-label="管理连接分组"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7V5h6l2 2h10v12H3V7Z"/><path d="M9 13h6m-3-3v6"/></svg></button><button class="icon-btn pane-hide" type="button" data-hide-pane="connections" title="隐藏连接与最近查询" aria-label="隐藏连接与最近查询">‹</button><button
               class="icon-btn"
               id="newConnection" aria-label="新建连接"
               title="新建数据库连接"
@@ -135,7 +137,7 @@
           </div>
           <label class="object-search"
             ><span>⌕</span
-            ><input
+            ><select id="redisSearchDatabase" aria-label="选择 Key 搜索范围" title="搜索当前 DB 或当前实例的全部 DB" hidden></select><input
               id="objectSearch"
               aria-label="搜索表、字段或 schema"
               type="search"
@@ -205,6 +207,7 @@
           <div class="query-target-feedback" id="queryTargetDetail" role="status" hidden></div>
           <div class="table-toolbar" id="tableToolbar" hidden>
             <div id="tableActionHost" class="table-action-host"></div>
+            <div class="redis-value-actions" id="redisValueActions" hidden><button class="quiet-btn" id="redisMemberAction" type="button">操作成员</button><button class="quiet-btn" id="redisTtlAction" type="button">过期时间</button></div>
             <div class="table-toolbar-title"><strong id="tableToolbarTitle">表数据</strong><small id="tableToolbarMeta"></small></div>
             <button class="icon-btn" id="openTableSql" type="button" aria-label="打开 SQL 编辑器" title="打开 SQL 编辑器"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m8 6-6 6 6 6m8-12 6 6-6 6M14 3l-4 18"/></svg></button>
           </div>
@@ -481,23 +484,33 @@
     </dialog>
     <div class="context-menu" id="objectContextMenu" hidden role="menu">
       <div class="context-menu-title" id="objectContextTitle"></div>
-      <button type="button" data-context-action="open-data">打开表数据</button>
-      <button type="button" data-context-action="open-structure">查看表结构</button>
-      <button type="button" data-context-action="edit-structure">编辑表结构…</button>
-      <button type="button" data-context-action="new-query">新建查询</button>
-      <button type="button" role="menuitem" data-context-action="new-database-query">新建查询</button>
-      <button type="button" role="menuitem" data-context-action="create-table">新建表…</button>
-      <button type="button" role="menuitem" data-context-action="create-schema">新建 schema…</button>
-      <button type="button" role="menuitem" data-context-action="create-database">新建数据库…</button>
-      <button type="button" data-context-action="rename-table">重命名表…</button>
-      <button type="button" role="menuitem" data-context-action="refresh-object">刷新对象</button>
-      <button type="button" data-context-action="refresh-schema">刷新对象列表</button>
-      <button type="button" role="menuitem" data-context-action="refresh-database">刷新数据库</button>
-      <button type="button" role="menuitem" data-context-action="refresh-databases">刷新数据库列表</button>
-      <button type="button" data-context-action="refresh-redis">刷新实例</button>
+      <button type="button" data-context-action="open-data"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 5h7l2 3h9v12H3z"/></svg><span data-context-label>打开表数据</span></button>
+      <button type="button" data-context-action="open-structure"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="4" width="16" height="16" rx="1"/><path d="M4 10h16M10 10v10"/></svg><span data-context-label>查看表结构</span></button>
+      <button type="button" data-context-action="edit-structure"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h9M4 12h6M4 18h6m3-2 7-7 2 2-7 7h-2z"/></svg><span data-context-label>编辑表结构…</span></button>
+      <button type="button" data-context-action="new-query"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m4 7 5 5-5 5m8 0h8"/></svg><span data-context-label>新建查询</span></button>
+      <button type="button" role="menuitem" data-context-action="new-database-query"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m4 7 5 5-5 5m8 0h8"/></svg><span data-context-label>新建查询</span></button>
+      <button type="button" role="menuitem" data-context-action="create-table"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="14" height="14" rx="1"/><path d="M3 9h14M9 9v9m10-4v8m-4-4h8"/></svg><span data-context-label>新建表…</span></button>
+      <button type="button" role="menuitem" data-context-action="create-schema"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 5h7l2 3h7v5M3 5v14h10m5-4v7m-4-3h8"/></svg><span data-context-label>新建 schema…</span></button>
+      <button type="button" role="menuitem" data-context-action="create-database"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><ellipse cx="10" cy="5" rx="7" ry="3"/><path d="M3 5v12c0 2 3 3 7 3m0-10c-4 0-7-1-7-3m14-2v7m2 2v8m-4-4h8"/></svg><span data-context-label>新建数据库…</span></button>
+      <button type="button" data-context-action="rename-table"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m4 16 12-12 4 4-12 12H4zm10-10 4 4"/></svg><span data-context-label>重命名表…</span></button>
+      <button type="button" data-context-action="mysql-characters"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m3 19 5-14 5 14M5 15h6m5-8h5m-2.5-2v2c0 5-2 8-5 10m2-7c1 3 3 5 6 7"/></svg><span data-context-label>查看字符集和排序规则…</span></button>
+      <button type="button" role="menuitem" data-context-action="refresh-object"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 7v5h-5M4 17v-5h5M19 12a7 7 0 0 0-12-5l-3 3m1 2a7 7 0 0 0 12 5l3-3"/></svg><span data-context-label>刷新对象</span></button>
+      <button type="button" data-context-action="refresh-schema"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 7v5h-5M4 17v-5h5M19 12a7 7 0 0 0-12-5l-3 3m1 2a7 7 0 0 0 12 5l3-3"/></svg><span data-context-label>刷新对象列表</span></button>
+      <button type="button" role="menuitem" data-context-action="refresh-database"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 7v5h-5M4 17v-5h5M19 12a7 7 0 0 0-12-5l-3 3m1 2a7 7 0 0 0 12 5l3-3"/></svg><span data-context-label>刷新数据库</span></button>
+      <button type="button" role="menuitem" data-context-action="refresh-databases"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 7v5h-5M4 17v-5h5M19 12a7 7 0 0 0-12-5l-3 3m1 2a7 7 0 0 0 12 5l3-3"/></svg><span data-context-label>刷新数据库列表</span></button>
+      <button type="button" data-context-action="refresh-redis"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 7v5h-5M4 17v-5h5M19 12a7 7 0 0 0-12-5l-3 3m1 2a7 7 0 0 0 12 5l3-3"/></svg><span data-context-label>刷新实例</span></button>
       <div class="context-menu-divider" role="separator" data-context-divider></div>
-      <button type="button" data-context-action="copy-name">复制完整名称</button>
-      <button type="button" data-context-action="copy-ddl">复制 DDL</button>
+      <button type="button" data-context-action="copy-name"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="8" width="12" height="13" rx="2"/><path d="M16 8V3H3v13h5"/></svg><span data-context-label>复制完整名称</span></button>
+      <button type="button" data-context-action="copy-ddl"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 3h10v14H8zM5 7H3v14h12v-2M11 7h4m-4 4h4"/></svg><span data-context-label>复制 DDL</span></button>
+      <div class="context-menu-divider" role="separator" data-danger-divider hidden></div>
+      <button type="button" class="context-menu-danger" data-context-action="clear-table" aria-haspopup="menu" aria-expanded="false" aria-controls="clearTableSubmenu"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16M8 3v18M16 3v18"/></svg><span data-context-label>清空表数据</span><span class="context-submenu-arrow" aria-hidden="true">›</span></button>
+      <button type="button" class="context-menu-danger" data-context-action="drop-table"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h18M9 6V3h6v3M6 6l1 15h10l1-15M10 10v7m4-7v7"/></svg><span data-context-label>删除表…</span></button>
+      <button type="button" class="context-menu-danger" data-context-action="drop-schema"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h18M9 6V3h6v3M6 6l1 15h10l1-15M10 10v7m4-7v7"/></svg><span data-context-label>删除 schema…</span></button>
+      <button type="button" class="context-menu-danger" data-context-action="drop-database"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h18M9 6V3h6v3M6 6l1 15h10l1-15M10 10v7m4-7v7"/></svg><span data-context-label>删除数据库…</span></button>
+    </div>
+    <div class="context-menu clear-table-submenu" id="clearTableSubmenu" hidden role="menu" aria-label="清空表数据方式">
+      <button type="button" role="menuitem" data-clear-method="delete">逐行删除（DELETE）</button>
+      <button type="button" role="menuitem" data-clear-method="truncate">快速清空（TRUNCATE）</button>
     </div>
     <dialog id="createObjectModal" class="create-object-dialog" aria-labelledby="createObjectTitle">
       <form id="createObjectForm" class="connection-form">
@@ -506,6 +519,7 @@
           <button type="button" class="icon-btn" id="closeCreateObject" aria-label="关闭">×</button>
         </div>
         <label><span id="createObjectNameLabel">数据库名称</span><input id="createObjectName" required autocomplete="off" /></label>
+        <div id="createObjectCharacterSettings" hidden></div>
         <p class="form-note" id="createObjectHint">填写名称后点击「创建」，将在当前实例直接创建。</p>
         <details class="structure-sql-preview" id="createObjectPreview" hidden><summary>SQL 预览</summary><pre id="createObjectSql" class="selectable-text"></pre></details>
         <p class="dialog-feedback" id="createObjectFeedback" role="status"></p>
@@ -513,6 +527,7 @@
       </form>
     </dialog>
     <div class="context-menu" id="redisContextMenu" hidden role="menu">
+      <button type="button" data-redis-context-action="details">查看 Key 详情</button>
       <button type="button" data-redis-context-action="open">打开值</button>
       <button type="button" data-redis-context-action="refresh">刷新 key</button>
       <button type="button" data-redis-context-action="rename">重命名 key</button>
@@ -536,33 +551,37 @@
           <div class="eyebrow">单元格详情</div>
           <h2 id="cellTitle"></h2>
         </div>
-        <button class="icon-btn" id="closeCell" aria-label="关闭单元格详情" type="button">×</button>
+        <div class="cell-header-actions"><button class="quiet-btn" id="expandCell" type="button" aria-pressed="false" title="放大详情窗口">放大窗口</button><button class="icon-btn" id="closeCell" aria-label="关闭单元格详情" type="button">×</button></div>
       </div>
+      <div class="cell-view-toolbar"><span id="cellSize" class="form-note"></span><span class="toolbar-spacer"></span><button class="quiet-btn" id="cellFind" type="button" aria-pressed="false">查找</button><button class="quiet-btn" id="cellWrap" type="button" aria-pressed="true">自动换行</button><button class="quiet-btn" id="cellReadMode" type="button">阅读模式</button></div>
       <div id="cellJsonTools" class="cell-json-tools" hidden>
         <div class="cell-json-toolbar">
           <span id="cellJsonCaption" class="form-note">JSON 预览</span>
           <div id="cellJsonFormatControls" class="cell-json-format-controls">
             <button class="secondary-btn" id="cellJsonPretty" type="button" aria-pressed="true">格式化</button>
             <button class="secondary-btn" id="cellJsonCompact" type="button" aria-pressed="false">压缩</button>
+            <button class="secondary-btn" id="cellJsonRaw" type="button" aria-pressed="false">原文</button>
           </div>
           <button class="secondary-btn" id="editCellJson" type="button" hidden>编辑 JSON</button>
         </div>
-        <pre id="cellJsonPreview" hidden></pre>
       </div>
+      <div id="cellJsonPreview" class="value-reader" hidden></div>
       <textarea id="cellValue" tabindex="0" spellcheck="false" aria-label="单元格值"></textarea>
       <label id="cellNullControl" class="cell-null-control" hidden><input type="checkbox" id="cellNull" /> 设为 NULL <span>不勾选时，空白内容保存为空字符串</span></label>
       <div id="cellFeedback" class="dialog-feedback error" role="alert"></div>
       <div class="dialog-actions">
         <span id="cellMeta" class="form-note"></span
         ><span class="toolbar-spacer"></span
+        ><button class="secondary-btn" id="restoreCellValue" type="button" hidden>恢复原值</button
+        ><button class="secondary-btn" id="setCellEmpty" type="button" hidden>设为空字符串</button
         ><button class="secondary-btn" id="copyCell">复制值</button
         ><button class="primary-btn" id="saveCell" hidden>保存修改</button>
       </div>
     </dialog>
-    <dialog id="redisCreateModal" class="cell-dialog">
+    <dialog id="redisCreateModal" class="cell-dialog redis-form-dialog" aria-labelledby="redisCreateTitle">
       <form id="redisCreateForm">
-        <div class="dialog-header"><h2>新建 Redis Key</h2><button class="icon-btn" id="closeRedisCreate" type="button" aria-label="关闭">×</button></div>
-        <label>Key<input id="redisCreateKey" required autocomplete="off" /></label>
+        <div class="dialog-header"><div><h2 id="redisCreateTitle">新建 Key</h2><p class="redis-dialog-location" id="redisCreateLocation"></p></div><button class="icon-btn" id="closeRedisCreate" type="button" aria-label="关闭">×</button></div>
+        <label>Key 名称<input id="redisCreateKey" required autocomplete="off" spellcheck="false" placeholder="例如 cache:user:1001" /></label>
         <div class="redis-type-field">
           <span id="redisCreateTypeLabel">类型</span>
           <input id="redisCreateType" type="hidden" value="string" />
@@ -577,19 +596,22 @@
         </div>
         <label id="redisCreateFieldRow" hidden>字段<input id="redisCreateField" autocomplete="off" /></label>
         <label id="redisCreateScoreRow" hidden>分数<input id="redisCreateScore" type="number" step="any" value="0" required /></label>
-        <label>初始值 / 成员<textarea id="redisCreateValue" rows="4"></textarea></label>
-        <label>过期时间（秒，0 为永不过期）<input id="redisCreateTtl" type="number" min="0" max="2147483647" step="1" value="0" required /></label>
+        <label><span id="redisCreateValueLabel">值</span><textarea id="redisCreateValue" rows="3" placeholder="输入内容，允许空字符串" spellcheck="false"></textarea><small class="form-note" id="redisCreateValueHint">文本、数字或 JSON，按原文保存。</small></label>
+        <label>有效期（秒）<input id="redisCreateTtl" type="number" min="0" max="2147483647" step="1" value="0" required /><small class="form-note">0 表示永久保留。</small></label>
         <div class="dialog-feedback" id="redisCreateFeedback" role="status"></div>
         <div class="dialog-actions"><span class="toolbar-spacer"></span><button class="secondary-btn" id="cancelRedisCreate" type="button">取消</button><button class="primary-btn" id="applyRedisCreate" type="submit">创建</button></div>
       </form>
     </dialog>
-    <dialog id="redisRenameModal" class="cell-dialog">
+    <dialog id="redisRenameModal" class="cell-dialog redis-form-dialog" aria-labelledby="redisRenameTitle">
       <form id="redisRenameForm">
         <div class="dialog-header">
-          <div><div class="eyebrow">REDIS KEY</div><h2>重命名 key</h2></div>
+          <div><h2 id="redisRenameTitle">重命名 Key</h2><p class="redis-dialog-location" id="redisRenameLocation"></p></div>
           <button class="icon-btn" id="closeRedisRename" aria-label="关闭重命名" type="button">×</button>
         </div>
-        <label>新的 key<input id="redisRenameInput" autocomplete="off" required /></label>
+        <div class="redis-target-card"><small>原 Key</small><code id="redisRenameSource"></code></div>
+        <label>新 Key 名称<input id="redisRenameInput" autocomplete="off" spellcheck="false" required /></label>
+        <label class="redis-checkbox-row" id="redisCopyTtlRow" hidden><input type="checkbox" id="redisCopyTtl" checked />保留原 Key 的剩余有效期</label>
+        <p class="form-note" id="redisRenameHint">目标 Key 已存在时不会覆盖。</p>
         <div class="dialog-feedback" id="redisRenameFeedback" role="status"></div>
         <div class="dialog-actions"><span class="toolbar-spacer"></span><button class="secondary-btn" id="cancelRedisRename" type="button">取消</button><button class="primary-btn" id="applyRedisRename" type="submit">确认重命名</button></div>
       </form>

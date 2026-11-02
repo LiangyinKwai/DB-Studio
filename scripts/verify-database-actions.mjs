@@ -3,6 +3,7 @@ import { createReadStream, existsSync, mkdirSync, statSync, writeFileSync } from
 import { extname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { chromium } from "./playwright-import.mjs";
+import { chooseAppSelect } from "./app-select-driver.mjs";
 import { createWorkspaceFixture } from "./fixtures/workspace-fixture.mjs";
 
 // Fixture data verifies visual states, not database runtime behavior.
@@ -232,14 +233,35 @@ try {
   await openMenu("warehouse");
   expect(await action("create-schema").isHidden(), "MySQL exposes redundant PostgreSQL schema action");
   await action('create-database').click(); await page.locator('#createObjectName').fill('my`database');
+  await chooseAppSelect(page.locator('#createObjectCharacterSettings select[aria-label="字符集"]'), 'utf8mb4');
+  await chooseAppSelect(page.locator('#createObjectCharacterSettings select[aria-label="排序规则"]'), 'utf8mb4_bin');
   const mysqlTabs = await page.locator('.query-tab').count();
   await page.locator('#applyCreateObject').click(); await page.locator('#createObjectModal').waitFor({ state: 'hidden' });
   expect(await page.locator('.query-tab').count() === mysqlTabs, 'MySQL database creation opened an SQL tab');
-  expect(fixture.callsFor('execute_mutation').at(-1).args.request.sql === 'CREATE DATABASE `my``database`;', 'MySQL database name escaped incorrectly');
+  expect(fixture.callsFor('execute_mutation').at(-1).args.request.sql === 'CREATE DATABASE `my``database` DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;', 'MySQL database name escaped incorrectly');
+  await openMenu('warehouse');
+  await action('mysql-characters').click();
+  await page.getByRole('dialog').filter({ hasText: '字符集和排序规则' }).getByRole('button', { name: '关闭' }).click();
+  await page.locator('[data-display-databases]').click();
+  await page.locator("#databaseList input[value='warehouse_reporting']").check();
+  await page.locator('#applyDatabasePicker').click();
+  await openMenu('warehouse_reporting');
+  await action('drop-database').click();
+  const confirmDialog = page.locator('#confirmActionModal');
+  await confirmDialog.waitFor();
+  expect(await page.locator('#confirmActionAccept').isEnabled(), 'confirmation should be directly actionable');
+  await page.locator('#confirmActionCancel').click();
+  await openMenu('warehouse_reporting'); await action('drop-database').click();
+  await page.locator('#confirmActionAccept').click();
+  await page.locator('#toast').filter({ hasText: '数据库 warehouse_reporting 已删除' }).waitFor();
+  expect(fixture.callsFor('execute_mutation').at(-1).args.request.sql === 'DROP DATABASE `warehouse_reporting`;', 'wrong database deletion SQL');
   await openMenu('warehouse');
   await action("create-table").click();
   await designer.getByRole('button', { name: '保存…', exact: true }).click();
   await nameField.fill('items');
+  await chooseAppSelect(designer.locator('select[aria-label="字符集"]'), 'utf8mb4');
+  await chooseAppSelect(designer.locator('select[aria-label="排序规则"]'), 'utf8mb4_bin');
+  expect((await designer.locator('pre').innerText()).includes('DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin'), 'MySQL table options missing');
   expect((await designer.locator('pre').innerText()).includes('CREATE TABLE `warehouse`.`items`'), 'MySQL table target incorrect');
   expect((await designer.locator('pre').innerText()).includes('AUTO_INCREMENT'), 'MySQL identity missing');
   failTableRefresh = true;
@@ -247,6 +269,15 @@ try {
   await designer.waitFor({ state: 'hidden' });
   await page.locator('#toast').filter({ hasText: '已创建，刷新失败' }).waitFor();
   expect(fixture.callsFor('execute_mutation').at(-1).args.request.database === 'warehouse', 'MySQL creation used wrong database');
+  failTableRefresh = false;
+  const warehouse = page.locator(".tree-database[data-database='warehouse']");
+  if (!await warehouse.evaluate(node => node.open)) await warehouse.locator(':scope > summary [data-tree-toggle]').click();
+  await openMenu('warehouse'); await action('refresh-database').click();
+  const itemRow = warehouse.locator('.tree-object[data-object-id]').filter({ hasText: 'items' }).first();
+  await itemRow.click({ button: 'right' }); await action('drop-table').click();
+  await page.locator('#confirmActionAccept').click();
+  await page.locator('#toast').filter({ hasText: '表 warehouse.items 已删除' }).waitFor();
+  expect(fixture.callsFor('execute_mutation').at(-1).args.request.sql === 'DROP TABLE `warehouse`.`items`;', 'wrong table deletion SQL');
   expect(errors.length === 0, errors.join("\n"));
   console.log("PASS: direct database/schema creation without SQL tabs, bound requests and quoted preview, duplicate/pending-dismissal guards, failure draft retention, success-versus-refresh distinction, direct table designer, cancel, persistence and PostgreSQL/MySQL routing.");
 } finally {

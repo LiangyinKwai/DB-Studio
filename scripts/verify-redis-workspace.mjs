@@ -212,6 +212,16 @@ await check("Redis logical databases can be expanded independently", async () =>
   await page.locator(".redis-database[data-redis-db='1'] > summary .tree-toggle").click();
   await waitFor(() => calls("list_redis_keys").slice(before).some((entry) => entry.args?.database === 1), "Redis DB 1 scan");
   expect(await page.locator(".redis-database[open]").count() === 2, "multiple Redis DBs were not kept expanded");
+  const collapse = page.locator('#collapseTree');
+  expect(await collapse.isVisible(), 'Redis collapse-all control missing');
+  expect(await collapse.getAttribute('aria-label') === '收起所有 Redis 数据库', 'Redis collapse-all label missing');
+  const beforeCollapse = calls('list_redis_keys').length;
+  await collapse.click();
+  expect(await page.locator('.redis-database[open]').count() === 0, 'collapse-all did not close every Redis DB');
+  expect(calls('list_redis_keys').length === beforeCollapse, 'collapse-all unexpectedly scanned Redis');
+  await expandRedisDatabase(0);
+  await expandRedisDatabase(1);
+
 });
 
 await check("Redis type picker supports keyboard selection, dismiss and reset", async () => {
@@ -220,13 +230,18 @@ await check("Redis type picker supports keyboard selection, dismiss and reset", 
   const trigger = page.locator("#redisCreateTypeTrigger");
   await trigger.focus();
   await trigger.press("ArrowDown");
-  expect(await page.locator("#redisCreateTypeMenu [role='option']").count() === 5, "type options incomplete");
+  expect(await page.locator("#redisCreateTypeMenu [role='option']").count() === 6, "type options incomplete");
   await page.keyboard.press("ArrowDown");
   await page.keyboard.press("Enter");
   expect(await page.locator("#redisCreateType").inputValue() === "hash", "keyboard did not choose Hash");
   expect(await page.locator("#redisCreateFieldRow").isVisible(), "Hash field missing");
   await trigger.click();
   await page.keyboard.press("End");
+  await page.keyboard.press("Enter");
+  expect(await page.locator("#redisCreateType").inputValue() === "stream", "Stream option missing");
+  expect(await page.locator("#redisCreateFieldRow").isVisible(), "Stream field missing");
+  await trigger.click();
+  await page.keyboard.press("ArrowUp");
   await page.keyboard.press("Enter");
   expect(await page.locator("#redisCreateScoreRow").isVisible(), "Sorted Set score missing");
   expect(await page.locator("#redisCreateFieldRow").isHidden(), "Hash field stayed visible");
@@ -255,6 +270,15 @@ await check("Redis type picker supports keyboard selection, dismiss and reset", 
       return { bottom: r.bottom, right: r.right, height: r.height, visible: menu.lastElementChild.contains(hit) };
     });
     expect(bounds.bottom <= 680 && bounds.right <= 1060 && bounds.height > 200 && bounds.visible, `${theme} type menu clipped`);
+    for (const slot of await page.locator('#redisCreateTypeIcon, #redisCreateTypeMenu .redis-type-option .driver-picker-icon').all()) {
+      const geometry = await slot.evaluate(node => {
+        const wrapper = node.getBoundingClientRect(), badge = node.querySelector('.redis-key-icon').getBoundingClientRect();
+        const style = getComputedStyle(node);
+        return { wrapper: [wrapper.width, wrapper.height], badge: [badge.width, badge.height], border: style.borderTopWidth, background: style.backgroundColor };
+      });
+      expect(geometry.wrapper[0] === geometry.badge[0] && geometry.wrapper[1] === geometry.badge[1], `${theme} type badge has surrounding whitespace: ${JSON.stringify(geometry)}`);
+      expect(geometry.border === '0px' && geometry.background === 'rgba(0, 0, 0, 0)', `${theme} type badge wrapper has an extra surface: ${JSON.stringify(geometry)}`);
+    }
     await page.screenshot({ path: join(screenshots, `${theme}-1060.png`) });
     await page.keyboard.press("Escape");
     await page.locator("#cancelRedisCreate").click();
@@ -369,6 +393,8 @@ await check("cancelled Redis cell confirmation does not mutate", async () => {
   expect(calls("save_redis_cell").length === before, "cancelled confirmation still sent mutation");
   expect(redis.get("redis-local").get("users:1").fields.get("name") === "Grace", "cancelled confirmation mutated value");
   await page.locator("#closeCell").click();
+  await page.locator("#confirmActionAccept").click();
+  await page.locator("#cellModal").waitFor({ state: "hidden" });
 });
 
 await check("same-name Redis keys rename and delete stay scoped to the selected connection", async () => {
@@ -411,13 +437,14 @@ await check("read-only Redis menu cannot delete a key", async () => {
   await page.locator("[data-redis-key='cache:home']").click({ button: "right" });
   await waitFor(() => page.locator("#redisContextMenu").isVisible(), "read-only Redis context menu");
   const before = calls("delete_redis_key").length;
-  await page.locator("#redisContextMenu [data-redis-context-action='delete']").click();
-  await wait(120);
+  expect(await page.locator("#redisContextMenu [data-redis-context-action='delete']").isDisabled(), "read-only delete should be disabled");
+  await page.keyboard.press('Escape');
   expect(calls("delete_redis_key").length === before, "read-only Redis menu sent delete");
   expect(await page.locator("#confirmActionModal").isHidden(), "read-only Redis menu opened a delete confirmation");
   expect(redis.get("redis-remote").has("cache:home"), "read-only Redis menu deleted key");
   await page.locator(".redis-database[data-redis-db='0'] > summary").click({ button: "right" });
-  await page.locator("[data-redis-database-context-action='create']").click();
+  expect(await page.locator("[data-redis-database-context-action='create']").isDisabled(), "read-only create should be disabled");
+  await page.keyboard.press('Escape');
   expect(await page.locator("#redisCreateModal").isHidden(), "read-only database opened creation dialog");
 });
 

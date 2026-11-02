@@ -4,6 +4,7 @@ import test from 'node:test';
 import vm from 'node:vm';
 import { buildCellUpdateSql, cellColumnName, getCellEditCapability, validateCellDraft } from '../src/cell-edit.js';
 import { formatCellValue } from '../src/result-grid.js';
+import { inspectorSourceValue } from '../src/value-reader.js';
 
 // Execute the production service functions, with only the application boundary
 // (dialogs, database IPC and rendered grid) replaced by controlled fixtures.
@@ -57,13 +58,14 @@ function fixture() {
   const notifications = [];
   const ui = { refreshes: 0, renders: 0, closes: 0 };
   const refs = {
-    saveCell: { disabled: false }, cellValue: { value: '', disabled: false },
+    saveCell: { disabled: false }, setCellEmpty: { disabled: false }, restoreCellValue: { disabled: false }, cellValue: { value: '', disabled: false },
     cellNull: { checked: false, disabled: false }, cellFeedback: { textContent: '' },
     cellModal: { close() { ui.closes++; } },
   };
   const sandbox = {
     state, refs,
     cellColumnName, getCellEditCapability, validateCellDraft, buildCellUpdateSql,
+    inspectorSourceValue,
     cellText: formatCellValue,
     activeTab: () => state.tabs.find(item => item.id === state.activeTabId),
     driverForTab: target => state.profiles.find(profile => profile.id === target?.connectionId)?.driver || 'postgres',

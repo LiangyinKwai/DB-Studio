@@ -1,0 +1,24 @@
+body select.app-select-source { display: none !important; }
+body .app-select-trigger { display: inline-flex; align-items: center; gap: 12px; justify-content: space-between; min-width: 0; max-width: 100%; min-height: 32px; padding: 6px 10px; border: 1px solid var(--control-border, var(--app-border)); border-radius: 6px; color: var(--app-text); background: var(--input-bg, var(--app-panel)); font: inherit; text-align: left; cursor: pointer; }
+body .app-select-trigger[hidden] { display: none !important; }
+body .app-select-trigger:not(:disabled):hover { border-color: var(--accent-muted); background: var(--hover-bg); }
+body .app-select-trigger:focus-visible, body .app-select-trigger[aria-expanded=true] { outline: 1px solid var(--accent-focus); outline-offset: -1px; border-color: var(--accent-focus); }
+.app-select-value { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.app-select-chevron { flex: none; width: 6px; height: 6px; border-right: 1px solid currentColor; border-bottom: 1px solid currentColor; transform: translateY(-2px) rotate(45deg); opacity: .65; }
+body .app-select-panel { position: fixed; inset: auto; margin: 0; box-sizing: border-box; z-index: 1000; display: flex; flex-direction: column; gap: 6px; padding: 6px; border: 1px solid var(--app-border); border-radius: 9px; background: var(--app-surface); color: var(--app-text); box-shadow: 0 12px 36px #0004; overflow: hidden; font-size: 12px; }
+body .app-select-panel::backdrop { background: transparent; }
+body .app-select-search { width: 100%; flex: none; height: 30px; min-height: 30px; padding: 5px 9px; border: 1px solid var(--app-border); border-radius: 5px; color: var(--app-text); background: var(--app-panel); font: inherit; }
+body .app-select-search:focus { outline: none; border-color: var(--accent-focus); }
+.app-select-options { min-height: 0; overflow: auto; overscroll-behavior: contain; scrollbar-width: thin; }
+.app-select-option { display: flex; align-items: center; gap: 8px; min-height: 32px; padding: 7px 8px; border-radius: 5px; cursor: pointer; overflow-wrap: anywhere; }
+.app-select-option > span:last-child { min-width: 0; }
+.app-select-option.active, .app-select-option:hover { background: var(--hover-bg); }
+.app-select-option[aria-selected=true] { color: var(--accent-muted); background: var(--accent-soft, var(--hover-bg)); }
+.app-select-option[aria-disabled=true] { opacity: .4; cursor: default; }
+.app-select-check { width: 12px; flex: none; font-size: 11px; }
+.app-select-group, .app-select-empty { padding: 8px; font-size: 11px; color: var(--app-muted); }
+body .connection-group-member .app-select-trigger { width: 160px; max-width: 45%; height: 32px; font-size: 12px; }
+body .redis-form-dialog .app-select-trigger { width: 100%; max-width: none; height: 36px; }
+body .data-import-options .app-select-trigger { width: 100%; }
+body .data-import-mapping .app-select-trigger { flex: 1; }
+body .object-search .app-select-trigger[data-select-id=redisSearchDatabase] { flex: none; width: 86px; max-width: 90px; min-height: 26px; height: 26px; padding: 3px 7px 3px 4px; border: 0; border-right: 1px solid var(--app-border); border-radius: 0; background: transparent; font-size: 11px; gap: 5px; }

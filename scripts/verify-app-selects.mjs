@@ -1,0 +1,38 @@
+import assert from 'node:assert/strict';
+import { readFileSync, mkdirSync } from 'node:fs';
+import { resolve } from 'node:path';
+import { chromium } from './playwright-import.mjs';
+const evidence = resolve('output/playwright/app-selects'); mkdirSync(evidence, { recursive: true });
+const browser = await chromium.launch({ headless: true, executablePath: process.env.DB_STUDIO_CHROME });
+const page = await browser.newPage({ viewport: { width: 900, height: 650 } });
+const css = ['styles', 'themes', 'workspace', 'redis-workspace', 'app-select'].map(name => readFileSync(`src/${name}.css`, 'utf8')).join('\n');
+const source = readFileSync('src/app-select.js', 'utf8').replace('export function', 'function');
+const errors = []; page.on('pageerror', error => errors.push(error.message));
+try {
+  await page.setContent(`<style>${css}</style><body data-theme="dark"><dialog open style="top:80px"><h2>连接分组</h2><label>环境<select id="sample"><option value="">未分组</option><option value="prod">生产环境</option><option value="test">测试环境</option><option value="disabled" disabled>暂不可用</option><option value="literal">&lt;img src=x&gt;</option></select></label><button id="after">完成</button></dialog></body>`);
+  await page.addScriptTag({ content: source + ';initAppSelects(); window.changes = 0; document.querySelector("select").addEventListener("change", () => window.changes++);' });
+  const trigger = page.locator('[data-select-id=sample]'), panel = page.locator('.app-select-panel');
+  await trigger.click(); await panel.locator('input').fill('生产');
+  assert.equal(await panel.getByRole('option').count(), 1);
+  assert.equal(await page.locator('#sample').inputValue(), '');
+  await panel.locator('input').press('Escape');
+  assert.equal(await panel.count(), 0); assert.equal(await trigger.getAttribute('aria-expanded'), 'false');
+  await trigger.press('ArrowDown'); await panel.locator('input').press('ArrowDown'); await panel.locator('input').press('Enter');
+  assert.equal(await page.locator('#sample').inputValue(), 'prod'); assert.equal(await page.evaluate(() => changes), 1);
+  await page.evaluate(() => { document.querySelector('#sample').value = 'test'; });
+  assert.match(await trigger.innerText(), /测试环境/);
+  await page.evaluate(() => { document.querySelector('#sample').disabled = true; });
+  await page.waitForFunction(() => document.querySelector('[data-select-id=sample]').disabled);
+  await page.evaluate(() => { const select = document.querySelector('#sample'); select.disabled = false; select.add(new Option('个人项目', 'personal')); });
+  await trigger.click();
+  await panel.getByRole('option', { name: '暂不可用', exact: true }).click({ force: true });
+  assert.equal(await panel.count(), 1); assert.equal(await page.locator('#sample').inputValue(), 'test');
+  assert.equal(await panel.locator('img').count(), 0);
+  await page.screenshot({ path: resolve(evidence, 'dropdown-dark.png') });
+  await page.evaluate(() => { document.body.dataset.theme = 'light'; });
+  await page.screenshot({ path: resolve(evidence, 'dropdown-light.png') });
+  await panel.locator('input').fill('个人'); await panel.locator('input').press('Enter');
+  assert.equal(await page.locator('#sample').inputValue(), 'personal');
+  assert.deepEqual(errors, []);
+  console.log('PASS: searchable custom selects, keyboard choice, Escape, disabled options, dynamic options/value/disabled state, literal labels, dark and light themes.');
+} finally { await browser.close(); }

@@ -1,3 +1,4 @@
+import { chooseAppSelect } from './app-select-driver.mjs';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { createReadStream, existsSync, mkdirSync, statSync } from 'node:fs';
@@ -81,14 +82,14 @@ try {
   await choose('csv', 'source.csv', csv);
   await until(() => page.locator('.data-import-mapping select').count().then(count => count === 3));
   assert.ok(await apply().isDisabled());
-  await page.locator('[data-source-column="0"]').selectOption('id');
-  await page.locator('[data-source-column="1"]').selectOption('note');
+  await chooseAppSelect(page.locator('[data-source-column="0"]'), 'id');
+  await chooseAppSelect(page.locator('[data-source-column="1"]'), 'note');
   assert.ok(await apply().isEnabled()); assert.equal(imports.length, 0);
   await page.screenshot({ path: resolve(evidence, 'csv-mapping.png') });
   await page.locator('.data-import-dialog [data-close]').last().click(); assert.equal(imports.length, 0);
   await choose('csv', 'source.csv', csv);
   await until(() => page.locator('.data-import-mapping select').count().then(count => count === 3));
-  await page.locator('[data-source-column="0"]').selectOption('id'); await page.locator('[data-source-column="1"]').selectOption('note');
+  await chooseAppSelect(page.locator('[data-source-column="0"]'), 'id'); await chooseAppSelect(page.locator('[data-source-column="1"]'), 'note');
   await confirmImport();
   assert.match(imports.at(-1).sql, /9007199254740997/); assert.match(imports.at(-1).sql, /9007199254740999/);
   assert.equal(imports.at(-1).connectionId, 'conn-dev'); assert.equal(imports.at(-1).database, 'app');
@@ -106,7 +107,7 @@ try {
   const book = new ExcelJS.Workbook(); book.addWorksheet('Empty'); const sheet = book.addWorksheet('Data'); sheet.addRow(['id', 'note', 'payload']); sheet.addRow(['0004', 'xlsx', null]);
   await choose('xlsx', 'source.xlsx', Buffer.from(await book.xlsx.writeBuffer()));
   await page.locator('[data-sheet-label]').waitFor();
-  await page.locator('[data-sheet]').selectOption('1');
+  await chooseAppSelect(page.locator('[data-sheet]'), '1');
   await until(() => apply().isEnabled());
   await page.setViewportSize({ width: 1060, height: 680 });
   await page.screenshot({ path: resolve(evidence, 'xlsx-min-window.png') });

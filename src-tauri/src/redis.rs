@@ -38,6 +38,8 @@ pub struct RedisValueResponse {
     pub columns: Vec<String>,
     pub rows: Vec<Vec<JsonValue>>,
     pub raw: JsonValue,
+    pub total_count: Option<u64>,
+    pub partial: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -48,6 +50,35 @@ pub struct RedisCommandResponse {
     pub row_count: usize,
     pub elapsed_ms: f64,
     pub raw: JsonValue,
+}
+
+#[derive(Debug)]
+pub struct RedisReadError {
+    pub message: String,
+    pub disconnected: bool,
+}
+
+impl std::fmt::Display for RedisReadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.message.fmt(f)
+    }
+}
+
+impl From<RedisReadError> for String {
+    fn from(error: RedisReadError) -> Self { error.message }
+}
+
+fn read_error(context: &str, error: redis::RedisError) -> RedisReadError {
+    RedisReadError { disconnected: error.is_io_error() || error.is_connection_dropped(), message: redis_error(context, error) }
+}
+
+async fn optional_metadata<T: redis::FromRedisValue>(connection: &mut MultiplexedConnection, command: &mut redis::Cmd) -> Result<Option<T>, RedisReadError> {
+    match timeout(REDIS_TIMEOUT, command.query_async(connection)).await {
+        Ok(Ok(value)) => Ok(Some(value)),
+        Ok(Err(error)) if error.is_io_error() || error.is_connection_dropped() => Err(read_error("读取 Redis 数据库列表失败", error)),
+        Ok(Err(_)) => Ok(None), // CONFIG/INFO may be denied by managed services.
+        Err(_) => Err(RedisReadError { message: "读取 Redis 数据库列表超时（10 秒）".into(), disconnected: true }),
+    }
 }
 
 fn redis_error(context: &str, error: impl std::fmt::Display) -> String {
@@ -187,29 +218,11 @@ fn keyspace_counts(info: &str) -> BTreeMap<i64, u64> {
 pub async fn list_databases(
     connection: &mut MultiplexedConnection,
     current: i64,
-) -> Vec<RedisDatabaseInfo> {
-    let configured = timeout(
-        REDIS_TIMEOUT,
-        redis::cmd("CONFIG")
-            .arg("GET")
-            .arg("databases")
-            .query_async::<Value>(connection),
-    )
-    .await
-    .ok()
-    .and_then(Result::ok)
-    .as_ref()
-    .and_then(configured_database_count);
-    let keyspace = timeout(
-        REDIS_TIMEOUT,
-        redis::cmd("INFO")
-            .arg("keyspace")
-            .query_async::<String>(connection),
-    )
-    .await
-    .ok()
-    .and_then(Result::ok)
-    .map(|info| keyspace_counts(&info));
+) -> Result<Vec<RedisDatabaseInfo>, RedisReadError> {
+    let configured = optional_metadata::<Value>(connection, redis::cmd("CONFIG").arg("GET").arg("databases"))
+        .await?.as_ref().and_then(configured_database_count);
+    let keyspace = optional_metadata::<String>(connection, redis::cmd("INFO").arg("keyspace"))
+        .await?.map(|info| keyspace_counts(&info));
 
     let listed_count = configured
         .unwrap_or(DEFAULT_DATABASE_COUNT)
@@ -222,7 +235,7 @@ pub async fn list_databases(
             indexes.insert(index, ());
         }
     }
-    indexes
+    Ok(indexes
         .into_keys()
         .map(|index| RedisDatabaseInfo {
             index,
@@ -231,7 +244,7 @@ pub async fn list_databases(
                 .map(|counts| counts.get(&index).copied().unwrap_or(0)),
             current: index == current,
         })
-        .collect()
+        .collect())
 }
 
 pub async fn scan_keys(
@@ -239,7 +252,7 @@ pub async fn scan_keys(
     cursor: u64,
     pattern: &str,
     count: usize,
-) -> Result<RedisKeyPage, String> {
+) -> Result<RedisKeyPage, RedisReadError> {
     let deadline = Instant::now() + REDIS_TIMEOUT;
     let count = count.clamp(1, MAX_ITEMS);
     let mut command = redis::cmd("SCAN");
@@ -250,8 +263,8 @@ pub async fn scan_keys(
     let (cursor, keys): (u64, Vec<String>) =
         timeout_at(deadline, command.query_async(connection))
             .await
-            .map_err(|_| "扫描 Redis key 超时（10 秒）".to_string())?
-            .map_err(|error| redis_error("扫描 Redis key 失败", error))?;
+            .map_err(|_| RedisReadError { message: "扫描 Redis key 超时（10 秒）".into(), disconnected: true })?
+            .map_err(|error| read_error("扫描 Redis key 失败", error))?;
     // DBSIZE is scoped to this same selected DB and independent of MATCH.
     // Missing permission must not turn a successful scan into a failure.
     let key_count = timeout_at(deadline, redis::cmd("DBSIZE").query_async::<u64>(connection))
@@ -280,6 +293,29 @@ pub async fn scan_keys(
         }
     }
     Ok(RedisKeyPage { cursor, keys, key_types, key_count })
+}
+
+/// Retry a safe read once only when the original socket has failed.
+pub async fn scan_with_reconnect<F, Fut>(connection: &mut MultiplexedConnection, cursor: u64, pattern: &str, count: usize, reconnect: F) -> Result<RedisKeyPage, String>
+where F: FnOnce() -> Fut, Fut: std::future::Future<Output = Result<MultiplexedConnection, String>> {
+    let error = match scan_keys(connection, cursor, pattern, count).await {
+        Ok(page) => return Ok(page),
+        Err(error) if !error.disconnected => return Err(error.to_string()),
+        Err(error) => error,
+    };
+    *connection = reconnect().await.map_err(|e| format!("{error}；重新连接失败：{e}"))?;
+    scan_keys(connection, cursor, pattern, count).await.map_err(|e| e.to_string())
+}
+
+pub async fn databases_with_reconnect<F, Fut>(connection: &mut MultiplexedConnection, database: i64, reconnect: F) -> Result<Vec<RedisDatabaseInfo>, String>
+where F: FnOnce() -> Fut, Fut: std::future::Future<Output = Result<MultiplexedConnection, String>> {
+    let error = match list_databases(connection, database).await {
+        Ok(databases) => return Ok(databases),
+        Err(error) if !error.disconnected => return Err(error.to_string()),
+        Err(error) => error,
+    };
+    *connection = reconnect().await.map_err(|e| format!("{error}；重新连接失败：{e}"))?;
+    list_databases(connection, database).await.map_err(|e| e.to_string())
 }
 
 fn value_text(value: &Value) -> String {
@@ -360,7 +396,8 @@ pub async fn get_value(
     .await
     .map_err(|_| "读取 Redis TTL 超时".to_string())?
     .map_err(|error| redis_error("读取 Redis TTL 失败", error))?;
-    let value = match key_type.as_str() {
+    let mut scan_incomplete = false;
+    let value = timeout(REDIS_TIMEOUT, async { Ok::<Value, String>(match key_type.as_str() {
         "string" => command_value(connection, "GET", key).await?,
         // HGETALL/SMEMBERS can materialize an unbounded key.  HSCAN/SSCAN
         // keeps the inspector responsive while still showing a useful first
@@ -379,6 +416,7 @@ pub async fn get_value(
             .await
             .map_err(|_| "读取 Redis hash 超时（10 秒）".to_string())?
             .map_err(|error| redis_error("读取 Redis hash 失败", error))?;
+            scan_incomplete = scan_has_more(&scanned);
             scan_payload(scanned, true)
         }
         "list" => redis::cmd("LRANGE")
@@ -401,6 +439,7 @@ pub async fn get_value(
             .await
             .map_err(|_| "读取 Redis set 超时（10 秒）".to_string())?
             .map_err(|error| redis_error("读取 Redis set 失败", error))?;
+            scan_incomplete = scan_has_more(&scanned);
             scan_payload(scanned, false)
         }
         "zset" => redis::cmd("ZRANGE")
@@ -421,9 +460,17 @@ pub async fn get_value(
             .await
             .map_err(|error| redis_error("读取 Redis stream 失败", error))?,
         _ => Value::Nil,
-    };
+    }) }).await.map_err(|_| "读取 Redis 值超时（10 秒）".to_string())??;
     let raw = value_to_json(&value);
-    let (columns, rows) = match (key_type.as_str(), &value) {
+    let (columns, mut rows): (Vec<String>, Vec<Vec<JsonValue>>) = match (key_type.as_str(), &value) {
+        ("none", _) => (vec!["value".into()], vec![]),
+        ("stream", Value::Array(entries)) => (
+            vec!["id".into(), "fields".into()],
+            entries.iter().filter_map(|entry| match entry {
+                Value::Array(pair) if pair.len() == 2 => Some(vec![value_to_json(&pair[0]), value_to_json(&pair[1])]),
+                _ => None,
+            }).collect(),
+        ),
         ("hash", Value::Array(values)) => (
             vec!["field".into(), "value".into()],
             values
@@ -452,7 +499,7 @@ pub async fn get_value(
                 })
                 .collect(),
         ),
-        ("list", Value::Array(values)) | ("set", Value::Array(values)) => (
+        ("list", Value::Array(values)) => (
             vec!["index".into(), "value".into()],
             values
                 .iter()
@@ -460,8 +507,15 @@ pub async fn get_value(
                 .map(|(index, value)| vec![JsonValue::from(index), value_to_json(value)])
                 .collect(),
         ),
+        ("set", Value::Array(values)) => (vec!["member".into()], values.iter().map(|value| vec![value_to_json(value)]).collect()),
         _ => (vec!["value".into()], vec![vec![raw.clone()]]),
     };
+    let count_command = match key_type.as_str() { "hash" => Some("HLEN"), "list" => Some("LLEN"), "set" => Some("SCARD"), "zset" => Some("ZCARD"), "stream" => Some("XLEN"), _ => None };
+    let total_count = if let Some(command) = count_command {
+        timeout(REDIS_TIMEOUT, redis::cmd(command).arg(key).query_async::<u64>(connection)).await.ok().and_then(Result::ok)
+    } else { Some(if key_type == "none" { 0 } else { 1 }) };
+    let partial = scan_incomplete || rows.len() > MAX_ITEMS || total_count.is_some_and(|count| count > rows.len() as u64);
+    rows.truncate(MAX_ITEMS);
     Ok(RedisValueResponse {
         key: key.into(),
         key_type,
@@ -469,7 +523,13 @@ pub async fn get_value(
         columns,
         rows,
         raw,
+        total_count,
+        partial,
     })
+}
+
+fn scan_has_more(value: &Value) -> bool {
+    matches!(value, Value::Array(values) if values.first().is_some_and(|cursor| value_text(cursor) != "0"))
 }
 
 fn scan_payload(value: Value, pair_values: bool) -> Value {
@@ -670,7 +730,7 @@ pub async fn execute_command(
     connection: &mut MultiplexedConnection,
     input: &str,
 ) -> Result<RedisCommandResponse, String> {
-    execute_command_impl(connection, input, true).await
+    execute_command_impl(connection, input, true).await.map_err(|e| e.to_string())
 }
 
 /// Execute a command from the dedicated Redis console session. The console is
@@ -682,21 +742,38 @@ pub async fn execute_console_command(
     connection: &mut MultiplexedConnection,
     input: &str,
 ) -> Result<RedisCommandResponse, String> {
-    execute_command_impl(connection, input, false).await
+    execute_command_impl(connection, input, false).await.map_err(|e| e.to_string())
+}
+
+/// Never replay a console command: after a transport failure its outcome and
+/// transaction state are unknown. Reconnect only for the next command.
+pub async fn console_with_reconnect<F, Fut>(connection: &mut MultiplexedConnection, input: &str, reconnect: F) -> Result<RedisCommandResponse, String>
+where F: FnOnce() -> Fut, Fut: std::future::Future<Output = Result<MultiplexedConnection, String>> {
+    match execute_command_impl(connection, input, false).await {
+        Ok(result) => Ok(result),
+        Err(error) if error.disconnected => {
+            let message = format!("{error}；命令执行结果未知，未自动重试；原控制台会话及事务状态已丢失");
+            match reconnect().await {
+                Ok(new_connection) => { *connection = new_connection; Err(format!("{message}，已重新连接")) }
+                Err(reconnect_error) => Err(format!("{message}；重新连接失败：{reconnect_error}")),
+            }
+        }
+        Err(error) => Err(error.to_string()),
+    }
 }
 
 async fn execute_command_impl(
     connection: &mut MultiplexedConnection,
     input: &str,
     restricted: bool,
-) -> Result<RedisCommandResponse, String> {
-    let tokens = tokenize(input)?;
+) -> Result<RedisCommandResponse, RedisReadError> {
+    let tokens = tokenize(input).map_err(|message| RedisReadError { message, disconnected: false })?;
     let Some(name) = tokens.first().filter(|name| !name.is_empty()) else {
-        return Err("Redis 命令不能为空".into());
+        return Err(RedisReadError { message: "Redis 命令不能为空".into(), disconnected: false });
     };
     if restricted {
         if let Some(reason) = command_restriction(&tokens) {
-            return Err(reason.into());
+            return Err(RedisReadError { message: reason.into(), disconnected: false });
         }
     }
     let started = std::time::Instant::now();
@@ -706,8 +783,8 @@ async fn execute_command_impl(
     }
     let value: Value = timeout(REDIS_TIMEOUT, command.query_async(connection))
         .await
-        .map_err(|_| "Redis 命令超时（10 秒）".to_string())?
-        .map_err(|error| redis_error("Redis 命令失败", error))?;
+        .map_err(|_| RedisReadError { message: "Redis 命令超时（10 秒）".into(), disconnected: true })?
+        .map_err(|error| read_error("Redis 命令失败", error))?;
     let raw = value_to_json(&value);
     let (columns, rows) = match &value {
         Value::Array(values) | Value::Set(values) => (

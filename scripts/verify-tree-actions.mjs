@@ -52,7 +52,14 @@ const selected = async (locator) => {
   expect(await page.locator("#objectTree .selected").count() === 1, "multiple tree rows selected");
   expect((await locator.evaluate((node) => getComputedStyle(node).boxShadow)).includes("inset"), "selection has no accent indicator");
 };
-const openMenu = async (locator) => { await locator.click({ button: "right" }); await menu.waitFor(); await selected(locator); };
+const openMenu = async (locator) => {
+  await locator.click({ button: "right" }); await menu.waitFor(); await selected(locator);
+  const buttons = menu.locator('button:visible');
+  for (const button of await buttons.all()) {
+    expect(await button.locator('svg[aria-hidden="true"]').count() === 1, 'menu action missing its decorative icon');
+    expect(await button.locator('[data-context-label]').count() === 1, 'menu action missing its label');
+  }
+};
 async function expand(database, schema) {
   const db = page.locator(`.tree-database[data-database='${database}']`);
   if (!await db.evaluate((node) => node.open)) await db.locator(":scope > summary [data-tree-toggle]").click();
@@ -69,6 +76,18 @@ try {
   await selected(page.locator(".tree-root"));
   const sc = await expand("app", "public");
   const table = sc.locator("[data-object-id='public.orders']");
+  await openMenu(sc.locator(':scope > summary'));
+  const visibleActions = await menu.locator('button:visible').evaluateAll(nodes => nodes.map(node => node.dataset.contextAction));
+  expect(visibleActions.at(-1) === 'drop-schema', 'delete schema is not the last menu action');
+  expect(await action('drop-schema').evaluate(node => { const probe = document.createElement('span'); probe.style.color = 'var(--error)'; document.body.append(probe); const match = getComputedStyle(node).color === getComputedStyle(probe).color; probe.remove(); return match; }), 'delete schema must use the error color');
+  await action('drop-schema').click();
+  const confirm = page.locator('#confirmActionModal');
+  expect((await confirm.innerText()).includes('仅允许删除空 schema'), 'schema confirmation must explain RESTRICT');
+  expect(await page.locator('#confirmActionAccept').isEnabled(), 'confirmation should be directly actionable');
+  await page.locator('#confirmActionAccept').click();
+  await toast('Schema public 已删除');
+  expect(fixture.callsFor('execute_mutation').at(-1).args.request.sql === 'DROP SCHEMA "public" RESTRICT;', 'schema deletion should be scoped and non-cascading');
+
   expect(await page.locator(".query-tab").count() === 0, "initial tabs present");
   await table.locator(".object-main").click();
   await page.locator(".structure-title").waitFor();
@@ -93,14 +112,54 @@ try {
   await openMenu(table);
   for (const name of ["open-data", "open-structure", "new-query", "create-table", "edit-structure", "rename-table", "copy-ddl", "copy-name", "refresh-object"])
     expect(await action(name).isVisible(), `table action missing: ${name}`);
+  expect(await action('clear-table').isVisible(), 'clear table action missing');
   await page.screenshot({ path: resolve(evidence, "table-menu.png") });
   await action("copy-ddl").click();
   await toast("已复制 DDL");
   expect((await page.evaluate(() => navigator.clipboard.readText())).includes("CREATE TABLE"), "copy DDL empty");
 
+  await openMenu(table); await action('clear-table').focus();
+  await page.keyboard.press('ArrowRight');
+  expect(await page.locator('#clearTableSubmenu').isVisible(), 'keyboard did not open clear submenu');
+  expect(await action('clear-table').getAttribute('aria-expanded') === 'true', 'submenu expansion state missing');
+  const submenuBounds = await page.locator('#clearTableSubmenu').boundingBox();
+  expect(submenuBounds.x >= 0 && submenuBounds.y >= 0 && submenuBounds.x + submenuBounds.width <= 1440 && submenuBounds.y + submenuBounds.height <= 900, 'submenu leaves viewport');
+  expect(await page.evaluate(() => document.activeElement?.dataset.clearMethod) === 'delete', 'keyboard focus missing from submenu');
+  await page.keyboard.press('Escape');
+  expect(await page.locator('#clearTableSubmenu').isHidden(), 'Escape did not close submenu');
+  await action('clear-table').hover();
+  const beforeClear = fixture.callsFor('execute_mutation').length;
+  await page.locator('#clearTableSubmenu [data-clear-method="truncate"]').click();
+  expect((await page.locator('#confirmActionModal').innerText()).includes('行级安全'), 'PostgreSQL TRUNCATE warning missing');
+  expect((await page.locator('#confirmActionModal').innerText()).includes('CONTINUE IDENTITY RESTRICT'), 'TRUNCATE SQL incorrect');
+  await page.locator('#confirmActionCancel').click();
+  expect(fixture.callsFor('execute_mutation').length === beforeClear, 'cancelled clear executed');
+  await openMenu(table); await action('clear-table').click();
+  await page.locator('#clearTableSubmenu [data-clear-method="delete"]').click();
+  expect((await page.locator('#confirmActionModal').innerText()).includes('外键关联'), 'DELETE warning missing');
+  await page.locator('#confirmActionAccept').click();
+  await toast('清空操作已执行，请刷新数据核对');
+  expect(fixture.callsFor('execute_mutation').at(-1).args.request.sql === 'DELETE FROM "public"."orders";', 'wrong clear target');
   await openMenu(table);
   await action("open-data").click();
   await page.locator(".db-grid-cell").first().waitFor();
+  const dataTab = await page.locator('.query-tab.active').getAttribute('data-tab-id');
+  const icon = table.locator('.object-open');
+  expect(await icon.getAttribute('title') === '查看表数据', 'data action must explain its purpose');
+  expect(await icon.locator('svg').count() === 1, 'data action must use the data-view icon');
+  const readsWithData = fixture.callsFor('execute_query').length;
+  await icon.click();
+  expect(fixture.callsFor('execute_query').length === readsWithData, 'already-loaded tab should not be re-queried');
+  await openMenu(table); await action('clear-table').click();
+  await page.locator('#clearTableSubmenu [data-clear-method="delete"]').click();
+  await page.locator('#confirmActionAccept').click(); await toast('清空操作已执行，请刷新数据核对');
+  await page.locator('#resultEmpty').getByText('尚未加载表数据').waitFor();
+  const readsBeforeReopen = fixture.callsFor('execute_query').length;
+  await icon.click();
+  await wait(() => fixture.callsFor('execute_query').length > readsBeforeReopen);
+  await page.locator('.db-grid-cell').first().waitFor();
+  expect(await page.locator('.query-tab.active').getAttribute('data-tab-id') === dataTab, 'data action created a duplicate tab');
+  expect(fixture.callsFor('execute_query').length === readsBeforeReopen + 1, 'unloaded tab should be queried once');
   const reads = fixture.callsFor("execute_query").length;
   const writes = fixture.callsFor("execute_mutation").length;
   await openMenu(table);
@@ -179,6 +238,19 @@ try {
   release([{ id: "stale", name: "stale", schema: "reporting", kind: "table" }]);
   const mysql = await expand("warehouse", "warehouse");
   expect(await page.locator("[data-object-id='stale']").count() === 0, "stale catalog polluted another connection");
+  const mysqlTable = mysql.locator("[data-object-id='warehouse.items']");
+  const mysqlReads = fixture.callsFor('execute_query').length;
+  await mysqlTable.locator('.object-open').click();
+  await wait(() => fixture.callsFor('execute_query').length > mysqlReads);
+  await page.locator('.db-grid-cell').first().waitFor();
+  expect(fixture.callsFor('execute_query').at(-1).args.request.database === 'warehouse', 'MySQL data action used the wrong database');
+  await openMenu(mysqlTable);
+  await action('clear-table').click();
+  await page.locator('#clearTableSubmenu [data-clear-method="truncate"]').click();
+  expect((await page.locator('#confirmActionModal').innerText()).includes('重置 AUTO_INCREMENT'), 'MySQL reset warning missing');
+  expect((await page.locator('#confirmActionModal').innerText()).includes('隐式提交'), 'MySQL implicit commit warning missing');
+  expect((await page.locator('#confirmActionModal').innerText()).includes('TRUNCATE TABLE `warehouse`.`items`;'), 'MySQL truncate SQL incorrect');
+  await page.locator('#confirmActionCancel').click();
   await openMenu(mysql.locator("[data-object-id='warehouse.items']"));
   await action("rename-table").click();
   await page.locator("#createObjectName").fill("items`new");

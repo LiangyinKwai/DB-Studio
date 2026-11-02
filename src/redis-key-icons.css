@@ -30,3 +30,34 @@ body .redis-type-option .driver-picker-icon { width: 46px; flex: none; }
 @media (forced-colors: active) {
   body[data-theme] .redis-key-icon { color: CanvasText; background: Canvas; border: 1px solid CanvasText; }
 }
+
+/* The type picker wraps the shared badge in the generic driver icon slot.
+   Make that slot transparent so there is only one intentional surface. */
+body .redis-type-picker .driver-picker-icon,
+body .redis-type-menu .redis-type-option .driver-picker-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 46px;
+  height: 28px;
+  flex: 0 0 46px;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+body .redis-type-picker .driver-picker-icon > .redis-key-icon,
+body .redis-type-menu .redis-type-option .driver-picker-icon > .redis-key-icon {
+  width: 46px;
+  height: 28px;
+  border-radius: 6px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0;
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--redis-type-color) 20%, transparent);
+}
+@media (forced-colors: active) {
+  body .redis-type-picker .driver-picker-icon > .redis-key-icon,
+  body .redis-type-menu .redis-type-option .driver-picker-icon > .redis-key-icon { box-shadow: none; }
+}

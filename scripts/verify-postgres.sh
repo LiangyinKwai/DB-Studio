@@ -22,4 +22,4 @@ export DB_STUDIO_TEST_PGDATABASE=postgres
 cd "$ROOT"
 node scripts/generate-structure-probe.mjs "$TMP/structure-plan.sql"
 export DB_STUDIO_TEST_STRUCTURE_SQL="$TMP/structure-plan.sql"
-cargo test --locked --manifest-path src-tauri/Cargo.toml postgres_catalog_and_query_runtime_contract -- --ignored --nocapture
+cargo test --locked --manifest-path src-tauri/Cargo.toml postgres_catalog_ -- --ignored --nocapture

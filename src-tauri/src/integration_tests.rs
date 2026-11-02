@@ -21,8 +21,45 @@ async fn connect() -> Client {
         .connect(NoTls)
         .await
         .expect("connect disposable postgres");
-    tokio::spawn(async move { connection.await.expect("postgres connection") });
+    tokio::spawn(async move { let _ = connection.await; });
     client
+}
+
+#[tokio::test]
+#[ignore = "requires a disposable PostgreSQL, never a user database"]
+async fn postgres_catalog_delete_runtime_contract() {
+    let client = connect().await;
+    let name = format!("dbstudio_drop_{}", uuid::Uuid::new_v4().simple());
+    let cancelled = Arc::new(AtomicBool::new(false));
+    query::execute_write(&client, &format!("CREATE DATABASE \"{name}\";"), &cancelled, "create-db", Instant::now(), false).await.unwrap();
+    query::execute_write(&client, &format!("CREATE TABLE \"public\".\"{name}\" (id int);"), &cancelled, "create-table", Instant::now(), false).await.unwrap();
+    client.batch_execute(&format!("INSERT INTO public.\"{name}\" VALUES (1), (2)")).await.unwrap();
+    query::execute_write(&client, &format!("DELETE FROM \"public\".\"{name}\";"), &cancelled, "clear-delete", Instant::now(), false).await.unwrap();
+    client.batch_execute(&format!("INSERT INTO public.\"{name}\" VALUES (3)")).await.unwrap();
+    query::execute_write(&client, &format!("TRUNCATE TABLE \"public\".\"{name}\" CONTINUE IDENTITY RESTRICT;"), &cancelled, "clear-truncate", Instant::now(), false).await.unwrap();
+    assert_eq!(client.query_one(&format!("SELECT count(*) FROM public.\"{name}\""), &[]).await.unwrap().get::<_, i64>(0), 0);
+    query::execute_write(&client, &format!("DROP TABLE \"public\".\"{name}\";"), &cancelled, "drop-table", Instant::now(), false).await.unwrap();
+    query::execute_write(&client, &format!("CREATE SCHEMA \"{name}\";"), &cancelled, "create-schema", Instant::now(), false).await.unwrap();
+    query::execute_write(&client, &format!("CREATE TABLE \"{name}\".items (id int);"), &cancelled, "schema-table", Instant::now(), false).await.unwrap();
+    assert!(query::execute_write(&client, &format!("DROP SCHEMA \"{name}\" RESTRICT;"), &cancelled, "nonempty-schema", Instant::now(), false).await.is_err());
+    assert!(client.query_one("SELECT to_regclass($1)::text", &[&format!("{name}.items")]).await.unwrap().get::<_, Option<String>>(0).is_some());
+    query::execute_write(&client, &format!("DROP TABLE \"{name}\".items;"), &cancelled, "schema-drop-table", Instant::now(), false).await.unwrap();
+    query::execute_write(&client, &format!("DROP SCHEMA \"{name}\" RESTRICT;"), &cancelled, "drop-schema", Instant::now(), false).await.unwrap();
+    query::execute_write(&client, &format!("DROP DATABASE \"{name}\";"), &cancelled, "drop-db", Instant::now(), false).await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires a disposable PostgreSQL, never a user database"]
+async fn postgres_catalog_reconnect_runtime_contract() -> Result<(), String> {
+    let victim = Arc::new(connect().await);
+    let killer = connect().await;
+    let pid: i32 = victim.query_one("SELECT pg_backend_pid()", &[]).await.unwrap().get(0);
+    assert!(killer.query_one("SELECT pg_terminate_backend($1)", &[&pid]).await.unwrap().get::<_, bool>(0));
+    // Issue the catalog read on the killed socket, then use the same retry
+    // helper as the application to restore the catalog connection.
+    let result = retry_closed_catalog!(victim, Ok::<(), String>(()), async { Ok::<_, String>(Arc::new(connect().await)) }, catalog::list_databases(&victim));
+    assert!(result?.iter().any(|db| db.current));
+    Ok(())
 }
 
 #[tokio::test]
@@ -47,6 +84,90 @@ async fn postgres_primary_key_values_runtime_contract() {
     let row = client.query_one("SELECT id,tenant,label FROM pk_values.items WHERE id=9007199254740997", &[]).await.unwrap();
     assert_eq!(row.get::<_,i64>(0), 9_007_199_254_740_997); assert_eq!(row.get::<_,String>(1), "changed"); assert_eq!(row.get::<_,String>(2), "after");
     println!("PostgreSQL primary key value audit passed: BY DEFAULT identity, composite key rebasing, duplicate/FK rejection and transaction rollback");
+}
+
+#[tokio::test]
+#[ignore = "requires DB_STUDIO_TEST_MYSQL_URL pointing to a disposable MySQL database"]
+async fn mysql_clear_table_runtime_contract() {
+    use mysql_async::{Opts, Pool, prelude::Queryable};
+    let pool = Pool::new(Opts::from_url(&std::env::var("DB_STUDIO_TEST_MYSQL_URL").unwrap()).unwrap());
+    let name = format!("dbstudio_clear_{}", uuid::Uuid::new_v4().simple());
+    let mut conn = pool.get_conn().await.unwrap();
+    conn.query_drop(format!("CREATE TABLE `{name}` (id bigint NOT NULL AUTO_INCREMENT PRIMARY KEY) ENGINE=InnoDB")).await.unwrap();
+    conn.query_drop(format!("INSERT INTO `{name}` VALUES (NULL)")).await.unwrap();
+    drop(conn);
+    mysql::execute_write(&pool, &format!("DELETE FROM `{name}`;"), "clear-delete", Instant::now()).await.unwrap();
+    let mut conn = pool.get_conn().await.unwrap();
+    conn.query_drop(format!("INSERT INTO `{name}` VALUES (NULL)")).await.unwrap();
+    assert_eq!(conn.query_first::<u64, _>(format!("SELECT id FROM `{name}`")).await.unwrap(), Some(2));
+    drop(conn);
+    mysql::execute_write(&pool, &format!("TRUNCATE TABLE `{name}`;"), "clear-truncate", Instant::now()).await.unwrap();
+    let mut conn = pool.get_conn().await.unwrap();
+    conn.query_drop(format!("INSERT INTO `{name}` VALUES (NULL)")).await.unwrap();
+    assert_eq!(conn.query_first::<u64, _>(format!("SELECT id FROM `{name}`")).await.unwrap(), Some(1));
+    conn.query_drop(format!("DROP TABLE `{name}`")).await.unwrap();
+    drop(conn); pool.disconnect().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires DB_STUDIO_TEST_MYSQL_URL pointing to a disposable MySQL database"]
+async fn mysql_character_settings_runtime_contract() {
+    use mysql_async::{Opts, Pool, prelude::Queryable};
+    let pool = Pool::new(Opts::from_url(&std::env::var("DB_STUDIO_TEST_MYSQL_URL").unwrap()).unwrap());
+    let name = format!("dbstudio_charset_{}", uuid::Uuid::new_v4().simple());
+    let mut conn = pool.get_conn().await.unwrap();
+    conn.query_drop(format!("CREATE DATABASE `{name}` CHARACTER SET utf8mb4 COLLATE utf8mb4_bin")).await.unwrap();
+    conn.query_drop(format!("CREATE TABLE `{name}`.`items` (`inherited` varchar(32), `explicit_col` varchar(32) CHARACTER SET latin1 COLLATE latin1_swedish_ci) ENGINE=InnoDB")).await.unwrap();
+    let data = mysql::character_settings(&pool, Some(&name), Some("items")).await.unwrap();
+    assert_eq!(data["defaults"]["charset"], "utf8mb4");
+    assert_eq!(data["tableCollation"], "utf8mb4_bin");
+    assert!(data["choices"].as_array().unwrap().iter().any(|item| item["collation"] == "utf8mb4_bin"));
+    let columns = data["columns"].as_array().unwrap();
+    assert!(columns.iter().any(|c| c["name"] == "inherited" && c["collation"] == "utf8mb4_bin"));
+    assert!(columns.iter().any(|c| c["name"] == "explicit_col" && c["collation"] == "latin1_swedish_ci"));
+    conn.query_drop(format!("DROP TABLE `{name}`.`items`")).await.unwrap();
+    conn.query_drop(format!("DROP DATABASE `{name}`")).await.unwrap();
+    drop(conn); pool.disconnect().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires DB_STUDIO_TEST_MYSQL_URL pointing to a disposable MySQL database"]
+async fn mysql_reconnect_runtime_contract() -> Result<(), String> {
+    use mysql_async::{prelude::Queryable, Opts, OptsBuilder, Pool, PoolConstraints, PoolOpts};
+    let url = std::env::var("DB_STUDIO_TEST_MYSQL_URL").unwrap();
+    let opts = OptsBuilder::from_opts(Opts::from_url(&url).unwrap())
+        .pool_opts(PoolOpts::default().with_constraints(PoolConstraints::new(1, 1).unwrap()));
+    let pool = Pool::new(opts.clone());
+    // Kill an idle pooled connection on the server; the next catalog read
+    // must acquire a fresh socket instead of surfacing the stale one.
+    let admin = Pool::new(opts.clone());
+    let mut pooled = pool.get_conn().await.unwrap();
+    let old_id: u64 = pooled.query_first("SELECT CONNECTION_ID()").await.unwrap().unwrap();
+    drop(pooled);
+    let mut killer = admin.get_conn().await.unwrap();
+    killer.query_drop(format!("KILL CONNECTION {old_id}")).await.unwrap();
+    assert!(mysql::list_databases(&pool).await.is_ok());
+    let mut fresh = pool.get_conn().await.unwrap();
+    let new_id: u64 = fresh.query_first("SELECT CONNECTION_ID()").await.unwrap().unwrap();
+    assert_ne!(old_id, new_id);
+    // Kill a checked-out connection to exercise the application's retry
+    // path for a transport failure during a catalog operation.
+    let fresh = fresh;
+    killer.query_drop(format!("KILL CONNECTION {new_id}")).await.unwrap();
+    let mut failed_connection = Some(fresh);
+    let result = retry_mysql_catalog!(async {
+        if let Some(mut conn) = failed_connection.take() {
+            let result = conn.query_drop("SELECT 1").await;
+            drop(conn);
+            result.map_err(|error| mysql::error("读取目录失败", error))?;
+        }
+        mysql::list_databases(&pool).await
+    }, "读取 MySQL 数据库列表");
+    assert!(result.is_ok(), "{result:?}");
+    drop(killer);
+    admin.disconnect().await.unwrap();
+    pool.disconnect().await.unwrap();
+    Ok(())
 }
 
 #[tokio::test]
