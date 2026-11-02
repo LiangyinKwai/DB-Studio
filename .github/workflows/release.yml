@@ -24,17 +24,33 @@ jobs:
       - name: Run frontend tests
         run: npm test
       - name: Build release DMG
-        run: npm run tauri -- build --no-sign --bundles dmg
+        run: npm run tauri -- build --bundles dmg
+      - name: Verify application signature in DMG
+        run: |
+          mount_point="$RUNNER_TEMP/db-studio-release-check"
+          mkdir -p "$mount_point"
+          hdiutil attach 'src-tauri/target/release/bundle/dmg/DB Studio_0.1.1_aarch64.dmg' -nobrowse -readonly -mountpoint "$mount_point"
+          trap 'hdiutil detach "$mount_point"' EXIT
+          codesign --verify --deep --strict --verbose=2 "$mount_point/DB Studio.app"
       - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if gh release view v0.1.0 >/dev/null 2>&1; then
-            echo 'Release v0.1.0 already exists; refusing to overwrite it.' >&2
+          if gh release view v0.1.1 >/dev/null 2>&1; then
+            echo 'Release v0.1.1 already exists; refusing to overwrite it.' >&2
             exit 1
           fi
-          gh release create v0.1.0 \
-            'src-tauri/target/release/bundle/dmg/DB Studio_0.1.0_aarch64.dmg' \
+          gh release create v0.1.1 \
+            'src-tauri/target/release/bundle/dmg/DB Studio_0.1.1_aarch64.dmg' \
             --target "$GITHUB_SHA" \
-            --title 'DB Studio v0.1.0' \
-            --notes 'macOS Apple Silicon release build. This DMG is unsigned and not notarized.'
+            --title 'DB Studio v0.1.1（未公证）' \
+            --notes '修复应用包签名不完整的问题。本版本仅使用临时签名，尚未通过 Apple 公证；首次打开时 macOS 仍可能要求在隐私与安全性中确认。仅支持 Apple Silicon。'
+      - name: Mark the affected release as superseded
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view v0.1.0 >/dev/null 2>&1; then
+            gh release edit v0.1.0 --prerelease \
+              --title 'DB Studio v0.1.0（已弃用）' \
+              --notes '此版本的应用包签名不完整，下载后可能提示已损坏。请改用 v0.1.1；v0.1.1 尚未经过 Apple 公证。'
+          fi
