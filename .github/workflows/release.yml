@@ -64,7 +64,7 @@ jobs:
           dmg="src-tauri/target/release/bundle/dmg/DB Studio_${RELEASE_VERSION}_aarch64.dmg"
           gh release create "v$RELEASE_VERSION" "$dmg" \
             --target "$GITHUB_SHA" \
-            --title "DB Studio v$RELEASE_VERSION（未公证）" \
+            --title "DB Studio v${RELEASE_VERSION}（未公证）" \
             --notes '优化安装界面，增加拖拽指引及首次打开说明。此版本使用临时签名，尚未通过 Apple 公证；首次打开时 macOS 可能要求在隐私与安全性中确认。仅支持 Apple Silicon。'
       - name: Verify new asset and remove the previous release
         env:
@@ -85,3 +85,12 @@ jobs:
           if [ "$RELEASE_VERSION" = "0.1.2" ] && gh release view v0.1.1 >/dev/null 2>&1; then
             gh release delete v0.1.1 --yes
           fi
+  repair-release-title:
+    if: github.event_name == 'push' && contains(github.event.head_commit.message, '[repair-release-v0.1.2]')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Correct release title
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: gh release edit v0.1.2 --title 'DB Studio v0.1.2（未公证）'
