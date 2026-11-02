@@ -2,7 +2,7 @@
   "name": "db-studio",
   "type": "module",
   "private": true,
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "A high-performance desktop database manager prototype",
   "devDependencies": {
     "@tauri-apps/cli": "^2.0.0",
@@ -12,7 +12,8 @@
     "test": "node --test tests/*.test.mjs",
     "build:frontend": "node scripts/sync-frontend.mjs",
     "preview": "npm run build:frontend && python3 -m http.server 4173 --directory dist",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "build:dmg": "sh scripts/build-dmg.sh"
   },
   "dependencies": {
     "@codemirror/autocomplete": "^6.20.3",

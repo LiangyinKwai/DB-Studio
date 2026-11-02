@@ -1,6 +1,6 @@
 [package]
 name = "db-studio"
-version = "0.1.1"
+version = "0.1.2"
 description = "DB Studio desktop database client"
 authors = ["DB Studio"]
 edition = "2021"

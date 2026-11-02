@@ -88,19 +88,22 @@ export PGSSLMODE=disable
 npm run tauri dev
 ```
 
-生成 macOS debug 应用和 DMG：
+生成本地 macOS debug 应用：
 
 ```bash
-npm run tauri -- build --debug --no-sign
+npm run tauri -- build --debug --bundles app
 ```
 
-如果本机已经配置 Apple 开发者签名，也可以去掉 `--no-sign`：
+生成带安装指引的 Apple Silicon release DMG：
 
 ```bash
-npm run tauri -- build --debug
+npm run tauri -- build --bundles app
+python3 -m venv /tmp/db-studio-dmg-venv
+/tmp/db-studio-dmg-venv/bin/pip install 'dmgbuild==1.6.7' 'ds_store==1.3.3' 'mac_alias==2.2.3'
+DMGBUILD=/tmp/db-studio-dmg-venv/bin/dmgbuild npm run build:dmg
 ```
 
-产物位于 `src-tauri/target/debug/bundle/`；正式分发仍需配置 Apple 开发者证书并完成签名、公证。
+DMG 位于 `src-tauri/target/release/bundle/dmg/`。安装窗口使用 Finder 布局元数据，不依赖 CI 中启动 Finder。当前默认使用临时签名，未经过 Apple 公证；macOS 首次打开可能提示无法检查应用。正式分发需要 Developer ID 证书和 Apple 公证。
 
 ## 后续实现边界
 
