@@ -76,7 +76,7 @@ try {
   assert.equal(await page.locator('.mysql-database-objects > .tree-object').count(), 2);
   assert.equal(mysqlCalls('list_schemas').length, 0);
   assert.equal(mysqlCalls('get_schema_objects').length, 1);
-  await page.locator('[data-object-id="warehouse.orders"] .object-main').dblclick();
+  await page.locator('[data-object-id="warehouse.orders"] .object-main').click();
   await page.locator('#resultGrid [data-grid-cell]').first().waitFor();
   assert.equal(callsFor('execute_query').at(-1).args.request.database, 'warehouse');
   assert.match(callsFor('execute_query').at(-1).args.request.sql, /`warehouse`\.`orders`/);

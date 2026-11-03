@@ -29,7 +29,7 @@ function postgresDetails() {
         '"status" text DEFAULT \'draft\'::text',
         '"computed" integer GENERATED ALWAYS AS ((1 + 1)) STORED',
       ],
-      beforeStatements: ["SELECT pg_catalog.set_config('search_path', E'public', false);"],
+      beforeStatements: ["SELECT pg_catalog.set_config('search_path', E'pg_catalog', false);"],
       afterStatements: [], createPrefix: 'CREATE TABLE', createSuffix: '\nUSING "heap"\nWITH ("fillfactor" = E\'80\')',
       constraintIndexes: ['orders_pkey', 'orders_status_key'], unsupportedReason: null,
     },
@@ -45,7 +45,9 @@ test('PostgreSQL DDL preserves identity/generated/default columns and all named 
   assert.match(ddl, /CHECK \(\(id > 0\)\) NOT VALID/);
   assert.match(ddl, /FOREIGN KEY \(id\) REFERENCES app.parents\(id\) ON DELETE CASCADE/);
   assert.match(ddl, /COMMENT ON COLUMN "app"\."orders"\."status" IS E'状态 ''ready'' \\\\ note';/);
-  assert.match(ddl, /不含数据、权限\/所有者、触发器、规则和行级安全策略/);
+  assert.doesNotMatch(ddl, /-- 建表结构|-- 不含数据/);
+  assert.doesNotMatch(ddl, /set_config|USING "heap"/);
+  assert.match(ddl, /CONSTRAINT "orders_pkey" PRIMARY KEY/);
 });
 
 test('PostgreSQL DDL emits ordinary indexes once and preserves composite constraint order', () => {
@@ -57,7 +59,13 @@ test('PostgreSQL DDL emits ordinary indexes once and preserves composite constra
   assert.doesNotMatch(ddl, /CREATE UNIQUE INDEX orders_(pkey|status_key)/);
   details.constraints.reverse();
   const reversed = buildTableDdl(object, details);
-  assert.ok(reversed.indexOf('ADD CONSTRAINT "orders_pkey"') < reversed.indexOf('ADD CONSTRAINT "orders_parent"'));
+  assert.ok(reversed.indexOf('CONSTRAINT "orders_pkey"') < reversed.indexOf('ADD CONSTRAINT "orders_parent"'));
+});
+
+test('rejects metadata deparsed under an unverified search path', () => {
+  const details = postgresDetails();
+  details.tableDdl.beforeStatements[0] = "SELECT pg_catalog.set_config('search_path', E'public', false);";
+  assert.throws(() => buildTableDdl(object, details), /名称解析环境/);
 });
 
 test('PostgreSQL DDL keeps owned sequence prerequisites, partitioning and quoted names', () => {

@@ -14,6 +14,7 @@ const evidence = resolve(root, 'output/playwright/tree-switching');
 mkdirSync(evidence, { recursive: true });
 const baseline = process.argv.includes('--baseline');
 const fixture = createWorkspaceFixture();
+let failDetails = false;
 const server = createServer((req, res) => {
   const file = resolve(dist, (req.url || '/').split('?')[0].slice(1) || 'index.html');
   if (!file.startsWith(`${dist}/`) || !existsSync(file) || !statSync(file).isFile()) { res.writeHead(404); res.end(); return; }
@@ -31,6 +32,7 @@ await context.exposeFunction('__FIXTURE_INVOKE__', async (command, args) => {
   const result = await fixture.invoke(command, args);
   if (command === 'get_object_details') {
     await new Promise((done) => setTimeout(done, 120));
+    if (failDetails) throw new Error('fixture: 无法读取结构');
     return { ...result, id: args.objectId, qualifiedName: args.objectId,
       schema: args.objectId.split('.')[0], name: args.objectId.split('.')[1] };
   }
@@ -53,8 +55,8 @@ const closeAll = async () => {
 try {
   await page.goto(`http://127.0.0.1:${server.address().port}`, { waitUntil: 'networkidle' });
   await page.locator('[data-connection-id="conn-dev"]').click();
-  await page.locator(".tree-database[data-database='app'] > summary").click();
-  await page.locator(".tree-schema[data-schema='public'] > summary").click();
+  await page.locator(".tree-database[data-database='app'] > summary [data-tree-toggle]").click();
+  await page.locator(".tree-schema[data-schema='public'] > summary [data-tree-toggle]").click();
   await object('orders').dblclick();
   await wait(async () => (await page.locator('#resultCount').innerText()).trim() === '500');
   const ordersId = await activeId();
@@ -104,8 +106,8 @@ try {
     await panel.locator('[role="option"][data-value="gt"]').click();
     await panel.getByLabel('筛选值', { exact: true }).fill('100');
     await panel.getByRole('button', { name: '应用筛选', exact: true }).click();
-    await page.locator('[data-sort-column="0"]').click();
-    await page.locator('[data-sort-column="0"]').click();
+    await page.locator('[data-sort-column="0"][data-sort-direction="1"]').click();
+    await page.locator('[data-sort-column="0"][data-sort-direction="-1"]').click();
     await page.locator('[data-select-row="499"]').check();
     const viewport = page.locator('.db-grid-viewport');
     await viewport.evaluate((node) => { node.scrollTop = 320; });
@@ -126,33 +128,66 @@ try {
     assert.equal(await page.locator('.db-grid-body [data-column-index="0"]').first().innerText(), view.cell);
     assert.equal(await page.locator('#selectionCount').innerText(), '已选 1/400 行');
     assert.equal(fixture.calls.length, beforeSwitch, 'restoring a table view repeated database requests');
-    // A new structure preview responds immediately and is promoted on the
-    // second click, so a double-click still opens exactly one data tab.
+    // Single-click opens data and reads structure once; double-click reuses it.
     await closeAll();
-    await object('orders').dblclick({ delay: 180 });
-    await wait(async () => (await page.locator('#resultCount').innerText()).trim() === '500');
-    assert.equal(await page.locator('.query-tab').count(), 1, 'double click left a redundant structure tab');
-    await closeAll();
+    const beforeDetails = fixture.callsFor('get_object_details').length;
     await object('orders').click();
-    assert.equal(await page.locator('.query-tab').count(), 1, 'single click still waits before opening a structure tab');
+    assert.equal(await page.locator('.query-tab').count(), 1);
+    await page.locator('#structureTab').click();
     await page.locator('.structure-title').waitFor();
-    const structureId = await activeId();
-    await object('exact_100').click();
-    await page.locator('.structure-title').filter({ hasText: 'public.exact_100' }).waitFor();
-    const detailsBefore = fixture.callsFor('get_object_details').length;
-    await object('orders').click();
-    assert.equal(await activeId(), structureId, 'single click failed to reuse the loaded structure tab');
-    assert.equal(fixture.callsFor('get_object_details').length, detailsBefore, 'cached structure was read again');
-    // An intentionally opened structure tab remains available when the user
-    // later double-clicks the same object to open its separate data view.
+    await wait(async () => (await page.locator('#resultCount').innerText()).trim() === '500');
+    assert.equal(await page.locator('#structureTab').getAttribute('aria-selected'), 'true', 'automatic data load changed the selected structure view');
+    const dataId = await activeId();
+    assert.equal(fixture.callsFor('get_object_details').length, beforeDetails + 1);
+    await page.locator('.structure-title').waitFor();
+    assert.ok(await page.locator('#tableToolbar').isVisible());
+    assert.ok(await page.locator('#viewTableDdl').isVisible());
+    assert.equal(await page.locator('#refreshTableData').getAttribute('aria-label'), '刷新结构');
+    assert.equal(await page.locator('[data-refresh-structure], [data-view-ddl]').count(), 0);
+    assert.ok(await page.locator('#dataImportButton').isHidden());
+    assert.equal(fixture.callsFor('get_object_details').length, beforeDetails + 1);
     await object('orders').dblclick();
     await wait(async () => (await page.locator('#resultCount').innerText()).trim() === '500');
-    assert.equal(await page.locator(`[data-tab-id='${structureId}']`).count(), 2, 'double click replaced an existing structure tab');
-    await page.locator(`[data-tab-id='${structureId}'] .tab-select`).click();
-    await page.locator('[data-refresh-structure]').click();
-    await wait(() => fixture.callsFor('get_object_details').length === detailsBefore + 2);
+    assert.equal(await activeId(), dataId);
+    assert.equal(await page.locator('.query-tab').count(), 1);
+    // Explicit structure tabs retain the same top actions and refresh behavior.
+    await object('orders').click({ button: 'right' });
+    await page.locator('[data-context-action="open-structure"]').click();
     await page.locator('.structure-title').waitFor();
+    assert.ok(await page.locator('body').evaluate(node => node.classList.contains('structure-only-mode')));
+    assert.ok(await page.locator('#tableToolbar').isVisible());
+    assert.ok(await page.locator('#viewTableDdl').isVisible());
+    assert.ok(await page.locator('#openTableSql').isVisible());
+    const detailsBefore = fixture.callsFor('get_object_details').length;
+    await page.locator('#refreshTableData').click();
+    await wait(() => fixture.callsFor('get_object_details').length === detailsBefore + 1);
+    await page.waitForFunction(() => document.querySelector('#structurePanel').getAttribute('aria-busy') === 'false');
+    await page.locator('#openTableSql').click();
+    assert.ok((await page.locator('#sqlEditor .cm-content').innerText()).includes('SELECT *'));
     await page.screenshot({ path: resolve(evidence, 'tree-single-click.png') });
+    // Switching tabs while catalog requests are in flight must resume the
+    // originating tab's automatic load without leaking results across tabs.
+    await closeAll();
+    await object('orders').click();
+    await object('exact_100').click();
+    await wait(async () => (await page.locator('#resultCount').innerText()).trim() === '100');
+    await object('orders').click();
+    await wait(async () => (await page.locator('#resultCount').innerText()).trim() === '500');
+    assert.equal(await page.locator('.query-tab').count(), 2);
+    assert.ok((await page.locator('#tableToolbarTitle').textContent()).includes('orders'));
+    // A metadata failure still permits reading data, and the structure retry
+    // repopulates the metadata used by table editing.
+    await closeAll();
+    failDetails = true;
+    await object('orders').click();
+    await wait(async () => (await page.locator('#resultCount').innerText()).trim() === '500');
+    await page.locator('#structureTab').click();
+    assert.match(await page.locator('#structurePanel').innerText(), /无法读取结构/);
+    failDetails = false;
+    await page.locator('#refreshTableData').click();
+    await page.locator('.structure-title').waitFor();
+    await page.locator('#resultTab').click();
+    assert.ok(await page.locator('#newRow').isVisible());
     assert.deepEqual(errors, []);
     console.log('PASS: immediate tree selection, loaded data/structure reuse, double-click promotion, explicit refresh and tab deduplication.');
   }

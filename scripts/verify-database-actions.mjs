@@ -36,7 +36,7 @@ let failTableRefresh = false;
 let failObjectCreate = false, holdObjectCreate = false, releaseObjectCreate;
 const createdTables = [];
 await context.exposeFunction("__FIXTURE_INVOKE__", async (command, args) => {
-  const result = await fixture.invoke(command, args);
+  const result = await fixture.invoke(command === 'get_object_ddl_details' ? 'get_object_details' : command, args);
   if (command === 'execute_mutation' && /^CREATE (DATABASE|SCHEMA)/.test(args.request.sql)) {
     if (holdObjectCreate) { holdObjectCreate = false; await new Promise(resolve => { releaseObjectCreate = resolve; }); }
     if (failObjectCreate) throw new Error('fixture: 没有创建权限');
@@ -59,7 +59,7 @@ await context.exposeFunction("__FIXTURE_INVOKE__", async (command, args) => {
     if (failTableRefresh) throw new Error('fixture: catalog refresh failed');
     return [...result, ...createdTables.filter(table => table.connectionId === args.connectionId && table.database === args.database && table.schema === args.schemaName)];
   }
-  if (command === 'get_object_details') {
+  if (command === 'get_object_details' || command === 'get_object_ddl_details') {
     const table = createdTables.find(item => item.id === args.objectId);
     if (table?.connectionId === 'mysql-local') return { ...table, definition: 'CREATE TABLE `items` (\n  `id` bigint NOT NULL AUTO_INCREMENT,\n  PRIMARY KEY (`id`)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin' };
     return table || result;
@@ -282,7 +282,14 @@ try {
   await page.locator('#viewTableDdl').click();
   const ddlDialog = page.locator('.ddl-view-dialog');
   await ddlDialog.locator('.ddl-view-code').filter({ hasText: 'CREATE TABLE `warehouse`.`items`' }).waitFor();
-  expect((await ddlDialog.locator('.ddl-view-code').innerText()).includes('COLLATE=utf8mb4_bin'), 'MySQL DDL omitted native collation');
+  const mysqlDdl = await ddlDialog.locator('.ddl-view-code .cm-line').allTextContents().then(lines => lines.join('\n'));
+  expect(mysqlDdl.includes('COLLATE=utf8mb4_bin'), 'MySQL DDL omitted native collation');
+  expect(mysqlDdl.includes('\n  `id` bigint'), 'MySQL DDL line breaks were collapsed');
+  expect(await ddlDialog.locator('.cm-lineWrapping').count() === 1, 'MySQL DDL wrapping was not enabled');
+  expect(await ddlDialog.locator('.cm-line span[class]').count() > 0, 'MySQL SQL highlighting missing');
+  expect(await ddlDialog.locator('.ddl-view-target').textContent() === 'warehouse.items', 'MySQL database name repeated');
+  expect(await ddlDialog.locator('.ddl-view-info').isHidden(), 'PostgreSQL scope note leaked into MySQL');
+  expect(await ddlDialog.locator('.ddl-view-simple, .ddl-view-full').count() === 0, 'DDL mode switch must not appear');
   await ddlDialog.locator('.ddl-view-done').click();
   await itemRow.click({ button: 'right' }); await action('drop-table').click();
   await page.locator('#confirmActionAccept').click();

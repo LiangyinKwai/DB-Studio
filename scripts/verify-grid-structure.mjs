@@ -249,7 +249,7 @@ try {
     assert.equal(await page.locator('.db-grid-body [data-grid-cell]').count(), 0);
     await page.locator(`[data-tab-id='${structureTabId}'] .tab-select`).click();
   }
-  await page.locator('[data-refresh-structure]').click(); await page.locator('[data-edit-structure]').waitFor();
+  await page.locator('#refreshTableData').click(); await page.locator('[data-edit-structure]').waitFor();
   await page.locator('#modeBadge').click(); await page.locator('[data-edit-structure]').click();
   assert.equal(await editor.count(), 0); assert.match(await page.locator('#toast').innerText(), /只读/);
   await page.locator('#modeBadge').click(); await page.locator('[data-edit-structure]').click(); await editor.waitFor();

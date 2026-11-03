@@ -2,6 +2,7 @@ import { EditorState, Compartment, Prec } from '@codemirror/state';
 import { EditorView, lineNumbers, keymap, drawSelection, highlightSpecialChars } from '@codemirror/view';
 import { defaultKeymap } from '@codemirror/commands';
 import { json } from '@codemirror/lang-json';
+import { sql, MySQL, PostgreSQL } from '@codemirror/lang-sql';
 import { foldGutter, syntaxHighlighting, HighlightStyle } from '@codemirror/language';
 import { search, searchKeymap, openSearchPanel, closeSearchPanel, searchPanelOpen, highlightSelectionMatches } from '@codemirror/search';
 import { tags } from '@lezer/highlight';
@@ -25,6 +26,9 @@ export function inspectorSourceValue(inspector, controlValue) {
 }
 
 const colors = HighlightStyle.define([
+  { tag: tags.keyword, color: 'var(--syntax-keyword)' },
+  { tag: tags.operator, color: 'var(--syntax-operator)' },
+  { tag: tags.comment, color: 'var(--app-muted)', fontStyle: 'italic' },
   { tag: tags.propertyName, color: 'var(--syntax-keyword)' },
   { tag: tags.string, color: 'var(--syntax-string)' },
   { tag: tags.number, color: 'var(--syntax-number)' },
@@ -48,7 +52,7 @@ export function createValueReader(parent, { label = '内容阅读器', showLineN
     '&.cm-focused': { outline: '2px solid var(--accent-focus)', outlineOffset: '-2px' },
   });
   return {
-    show(text, { isJson = false } = {}) {
+    show(text, { isJson = false, sqlDriver = null } = {}) {
       const source = String(text);
       const state = EditorState.create({ doc: source, extensions: [
         EditorState.readOnly.of(true), EditorView.editable.of(false), EditorView.contentAttributes.of({ 'aria-label': label, tabindex: '0' }),
@@ -65,6 +69,7 @@ export function createValueReader(parent, { label = '内容阅读器', showLineN
         EditorState.phrases.of({ Find: '查找', next: '下一处', previous: '上一处', all: '全选匹配', 'match case': '区分大小写', regexp: '正则', 'by word': '整词', close: '关闭查找' }),
         wrapping.of(wrap ? EditorView.lineWrapping : []), theme,
         ...(isJson ? [json(), foldGutter(), syntaxHighlighting(colors)] : []),
+        ...(['postgres', 'mysql'].includes(sqlDriver) ? [sql({ dialect: sqlDriver === 'mysql' ? MySQL : PostgreSQL }), syntaxHighlighting(colors)] : []),
       ] });
       if (view) view.setState(state); else {
         view = new EditorView({ state, parent });

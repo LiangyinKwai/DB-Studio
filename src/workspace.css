@@ -197,12 +197,22 @@ body .structure-refresh-status { color: var(--app-muted); font-size: 11px; overf
 body .structure-refresh-status.error { color: var(--error); }
 body .structure-actions { flex-wrap: wrap; align-items: center; }
 body .structure-actions .ui-icon, body .empty-state .secondary-btn .ui-icon { width: 15px; height: 15px; }
+body .ddl-action { width: 28px; min-width: 28px; height: 28px; }
+body .ddl-action .ddl-icon { display: block; width: 20px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.15; stroke-linecap: round; stroke-linejoin: round; }
+body .table-toolbar .ddl-action { margin-right: -6px; }
 body .ddl-view-dialog { width: min(840px, calc(100vw - 32px)); max-height: calc(100dvh - 32px); padding: 22px; }
 body .ddl-view-dialog .dialog-header { margin-bottom: 14px; }
 body .ddl-view-target { margin: 6px 0 0; color: var(--app-muted); overflow-wrap: anywhere; }
 body .ddl-view-close { font-size: 22px; }
-body .ddl-view-code { margin: 0; min-height: 120px; max-height: 58dvh; overflow: auto; padding: 14px; border: 1px solid var(--app-border); border-radius: 7px; white-space: pre; font: 12px/1.65 ui-monospace, monospace; user-select: text; }
-body .ddl-view-code.error { color: var(--error); white-space: pre-wrap; }
+body .ddl-view-dialog .ddl-view-code { display: block; width: 100%; height: min(52dvh, 520px); min-height: 120px; overflow: hidden; border: 1px solid var(--app-border); border-radius: 7px; background: var(--input-bg); }
+body .ddl-view-dialog .ddl-view-code.error { color: var(--error); white-space: pre-wrap; padding: 14px; overflow: auto; }
+body .ddl-view-status { margin: 14px; color: var(--app-muted); }
+body .ddl-view-info { margin-bottom: 8px; color: var(--app-muted); font-size: 12px; line-height: 1.6; }
+body .ddl-view-info summary { cursor: pointer; }
+body .ddl-view-info p { margin: 6px 0; }
+body .ddl-view-tools { display: flex; align-items: center; gap: 8px; justify-content: space-between; margin-bottom: 8px; }
+body .ddl-view-caption { color: var(--app-muted); font-size: 12px; }
+body .ddl-view-wrap[aria-pressed="true"] { color: var(--app-text); background: var(--selected-bg); box-shadow: inset 0 0 0 1px var(--accent-line); }
 body .ddl-view-dialog .dialog-actions { justify-content: flex-end; margin-top: 14px; }
 body .data-import-dialog { width: min(920px, calc(100vw - 40px)); max-height: calc(100vh - 50px); padding: 22px; overflow: auto; }
 body .data-import-form { display: grid; gap: 12px; }

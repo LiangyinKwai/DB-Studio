@@ -55,17 +55,23 @@ export function buildTableDdl(object, details, driver = 'postgres') {
   if (!['CREATE TABLE', 'CREATE UNLOGGED TABLE'].includes(metadata.createPrefix) || typeof metadata.createSuffix !== 'string') {
     throw new Error('表属性不完整，不能生成建表 SQL');
   }
+  // Only emit standalone SQL from metadata deparsed on an isolated connection
+  // whose lookup path forces PostgreSQL to qualify non-system dependencies.
+  if (before[0] !== "SELECT pg_catalog.set_config('search_path', E'pg_catalog', false);") {
+    throw new Error('DDL 名称解析环境无法确认，请重新读取表结构');
+  }
+  const suffix = metadata.createSuffix.replace(/\nUSING "heap"(?=\n|$)/, '');
   const qualified = `${identifier(object.schema, driver)}.${identifier(object.name, driver)}`;
+  const primary = constraints.filter(item => item.kind === 'primary_key');
+  const entries = [...definitions, ...primary.map(item => `CONSTRAINT ${identifier(item.name, driver)} ${statement(item.definition).replace(/;$/, '')}`)];
   const lines = [
-    '-- 建表结构：字段、序列、约束、索引及表/列注释。',
-    '-- 不含数据、权限/所有者、触发器、规则和行级安全策略；依赖的 schema、类型及外部表需已存在。',
-    ...before.map(statement),
-    `${metadata.createPrefix} ${qualified} (${definitions.length ? `\n  ${definitions.join(',\n  ')}\n` : ''})${metadata.createSuffix};`,
+    ...before.slice(1).map(statement),
+    `${metadata.createPrefix} ${qualified} (${entries.length ? `\n  ${entries.join(',\n  ')}\n` : ''})${suffix};`,
   ];
   // ALTER ADD preserves NOT VALID/DEFERRABLE and the server's composite-key
   // order. Regenerating a PK from column flags would silently reorder it.
   const constraintPriority = constraint => ['primary_key', 'unique'].includes(constraint.kind) ? 0 : constraint.kind === 'foreign_key' ? 2 : 1;
-  for (const constraint of [...constraints].sort((a, b) => constraintPriority(a) - constraintPriority(b))) {
+  for (const constraint of constraints.filter(item => item.kind !== 'primary_key').sort((a, b) => constraintPriority(a) - constraintPriority(b))) {
     const definition = statement(constraint.definition);
     lines.push(`ALTER TABLE ${qualified} ADD CONSTRAINT ${identifier(constraint.name, driver)} ${definition}`);
   }

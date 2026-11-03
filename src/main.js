@@ -93,7 +93,8 @@ import { initConnectionReorder, moveConnection, orderConnections, readConnection
 import { orderedObjectGroups, syncTreeToggle, setTreeRowExpanded, treeBranchForDoubleClick } from "./object-tree.js";
 
 const shortcutPlatform = navigator.userAgentData?.platform || navigator.platform || '';
-const refreshIcon = '<svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 7v5h-5M4 17v-5h5M5.1 7a8 8 0 0 1 13.2-2L20 7M4 17l1.7 2A8 8 0 0 0 18.9 17"/></svg>';
+const refreshIcon = '<svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.34 5.66M20 4v7h-7"/></svg>';
+const ddlIcon = '<svg class="ddl-icon" viewBox="0 0 20 14" aria-hidden="true"><path d="M1 2.5v9h1.4c2.5 0 3.8-1.7 3.8-4.5S4.9 2.5 2.4 2.5H1ZM8 2.5v9h1.4c2.5 0 3.8-1.7 3.8-4.5S11.9 2.5 9.4 2.5H8ZM15.5 2.5v9H19"/></svg>';
 const canViewObjectDdl = object => ['table', 'partitioned_table', 'view', 'materialized_view', 'function', 'procedure'].includes(object?.kind);
 function shortcut(label) { return formatShortcut(String(label || '').replaceAll('⌘/Ctrl', '⌘'), shortcutPlatform); }
 const invoke = window.__TAURI__?.core?.invoke;
@@ -2275,33 +2276,39 @@ function renderWorkspaceMode(tab = activeExecutionTab()) {
   document.body.classList.toggle("empty-workspace-mode", !tab);
   document.body.classList.toggle("structure-only-mode", Boolean(tab?.structureOnly));
   const tableView = Boolean((tab?.browse || tab?.redisKey) && tab.tableView !== false);
-  const actionHost = tableView ? refs.tableActionHost : refs.resultActionHost;
+  const structureView = Boolean(tab?.structureOnly && (tab.inspectedObject || tab.openedObject));
+  const objectView = tableView || structureView;
+  const actionHost = objectView ? refs.tableActionHost : refs.resultActionHost;
   if (refs.resultActions.parentElement !== actionHost) actionHost.append(refs.resultActions);
   const transactionButtons = [refs.transactionState, refs.beginTransaction, refs.commitTransaction, refs.rollbackTransaction];
   if (tableView && refs.beginTransaction.parentElement !== refs.tableTransactionActions) refs.tableTransactionActions.append(...transactionButtons);
   else if (!tableView && refs.beginTransaction.parentElement !== refs.queryToolbar) refs.queryTransactionAnchor.after(...transactionButtons);
   refs.tableTransactionActions.hidden = !tableView || !['postgres', 'mysql'].includes(driverForTab(tab));
-  refs.refreshTableData.hidden = !tableView;
+  refs.refreshTableData.hidden = !objectView;
   document.body.classList.toggle("table-browse-mode", tableView);
   if (refs.queryToolbar) refs.queryToolbar.hidden = !tab || tableView || Boolean(tab?.console);
-  if (refs.tableToolbar) refs.tableToolbar.hidden = !tableView;
+  if (refs.tableToolbar) refs.tableToolbar.hidden = !objectView;
   refs.redisValueActions.hidden = !tableView || !redisTypeActions[tab?.redisType] || tab?.redisKey == null;
   refs.redisMemberAction.hidden = tab?.redisType === 'string';
   refs.redisMemberAction.textContent = ({ hash: '字段操作', list: '添加元素', set: '成员操作', zset: '成员与分数', stream: '消息操作' })[tab?.redisType] || '成员操作';
   refs.redisMemberAction.disabled = refs.redisTtlAction.disabled = !tab || tab.mode !== 'write' || Boolean(tab.refreshing || tab.running || cellWritePending(tab));
-  if (tableView) {
-    const browse = tab.browse;
+  if (objectView) {
+    const browse = tab.browse || tab.inspectedObject || tab.openedObject;
     refs.tableToolbarTitle.textContent = tab.redisKey || `${browse.schema}.${browse.name}`;
     if (tab.redisKey != null) {
       refs.tableToolbarTitle.setAttribute('role', 'button'); refs.tableToolbarTitle.tabIndex = 0; refs.tableToolbarTitle.title = '查看完整 Key、类型和过期时间';
     } else { refs.tableToolbarTitle.removeAttribute('role'); refs.tableToolbarTitle.removeAttribute('tabindex'); refs.tableToolbarTitle.title = refs.tableToolbarTitle.textContent; }
-    refs.tableToolbarMeta.textContent = tab.redisKey ? `DB ${redisTabDatabase(tab)} · ${redisKeyTypePresentation(tab.redisType).label}` : `${browse.pageSize} 行/页`;
+    refs.tableToolbarMeta.textContent = tab.redisKey ? `DB ${redisTabDatabase(tab)} · ${redisKeyTypePresentation(tab.redisType).label}` : browse.pageSize ? `${browse.pageSize} 行/页` : '';
     if (refs.openTableSql) refs.openTableSql.hidden = Boolean(tab.redisKey);
     refs.viewTableDdl.hidden = !canViewObjectDdl(browse);
     if (refs.newRow) refs.newRow.hidden = Boolean(tab.redisKey);
     if (refs.editRow) refs.editRow.hidden = Boolean(tab.redisKey);
     if (refs.deleteRows) refs.deleteRows.hidden = Boolean(tab.redisKey);
-    if (refs.refreshTableData) refs.refreshTableData.disabled = Boolean(tab.running || tab.refreshing || cellWritePending(tab));
+    if (refs.refreshTableData) {
+      refs.refreshTableData.disabled = Boolean(tab.running || tab.refreshing || tab.structurePending || cellWritePending(tab));
+      refs.refreshTableData.title = tab.outputTab === 'structure' ? '刷新结构' : '刷新数据';
+      refs.refreshTableData.setAttribute('aria-label', refs.refreshTableData.title);
+    }
   } else {
     if (refs.openTableSql) refs.openTableSql.hidden = false;
     if (refs.refreshTableData) refs.refreshTableData.disabled = false;
@@ -2356,6 +2363,7 @@ function activateTab(id, focus = true) {
   updateCursor();
   persistTabs();
   if (next.redisKey != null && !next.result?.executed && state.connectionStatuses[next.connectionId] === 'connected') void restoreRedisKeyResult(next);
+  if (next.autoLoadPending && next.browse && !next.opening) { next.autoLoadPending = false; void loadOpenedObjectData(next); }
   if (focus) {
     if (next.console) redisEditor?.focus();
     else state.editor.focus();
@@ -2532,6 +2540,7 @@ function renderOutput() {
   if (driverForTab(tab) === 'redis' && tab.outputTab === 'structure') tab.outputTab = 'result';
   const mode = tab.outputTab || "result";
   renderWorkspaceMode(tab);
+  for (const button of [refs.dataImportButton, refs.resultMore, refs.locateColumn]) button.hidden = mode !== 'result';
   const filter = (tab.filter || "").trim().toLowerCase();
   refs.resultFilter.value = tab.filter || "";
   for (const [key, name] of [
@@ -2545,14 +2554,16 @@ function renderOutput() {
   }
   refs.emptyActions.hidden = true;
   refs.welcomeFeatures.hidden = true;
+  const loadingBrowse = Boolean(tab.opening && tab.browse && !result.executed);
   refs.resultEmpty.dataset.state = tab.running ? "running" : tab.error ? "error" : "idle";
-  refs.emptyNextAction.hidden = result.columns.length > 0 || (result.executed && !tab.error);
+  refs.emptyNextAction.hidden = loadingBrowse || result.columns.length > 0 || (result.executed && !tab.error);
   const emptyAction = emptyResultAction(tab);
   refs.emptyNextAction.textContent = emptyAction.label;
   refs.emptyNextAction.disabled = Boolean(emptyAction.disabled);
   refs.resultEmpty.hidden = mode !== "result" || result.columns.length > 0;
   refs.resultEmpty.querySelector("h2").textContent = tab.running
     ? "查询执行中…"
+    : loadingBrowse ? "正在加载表数据…"
     : tab.cancelled
       ? "查询已取消"
     : tab.error
@@ -2564,6 +2575,7 @@ function renderOutput() {
             : "从一个查询开始";
   refs.resultEmpty.querySelector("p").textContent = tab.running
     ? "可以在其他标签继续工作。"
+    : loadingBrowse ? "正在读取表结构和数据。"
     : tab.cancelled
       ? "可以修改 SQL 后重新执行。"
     : tab.error
@@ -2672,8 +2684,6 @@ function renderOutput() {
       state.structureRendered = null;
     }
     refs.structurePanel.setAttribute("aria-busy", String(Boolean(tab.structurePending)));
-    const refresh = refs.structurePanel.querySelector("[data-refresh-structure]");
-    if (refresh) refresh.disabled = Boolean(tab.running || tab.confirming);
     const status = refs.structurePanel.querySelector(".structure-refresh-status");
     if (status) {
       status.textContent = tab.structureError ? `刷新失败：${tab.structureError} · 当前显示上次加载的结构` : "";
@@ -2687,7 +2697,7 @@ function renderStructureLoading(title = "选择一个对象查看结构") {
   refs.structurePanel.innerHTML = `<div class="empty-state"><div class="empty-symbol">◇</div><h2>${escapeHtml(title)}</h2><p>列、索引、约束与定义会按需读取。</p></div>`;
   const tab = activeTab();
   const object = tab?.inspectedObject || tab?.browse;
-  if (object && !tab.structurePending) {
+  if (object && tab.structureError && !tab.structurePending) {
     const refresh = document.createElement("button");
     refresh.className = "secondary-btn";
     refresh.innerHTML = `${refreshIcon}<span>刷新结构</span>`;
@@ -2702,6 +2712,7 @@ async function showQueryStructure() {
   if (tab.browse || tab.structure || tab.structureOnly) {
     tab.outputTab = "structure";
     renderOutput();
+    if (!tab.structure && !tab.structurePending && !tab.structureError && tab.browse) void inspectObject(tab.browse, { tab, connectionId: tab.connectionId });
     return;
   }
   if (!refs.queryStructureMenu.hidden) return queryStructureSelect.close(true);
@@ -2787,7 +2798,7 @@ function structurePlaceholder(tab) {
   if (tab?.structurePending) return `正在读取 ${tab.inspectedObject?.name || tab.browse?.name || tab.title || "对象"} 结构…`;
   if (tab?.structureOnly) return `正在准备 ${tab.inspectedObject?.name || "对象"} 的结构`;
   if (tab?.redisKey) return "Redis key 没有表结构";
-  if (tab?.browse) return "正在准备对象结构";
+  if (tab?.browse) return "尚未加载对象结构";
   return "当前查询未绑定对象";
 }
 function renderStructure(details) {
@@ -2820,34 +2831,7 @@ function renderStructure(details) {
       edit.addEventListener("click", () => editTableStructure(activeTab()));
       toolbar.append(edit);
     }
-    const refresh = document.createElement("button");
-    refresh.className = "secondary-btn";
-    refresh.innerHTML = `${refreshIcon}<span>刷新</span>`;
-    refresh.dataset.refreshStructure = "";
-    refresh.addEventListener("click", () => {
-      const tab = activeTab();
-      if (tab && !tab.running && !tab.confirming) void inspectObject(object, { connectionId: object.connectionId || tab.connectionId, tab });
-    });
-    toolbar.append(refresh);
-    if (canViewObjectDdl(object)) {
-      const ddl = document.createElement("button");
-      ddl.type = "button";
-      ddl.className = "secondary-btn";
-      ddl.dataset.viewDdl = "";
-      ddl.textContent = "查看 DDL";
-      ddl.addEventListener("click", () => { const tab = activeTab(); if (tab) void showObjectDdl(object, tab); });
-      toolbar.append(ddl);
-    }
-    const sql = document.createElement("button");
-    sql.className = "quiet-btn";
-    sql.textContent = "打开 SQL 编辑器";
-    sql.addEventListener("click", () => {
-      const tab = activeTab();
-      addTab("", tab.connectionId, null, {
-        database: object.database || tabDatabase(tab), schema: object.schema,
-      });
-    });
-    toolbar.append(sql);
+
   }
   refs.structurePanel.prepend(toolbar);
   const status = document.createElement("span");
@@ -2894,6 +2878,12 @@ async function inspectObject(object, { connectionId = state.activeConnectionId, 
     if (tab.structureRequest === request) {
       // Keep the same DOM, text selection and scroll position for unchanged metadata.
       tab.structure = previousStructure && JSON.stringify(previousStructure) === JSON.stringify(details) ? previousStructure : details;
+      if (tab.browse && tab.browse.id === object.id && ['table', 'partitioned_table'].includes(tab.browse.kind)) {
+        tab.browse.columns = details.columns || [];
+        tab.browse.primaryKeys = tab.browse.columns.filter(column => column.primaryKey).map(column => column.name);
+        tab.browse.detailsLoaded = true;
+        tab.browse.engine = details.mysql?.engine || null;
+      }
       tab.structurePending = false;
       if (activeTab() === tab) {
         const view = previousStructure && tab.outputTab === "structure"
@@ -3077,23 +3067,44 @@ async function showObjectDdl(object, tab) {
   const dialog = document.createElement('dialog');
   dialog.className = 'ddl-view-dialog';
   dialog.setAttribute('aria-labelledby', 'ddlViewTitle');
-  dialog.innerHTML = `<div class="dialog-header"><div><h2 id="ddlViewTitle">查看 DDL</h2><p class="ddl-view-target"></p></div><button type="button" class="icon-btn ddl-view-close" aria-label="关闭">×</button></div><pre class="definition selectable-text ddl-view-code" aria-live="polite">正在读取 DDL…</pre><div class="dialog-actions"><button type="button" class="secondary-btn ddl-view-copy" disabled>复制 DDL</button><button type="button" class="primary-btn ddl-view-done">关闭</button></div>`;
-  dialog.querySelector('.ddl-view-target').textContent = [object.database || tabDatabase(tab), object.qualifiedName || `${object.schema}.${object.name}`].filter(Boolean).join(' · ');
+  dialog.innerHTML = `<div class="dialog-header"><div><h2 id="ddlViewTitle">查看 DDL</h2><p class="ddl-view-target"></p></div><button type="button" class="icon-btn ddl-view-close" aria-label="关闭">×</button></div><details class="ddl-view-info" hidden><summary>DDL 范围说明</summary><p>包含字段、序列、约束、索引及表/列注释。不含数据、权限/所有者、触发器、规则和行级安全策略；依赖的 schema、类型及外部表需已存在。</p></details><div class="ddl-view-tools"><span class="ddl-view-caption">DDL 定义</span><button type="button" class="quiet-btn ddl-view-wrap" aria-pressed="true" disabled>自动换行</button></div><div class="ddl-view-code value-reader"><p class="ddl-view-status" role="status">正在读取 DDL…</p></div><div class="dialog-actions"><button type="button" class="secondary-btn ddl-view-copy" disabled>复制 DDL</button><button type="button" class="primary-btn ddl-view-done">关闭</button></div>`;
+  dialog.querySelector('.ddl-view-target').textContent = driver === 'mysql' ? `${object.database || object.schema || tabDatabase(tab)}.${object.name}` : [object.database || tabDatabase(tab), object.qualifiedName || `${object.schema}.${object.name}`].filter(Boolean).join(' · ');
+  dialog.querySelector('.ddl-view-info').hidden = driver !== 'postgres' || !['table', 'partitioned_table'].includes(object.kind);
   const code = dialog.querySelector('.ddl-view-code');
   const copy = dialog.querySelector('.ddl-view-copy');
+  const wrapButton = dialog.querySelector('.ddl-view-wrap');
+  const reader = createValueReader(code, { label: 'DDL 定义' });
+  wrapButton.addEventListener('click', () => {
+    const wrap = wrapButton.getAttribute('aria-pressed') !== 'true';
+    wrapButton.setAttribute('aria-pressed', String(wrap));
+    reader.setWrap(wrap);
+  });
   for (const close of dialog.querySelectorAll('.ddl-view-close, .ddl-view-done')) close.addEventListener('click', () => dialog.close());
-  dialog.addEventListener('close', () => dialog.remove(), { once: true });
+  let pressedBackdrop = false;
+  dialog.addEventListener('pointerdown', event => { pressedBackdrop = event.button === 0 && isBackdropClick(dialog, event); });
+  dialog.addEventListener('pointercancel', () => { pressedBackdrop = false; });
+  dialog.addEventListener('click', event => {
+    const dismiss = pressedBackdrop && isBackdropClick(dialog, event);
+    pressedBackdrop = false;
+    if (dismiss) dialog.close();
+  });
+  dialog.addEventListener('close', () => { reader.destroy(); dialog.remove(); }, { once: true });
   document.body.append(dialog);
   dialog.showModal();
   try {
-    const details = await call('get_object_details', { connectionId, objectId: object.id, kind: object.kind, database: object.database || tabDatabase(tab) });
+    const details = await call('get_object_ddl_details', { connectionId, objectId: object.id, kind: object.kind, database: object.database || tabDatabase(tab) });
     if (!dialog.open) return;
     const ddl = contextObjectDdl(object, details, driver);
     if (!ddl || ddl.startsWith('-- DDL for ')) throw new Error('当前对象没有可用的 DDL 定义');
-    code.textContent = ddl;
+    code.replaceChildren();
+    // Short definitions should not leave a large empty editor. Long ones keep
+    // a bounded scrollable area; wrapping never changes the copied source.
+    code.style.height = `min(52dvh, ${Math.min(520, Math.max(180, (ddl.split('\n').length + 2) * 23))}px)`;
+    reader.show(ddl, { sqlDriver: driver });
+    wrapButton.disabled = false;
     copy.disabled = false;
     copy.addEventListener('click', async () => {
-      try { await copyText(ddl); showToast('已复制 DDL'); }
+      try { await copyText(reader.getValue()); showToast('已复制 DDL'); }
       catch (error) { showToast(`复制 DDL 失败：${errorText(error)}`, 'error'); }
     });
   } catch (error) {
@@ -3121,7 +3132,7 @@ async function copyContextDdl(target) {
   try {
     if (target?.type === "object") {
       const object = target.object;
-      const details = await call("get_object_details", {
+      const details = await call("get_object_ddl_details", {
         connectionId: target.connectionId || state.activeConnectionId,
         objectId: object.id,
         kind: object.kind,
@@ -3819,15 +3830,20 @@ async function loadOpenedObjectData(tab, prefetched = null) {
   tab.opening = true;
   try {
     if (!tab.browse?.detailsLoaded) {
+      const loadsStructure = ['table', 'partitioned_table'].includes(tab.browse?.kind);
+      if (loadsStructure) { tab.structurePending = true; tab.structureError = null; if (activeTab() === tab) renderOutput(); }
       try { await loadBrowseDetails(tab, prefetched); }
-      catch (error) { showToast(`读取表结构失败：${errorText(error)}`, "error"); }
+      catch (error) { tab.structureError = errorText(error); showToast(`读取表结构失败：${tab.structureError}`, "error"); }
+      finally { if (loadsStructure) { tab.structurePending = false; if (activeTab() === tab) renderOutput(); } }
     }
     if (activeTab() === tab && state.tabs.includes(tab) && !tab.result?.executed) {
       renderOutput();
-      await runQuery();
+      await runQuery({ preserveOutputMode: true });
     }
   } finally {
     tab.opening = false;
+    if (state.tabs.includes(tab) && activeTab() !== tab && !tab.result?.executed && !tab.error) tab.autoLoadPending = true;
+    if (activeTab() === tab && state.tabs.includes(tab)) renderOutput();
   }
 }
 async function runRedisCommand(tab, sqlText, connectionId) {
@@ -3973,7 +3989,7 @@ async function changeBrowsePage(page) {
   }
 }
 
-async function runQuery({ preserveResult = false, pagingRequest = null } = {}) {
+async function runQuery({ preserveResult = false, pagingRequest = null, preserveOutputMode = false } = {}) {
   const tab = activeExecutionTab();
   if (tab?.paging && tab.paging !== pagingRequest) return;
   if (!tab || tab.running || tab.confirming || tab.resolvingTarget || tab.changingTransaction || cellWritePending(tab)) return;
@@ -4111,7 +4127,7 @@ async function runQuery({ preserveResult = false, pagingRequest = null } = {}) {
         }
       } catch { catalogRefreshFailed = true; }
     }
-    tab.outputTab = "result";
+    if (!preserveOutputMode || (tab.outputTab || 'result') === 'result') tab.outputTab = "result";
     if (isActive()) {
       renderOutput();
       if (!tab.paging) showToast(catalogRefreshFailed ? "SQL 已执行，目录刷新失败，请手动刷新；不要重复执行" : "查询完成", catalogRefreshFailed ? "error" : "info");
@@ -4132,7 +4148,7 @@ async function runQuery({ preserveResult = false, pagingRequest = null } = {}) {
     tab.message = cancelled
       ? `查询已取消\n\n${sqlText}`
       : `查询失败：${errorText(error)}\n执行位置：${targetDescription}\n\n${sqlText}`;
-    tab.outputTab = tab.paging && previousResult?.executed ? "result" : "message";
+    if (!preserveOutputMode || (tab.outputTab || 'result') === 'result') tab.outputTab = tab.paging && previousResult?.executed ? "result" : "message";
     if (isActive()) {
       renderOutput();
       showToast(cancelled ? "查询已取消" : `查询失败：${errorText(error)}`, cancelled ? "info" : "error");
@@ -5659,8 +5675,13 @@ function bindEvents() {
     state.objectClickPreviewId = null;
     const target = objectTabTarget(object, state.activeConnectionId);
     const existing = findObjectTab(target, "data") || findObjectTab(target, "structure");
-    if (existing) activateTab(existing.id);
-    else openObjectStructureTab(object, state.activeConnectionId, { fromTreeClick: event.detail === 1 });
+    if (existing) {
+      activateTab(existing.id);
+      if (existing.browse && !existing.result?.executed && !existing.error) void loadOpenedObjectData(existing);
+      else if (existing.structureOnly && !existing.structure && !existing.structurePending && !existing.structureError) void inspectObject(object, { tab: existing, connectionId: existing.connectionId });
+    } else if (["table", "partitioned_table", "view", "materialized_view", "foreign_table"].includes(object.kind)) {
+      void openObjectQuery(object);
+    } else openObjectStructureTab(object, state.activeConnectionId, { fromTreeClick: event.detail === 1 });
   });
   refs.objectTree.addEventListener("contextmenu", (event) => {
     hideContextMenus();
@@ -5973,6 +5994,14 @@ function bindEvents() {
   });
   refs.openTableSql?.addEventListener("click", () => {
     const tab = activeTab();
+    if (tab?.structureOnly) {
+      const object = tab.inspectedObject || tab.openedObject;
+      if (!object) return;
+      const sql = ["table", "partitioned_table", "view", "materialized_view", "foreign_table"].includes(object.kind)
+        ? browseSql({ ...object, connectionId: tab.connectionId, page: 0, pageSize: 500 }) : "";
+      addTab(sql, tab.connectionId, null, { database: object.database || tabDatabase(tab), schema: object.schema });
+      return;
+    }
     if (!tab?.browse && !tab?.redisKey) return;
     if (tab.browse) {
       const query = addTab(tab.sql, tab.connectionId, null, { database: tabDatabase(tab), schema: tabSchema(tab) });
@@ -5992,7 +6021,8 @@ function bindEvents() {
   });
   refs.viewTableDdl.addEventListener("click", () => {
     const tab = activeTab();
-    if (tab?.browse) void showObjectDdl(tab.browse, tab);
+    const object = tab?.browse || tab?.inspectedObject || tab?.openedObject;
+    if (object) void showObjectDdl(object, tab);
   });
   refs.refreshTableData?.addEventListener("click", async () => {
     const tab = activeTab();

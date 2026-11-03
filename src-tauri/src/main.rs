@@ -1612,6 +1612,28 @@ async fn get_object_details(
     retry_closed_catalog!(client, invalidate_catalog_client(&app, &state, &connection_id, database.as_deref(), &client), catalog_client_for_database(&app, &state, &connection_id, database.as_deref()), catalog::load_object_details(&client, &object_id, kind.as_deref()))
 }
 
+// DDL deparsing needs a stable lookup context. Use a dedicated connection so
+// search_path changes cannot leak into a shared catalog or user's transaction.
+#[command]
+async fn get_object_ddl_details(
+    state: State<'_, BackendState>, app: AppHandle, connection_id: String,
+    object_id: String, kind: Option<String>, database: Option<String>,
+) -> Result<ObjectDetails, String> {
+    let (mut profile, password) = find_profile(&app, &state, &connection_id)?;
+    if profile.driver.eq_ignore_ascii_case("mysql") {
+        let pool = mysql_pool_for_database(&app, &state, &connection_id, database.as_deref()).await?;
+        return retry_mysql_catalog!(mysql::load_object_details(&pool, &object_id, kind.as_deref()), "读取 MySQL 对象详情");
+    }
+    if let Some(name) = database.as_deref().filter(|value| !value.trim().is_empty()) {
+        profile.database = name.to_string();
+    }
+    let client = connect_postgres(&profile, &password).await?;
+    timeout(QUERY_TIMEOUT, client.batch_execute("SET search_path TO pg_catalog"))
+        .await.map_err(|_| timeout_error("设置 DDL 读取环境"))?
+        .map_err(|error| postgres_error("设置 DDL 读取环境失败", &error))?;
+    catalog::load_object_details(&client, &object_id, kind.as_deref()).await
+}
+
 #[command]
 async fn get_schema(
     state: State<'_, BackendState>,
@@ -2005,6 +2027,7 @@ pub fn run() {
             list_schemas,
             get_schema_objects,
             get_object_details,
+            get_object_ddl_details,
             get_schema,
             begin_transaction,
             commit_transaction,

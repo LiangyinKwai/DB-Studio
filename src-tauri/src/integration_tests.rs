@@ -422,6 +422,10 @@ async fn postgres_table_ddl_roundtrip_runtime_contract() {
     client.batch_execute(r#"
         CREATE SCHEMA ddl_source;
         CREATE SCHEMA ddl_copy;
+        CREATE TYPE ddl_source.test_status AS ENUM ('ready', 'pending');
+        CREATE TYPE ddl_copy.test_status AS ENUM ('ready', 'pending');
+        CREATE FUNCTION ddl_source.default_status() RETURNS ddl_source.test_status LANGUAGE SQL IMMUTABLE AS $$ SELECT 'ready'::ddl_source.test_status $$;
+        CREATE FUNCTION ddl_copy.default_status() RETURNS ddl_copy.test_status LANGUAGE SQL IMMUTABLE AS $$ SELECT 'ready'::ddl_copy.test_status $$;
         CREATE TABLE ddl_source.orders (
             id bigint GENERATED ALWAYS AS IDENTITY (START WITH 10 INCREMENT BY 3 CACHE 5),
             code text COLLATE "C" NOT NULL DEFAULT '001',
@@ -429,6 +433,7 @@ async fn postgres_table_ddl_roundtrip_runtime_contract() {
             computed bigint GENERATED ALWAYS AS (id + 1) STORED,
             parent_id bigint,
             payload jsonb DEFAULT '{"id":9007199254740993}',
+            test_status ddl_source.test_status DEFAULT ddl_source.default_status(),
             CONSTRAINT orders_pkey PRIMARY KEY (id) WITH (fillfactor=70),
             CONSTRAINT code_unique UNIQUE (code) WITH (fillfactor=75) DEFERRABLE INITIALLY DEFERRED,
             CONSTRAINT a_parent_fk FOREIGN KEY (parent_id) REFERENCES ddl_source.orders(id),
@@ -441,6 +446,7 @@ async fn postgres_table_ddl_roundtrip_runtime_contract() {
         CREATE TABLE ddl_source.partition_child PARTITION OF ddl_source.partitioned FOR VALUES FROM (0) TO (100);
         CREATE UNLOGGED TABLE ddl_source.unlogged (id integer NOT NULL DEFAULT 2);
     "#).await.expect("create isolated DDL fixture");
+    client.batch_execute("SET search_path TO pg_catalog").await.expect("isolate DDL name resolution");
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .unwrap();
@@ -480,9 +486,14 @@ async fn postgres_table_ddl_roundtrip_runtime_contract() {
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
-        let sql = String::from_utf8(output.stdout)
-            .unwrap()
-            .replace("ddl_source", "ddl_copy");
+        let source_sql = String::from_utf8(output.stdout).unwrap();
+        assert!(!source_sql.contains("set_config('search_path'"));
+        assert!(!source_sql.contains("USING \"heap\""));
+        if name == "orders" {
+            assert!(source_sql.contains("ddl_source.test_status"), "custom type not qualified: {source_sql}");
+            assert!(source_sql.contains("ddl_source.default_status()"), "custom function not qualified: {source_sql}");
+        }
+        let sql = source_sql.replace("ddl_source", "ddl_copy");
         client
             .batch_execute(&sql)
             .await

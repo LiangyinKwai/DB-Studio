@@ -65,7 +65,7 @@ jobs:
           gh release create "v$RELEASE_VERSION" "$dmg" \
             --target "$GITHUB_SHA" \
             --title "DB Studio v${RELEASE_VERSION}（未公证）" \
-            --notes '新增 DDL 查看与复制入口，统一刷新图标，优化长单元格编辑显示；Redis 兼容预览带 Java Long 后缀的数据。此版本使用临时签名，尚未通过 Apple 公证；首次打开时 macOS 可能要求在隐私与安全性中确认。仅支持 Apple Silicon。'
+            --notes '优化 PostgreSQL 和 MySQL 的 DDL 查看与复制、SQL 高亮及自动换行；单击表后自动加载数据与结构，并统一顶部操作栏。此版本使用临时签名，尚未通过 Apple 公证；首次打开时 macOS 可能要求在隐私与安全性中确认。仅支持 Apple Silicon。'
       - name: Verify release asset
         env:
           GH_TOKEN: ${{ github.token }}

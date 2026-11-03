@@ -149,13 +149,12 @@ try {
     panel.animate = (...args) => { window.__structureRefreshAnimations++; return animate(...args); };
   });
   holdDetails = true;
-  await page.locator('[data-refresh-structure]').click();
+  await page.locator('#refreshTableData').click();
   await page.waitForFunction(() => document.querySelector('#structurePanel').getAttribute('aria-busy') === 'true');
   assert.ok(await page.evaluate(() => window.__structureHeading.isConnected));
   assert.equal(await page.locator('.structure-refresh-status').textContent(), '');
-  assert.ok(await page.locator('[data-refresh-structure]').isEnabled());
+  assert.ok(await page.locator('#refreshTableData').isDisabled());
   const detailRequests = fixture.callsFor('get_object_details').length;
-  await page.locator('[data-refresh-structure]').click();
   assert.equal(fixture.callsFor('get_object_details').length, detailRequests);
   assert.equal(await page.evaluate(() => window.__structureRefreshAnimations), 1);
   await page.evaluate(() => { document.querySelector('#structurePanel').scrollTop = 420; });
