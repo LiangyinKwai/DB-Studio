@@ -195,6 +195,15 @@ body .result-selection .selection-count { margin-right: auto; color: var(--app-m
 body #deleteRows { color: var(--error); }
 body .structure-refresh-status { color: var(--app-muted); font-size: 11px; overflow-wrap: anywhere; }
 body .structure-refresh-status.error { color: var(--error); }
+body .structure-actions { flex-wrap: wrap; align-items: center; }
+body .structure-actions .ui-icon, body .empty-state .secondary-btn .ui-icon { width: 15px; height: 15px; }
+body .ddl-view-dialog { width: min(840px, calc(100vw - 32px)); max-height: calc(100dvh - 32px); padding: 22px; }
+body .ddl-view-dialog .dialog-header { margin-bottom: 14px; }
+body .ddl-view-target { margin: 6px 0 0; color: var(--app-muted); overflow-wrap: anywhere; }
+body .ddl-view-close { font-size: 22px; }
+body .ddl-view-code { margin: 0; min-height: 120px; max-height: 58dvh; overflow: auto; padding: 14px; border: 1px solid var(--app-border); border-radius: 7px; white-space: pre; font: 12px/1.65 ui-monospace, monospace; user-select: text; }
+body .ddl-view-code.error { color: var(--error); white-space: pre-wrap; }
+body .ddl-view-dialog .dialog-actions { justify-content: flex-end; margin-top: 14px; }
 body .data-import-dialog { width: min(920px, calc(100vw - 40px)); max-height: calc(100vh - 50px); padding: 22px; overflow: auto; }
 body .data-import-form { display: grid; gap: 12px; }
 body .data-import-target { font-weight: 600; font-size: 12px; }

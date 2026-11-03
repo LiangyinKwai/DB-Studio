@@ -59,7 +59,11 @@ await context.exposeFunction("__FIXTURE_INVOKE__", async (command, args) => {
     if (failTableRefresh) throw new Error('fixture: catalog refresh failed');
     return [...result, ...createdTables.filter(table => table.connectionId === args.connectionId && table.database === args.database && table.schema === args.schemaName)];
   }
-  if (command === 'get_object_details') return createdTables.find(table => table.id === args.objectId) || result;
+  if (command === 'get_object_details') {
+    const table = createdTables.find(item => item.id === args.objectId);
+    if (table?.connectionId === 'mysql-local') return { ...table, definition: 'CREATE TABLE `items` (\n  `id` bigint NOT NULL AUTO_INCREMENT,\n  PRIMARY KEY (`id`)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin' };
+    return table || result;
+  }
   return result;
 });
 const page = await context.newPage();
@@ -274,6 +278,12 @@ try {
   if (!await warehouse.evaluate(node => node.open)) await warehouse.locator(':scope > summary [data-tree-toggle]').click();
   await openMenu('warehouse'); await action('refresh-database').click();
   const itemRow = warehouse.locator('.tree-object[data-object-id]').filter({ hasText: 'items' }).first();
+  await itemRow.locator('.object-main').dblclick();
+  await page.locator('#viewTableDdl').click();
+  const ddlDialog = page.locator('.ddl-view-dialog');
+  await ddlDialog.locator('.ddl-view-code').filter({ hasText: 'CREATE TABLE `warehouse`.`items`' }).waitFor();
+  expect((await ddlDialog.locator('.ddl-view-code').innerText()).includes('COLLATE=utf8mb4_bin'), 'MySQL DDL omitted native collation');
+  await ddlDialog.locator('.ddl-view-done').click();
   await itemRow.click({ button: 'right' }); await action('drop-table').click();
   await page.locator('#confirmActionAccept').click();
   await page.locator('#toast').filter({ hasText: '表 warehouse.items 已删除' }).waitFor();

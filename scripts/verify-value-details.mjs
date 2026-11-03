@@ -10,6 +10,7 @@ const root = resolve(fileURLToPath(new URL('..', import.meta.url))), dist = reso
 const evidence = resolve(root, 'output/playwright/value-details'); mkdirSync(evidence, { recursive: true });
 const fixture = createWorkspaceFixture(), calls = [], copies = [], writes = [];
 const payload = ' { "id" : 9007199254740993, "decimal":1.234567890123456789, "html":"<img src=x onerror=alert(1)>", "nested": { "rows": [' + Array.from({ length: 120 }, (_, index) => `{"value":"needle-${index}"}`).join(',') + '] } }\r\n';
+const redisJavaLong = '[{"redis":true,"dictCode":9007199254740993123L,"nested":{"dictSort":1L}}]';
 const largeJson = JSON.stringify({ message: 'x'.repeat(530000), nested: { ok: true } });
 const longText = Array.from({ length: 400 }, (_, index) => `第 ${index} 段：中文与 emoji 🙂，保留空格  和换行。`).join('\n') + '\n' + 'token'.repeat(1000) + '\nEND_LONG_TEXT';
 const longKey = 'session:完整Key:' + 'segment-0123456789:'.repeat(180) + 'END_KEY_精确名称';
@@ -23,7 +24,7 @@ const invoke = async (command, args) => {
   if (command === 'list_redis_databases') return [{ index: 0, keyCount: 1 }, { index: 15, keyCount: 1 }];
   if (command === 'list_redis_keys') return { cursor: 0, keys: [longKey], keyTypes: { [longKey]: args.database === 15 ? 'string' : 'hash' } };
   if (command === 'save_redis_cell') return true;
-  if (command === 'get_redis_value') return { key: longKey, keyType: 'string', ttl: 120, columns: ['value'], rows: [['{\"redis\":true}']], raw: '{\"redis\":true}' };
+  if (command === 'get_redis_value') return { key: longKey, keyType: 'string', ttl: 120, columns: ['value'], rows: [[redisJavaLong]], raw: redisJavaLong };
   return fixture.invoke(command, args);
 };
 const server = createServer((req, res) => {
@@ -205,6 +206,27 @@ try {
   await page.locator('#cellModal').waitFor({ state: 'visible' });
   assert.ok(await page.locator('#cellJsonPreview').isVisible(), 'Redis JSON double-click should open the viewer');
   assert.ok((await page.locator('#cellModal').boundingBox()).width <= 760);
+  assert.equal(await page.locator('#cellJsonCaption').innerText(), '非标准 JSON，已兼容预览');
+  assert.match(await page.locator('#cellJsonPreview').innerText(), /9007199254740993123L/);
+  assert.match(await page.locator('#cellJsonPreview').innerText(), /dictSort/);
+  const fold = page.locator('#cellJsonPreview .cm-foldGutter .cm-gutterElement:visible span').first();
+  assert.ok(await fold.isVisible(), 'compatible preview should support folding');
+  await fold.click();
+  assert.doesNotMatch(await page.locator('#cellJsonPreview').innerText(), /dictSort/);
+  await fold.click();
+  assert.match(await page.locator('#cellJsonPreview').innerText(), /dictSort/);
+  await page.locator('#editCellJson').click();
+  assert.equal(await page.locator('#cellValue').inputValue(), redisJavaLong);
+  await page.locator('#editCellJson').click();
+  assert.equal(await page.locator('#cellJsonCaption').innerText(), '非标准 JSON，已兼容预览');
+  assert.ok(await page.locator('#saveCell').isHidden(), 'previewing must not alter the value');
+  await page.locator('#editCellJson').click();
+  await page.locator('#cellValue').fill(redisJavaLong.replace('1L', '2L'));
+  await page.locator('#editCellJson').click();
+  assert.equal(await page.locator('#cellJsonCaption').innerText(), '非标准 JSON，已兼容预览');
+  assert.ok(await page.locator('#saveCell').isVisible());
+  await page.locator('#restoreCellValue').click();
+  assert.ok(await page.locator('#saveCell').isHidden());
   const savesBeforeEmpty = nativeCount('save_redis_cell');
   await page.locator('#setCellEmpty').click();
   assert.equal(await page.locator('#cellJsonCaption').innerText(), '空字符串预览');
@@ -215,7 +237,7 @@ try {
   assert.equal(nativeCount('save_redis_cell'), savesBeforeEmpty, 'empty draft must not write immediately');
   await page.locator('#restoreCellValue').click();
   assert.ok(await page.locator('#cellJsonPreview').isVisible());
-  assert.equal(await page.locator('#cellJsonCaption').innerText(), 'JSON 预览');
+  assert.equal(await page.locator('#cellJsonCaption').innerText(), '非标准 JSON，已兼容预览');
   assert.match(await page.locator('#cellJsonPreview').innerText(), /redis/);
   assert.ok(await page.locator('#restoreCellValue').isHidden());
   assert.ok(await page.locator('#saveCell').isHidden());
@@ -232,7 +254,7 @@ try {
   await page.locator('#saveCell').click(); await page.locator('#confirmActionAccept').click();
   await page.locator('#cellModal').waitFor({ state: 'hidden' });
   const emptyWrite = calls.filter(call => call.command === 'save_redis_cell').at(-1).args.request;
-  assert.equal(emptyWrite.expectedValue, '{"redis":true}');
+  assert.equal(emptyWrite.expectedValue, redisJavaLong);
   assert.equal(emptyWrite.value, '');
   assert.equal(emptyWrite.database, 15);
   await page.setViewportSize({ width: 1440, height: 900 }); await page.locator('#tableToolbarTitle').click(); await details.waitFor({ state: 'visible' });

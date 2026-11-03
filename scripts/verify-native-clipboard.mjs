@@ -9,7 +9,7 @@ import { createWorkspaceFixture } from './fixtures/workspace-fixture.mjs';
 const root = resolve(fileURLToPath(new URL('..', import.meta.url))), dist = resolve(root, 'dist');
 const fixture = createWorkspaceFixture();
 const writes = [];
-let failClipboard = false;
+let failClipboard = false, failDetails = false;
 const server = createServer((req, res) => {
   const file = resolve(dist, decodeURIComponent((req.url || '/').split('?')[0]).slice(1) || 'index.html');
   if (!file.startsWith(dist + '/') || !existsSync(file) || !statSync(file).isFile()) { res.writeHead(404); res.end(); return; }
@@ -38,6 +38,7 @@ await context.exposeFunction('__FIXTURE_INVOKE__', async (command, args) => {
   const value = await fixture.invoke(command, args);
   if (command === 'get_object_details') {
     await new Promise(done => setTimeout(done, 300));
+    if (failDetails) throw new Error('fixture metadata unavailable');
     return { ...value, tableDdl: { columnDefinitions: ['"id" integer NOT NULL', '"status" text'], beforeStatements: [], afterStatements: [], constraintIndexes: [], createPrefix: 'CREATE TABLE', createSuffix: '', unsupportedReason: null } };
   }
   return value;
@@ -57,6 +58,32 @@ try {
   assert.equal(await page.evaluate(() => window.__browserClipboardCalls), 0);
   await object.locator('.object-main').dblclick();
   await page.locator('#resultGrid [data-grid-cell]').first().waitFor();
+  const refreshPaths = await page.evaluate(() => ['#refreshSchema', '#refreshQueryTarget', '#refreshTableData', '[data-context-action="refresh-object"]'].map(selector => [...document.querySelectorAll(`${selector} svg path`)].map(path => path.getAttribute('d')).join('')));
+  assert.ok(refreshPaths.every(path => path === refreshPaths[0] && path.length > 0), 'refresh icons differ');
+  const beforeDdl = fixture.callsFor('execute_query').length;
+  await page.locator('#viewTableDdl').click();
+  const dialog = page.locator('.ddl-view-dialog');
+  assert.ok(await dialog.locator('.ddl-view-copy').isDisabled());
+  await dialog.locator('.ddl-view-code').filter({ hasText: 'CREATE TABLE "public"."orders"' }).waitFor();
+  assert.match(await dialog.locator('.ddl-view-target').textContent(), /app.*public\.orders/);
+  await dialog.locator('.ddl-view-copy').click();
+  assert.match(writes.at(-1), /CREATE TABLE "public"\."orders"/);
+  assert.equal(fixture.callsFor('execute_query').length, beforeDdl, 'viewing DDL executed SQL');
+  await dialog.locator('.ddl-view-done').click();
+  await page.locator('#structureTab').click();
+  await page.locator('[data-view-ddl]').click();
+  await dialog.locator('.ddl-view-code').filter({ hasText: 'CREATE TABLE "public"."orders"' }).waitFor();
+  await page.keyboard.press('Escape');
+  // Closing during a slow read and failed metadata must not copy or execute anything.
+  await page.locator('[data-view-ddl]').click();
+  await page.keyboard.press('Escape');
+  failDetails = true;
+  await page.locator('[data-view-ddl]').click();
+  await dialog.locator('.ddl-view-code').filter({ hasText: 'fixture metadata unavailable' }).waitFor();
+  assert.ok(await dialog.locator('.ddl-view-copy').isDisabled());
+  await dialog.locator('.ddl-view-done').click();
+  failDetails = false;
+  await page.locator('#resultTab').click();
   await page.locator('#resultMore').click(); await page.locator('#copyResults').click();
   await page.waitForFunction(() => document.querySelector('#toast').textContent.startsWith('已复制 500 行'));
   assert.ok(writes.at(-1).includes('value-1'));

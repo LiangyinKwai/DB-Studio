@@ -93,6 +93,8 @@ import { initConnectionReorder, moveConnection, orderConnections, readConnection
 import { orderedObjectGroups, syncTreeToggle, setTreeRowExpanded, treeBranchForDoubleClick } from "./object-tree.js";
 
 const shortcutPlatform = navigator.userAgentData?.platform || navigator.platform || '';
+const refreshIcon = '<svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 7v5h-5M4 17v-5h5M5.1 7a8 8 0 0 1 13.2-2L20 7M4 17l1.7 2A8 8 0 0 0 18.9 17"/></svg>';
+const canViewObjectDdl = object => ['table', 'partitioned_table', 'view', 'materialized_view', 'function', 'procedure'].includes(object?.kind);
 function shortcut(label) { return formatShortcut(String(label || '').replaceAll('⌘/Ctrl', '⌘'), shortcutPlatform); }
 const invoke = window.__TAURI__?.core?.invoke;
 const refs = Object.fromEntries(
@@ -478,7 +480,7 @@ function renderQueryTarget(tab = activeExecutionTab()) {
   refs.refreshQueryTarget.hidden = !profile || isRedis;
   refs.refreshQueryTarget.disabled = Boolean(data?.loading || tab.running || tab.confirming || tab.resolvingTarget);
   refs.queryTargetDetail.textContent = !profile ? tab.connectionId ? "原连接已不可用。SQL 草稿已保留，可复制到新建查询中继续。" : "从左侧选择连接，或在 Schema 上右键新建查询。"
-    : data?.error ? `无法确认执行位置：${data.error} · 点击${tab.browse && tab.tableView !== false ? "刷新" : " ↻ "}重试`
+    : data?.error ? `无法确认执行位置：${data.error} · 点击刷新按钮重试`
     : data?.catalogError ? `Schema 列表读取失败：${data.catalogError} · 点击 ↻ 重试` : "";
   refs.queryTargetDetail.hidden = !refs.queryTargetDetail.textContent || Boolean(tab.console);
   refs.queryTargetDetail.dataset.error = String(Boolean(data?.error || data?.catalogError));
@@ -2295,6 +2297,7 @@ function renderWorkspaceMode(tab = activeExecutionTab()) {
     } else { refs.tableToolbarTitle.removeAttribute('role'); refs.tableToolbarTitle.removeAttribute('tabindex'); refs.tableToolbarTitle.title = refs.tableToolbarTitle.textContent; }
     refs.tableToolbarMeta.textContent = tab.redisKey ? `DB ${redisTabDatabase(tab)} · ${redisKeyTypePresentation(tab.redisType).label}` : `${browse.pageSize} 行/页`;
     if (refs.openTableSql) refs.openTableSql.hidden = Boolean(tab.redisKey);
+    refs.viewTableDdl.hidden = !canViewObjectDdl(browse);
     if (refs.newRow) refs.newRow.hidden = Boolean(tab.redisKey);
     if (refs.editRow) refs.editRow.hidden = Boolean(tab.redisKey);
     if (refs.deleteRows) refs.deleteRows.hidden = Boolean(tab.redisKey);
@@ -2687,7 +2690,7 @@ function renderStructureLoading(title = "选择一个对象查看结构") {
   if (object && !tab.structurePending) {
     const refresh = document.createElement("button");
     refresh.className = "secondary-btn";
-    refresh.textContent = "刷新结构";
+    refresh.innerHTML = `${refreshIcon}<span>刷新结构</span>`;
     refresh.addEventListener("click", () => inspectObject(object, { tab, connectionId: object.connectionId || tab.connectionId }));
     refs.structurePanel.querySelector(".empty-state").append(refresh);
   }
@@ -2819,13 +2822,22 @@ function renderStructure(details) {
     }
     const refresh = document.createElement("button");
     refresh.className = "secondary-btn";
-    refresh.textContent = "刷新";
+    refresh.innerHTML = `${refreshIcon}<span>刷新</span>`;
     refresh.dataset.refreshStructure = "";
     refresh.addEventListener("click", () => {
       const tab = activeTab();
       if (tab && !tab.running && !tab.confirming) void inspectObject(object, { connectionId: object.connectionId || tab.connectionId, tab });
     });
     toolbar.append(refresh);
+    if (canViewObjectDdl(object)) {
+      const ddl = document.createElement("button");
+      ddl.type = "button";
+      ddl.className = "secondary-btn";
+      ddl.dataset.viewDdl = "";
+      ddl.textContent = "查看 DDL";
+      ddl.addEventListener("click", () => { const tab = activeTab(); if (tab) void showObjectDdl(object, tab); });
+      toolbar.append(ddl);
+    }
     const sql = document.createElement("button");
     sql.className = "quiet-btn";
     sql.textContent = "打开 SQL 编辑器";
@@ -3056,6 +3068,37 @@ function contextObjectDdl(object, details, driver) {
   }
   if (object.kind === "sequence" && driver === "postgres") return `CREATE SEQUENCE ${qualified};`;
   return `-- DDL for ${object.qualifiedName || `${object.schema}.${object.name}`} is not available from this driver.`;
+}
+
+async function showObjectDdl(object, tab) {
+  if (!canViewObjectDdl(object) || !tab?.connectionId) return;
+  const connectionId = object.connectionId || tab.connectionId;
+  const driver = driverForConnection(connectionId);
+  const dialog = document.createElement('dialog');
+  dialog.className = 'ddl-view-dialog';
+  dialog.setAttribute('aria-labelledby', 'ddlViewTitle');
+  dialog.innerHTML = `<div class="dialog-header"><div><h2 id="ddlViewTitle">查看 DDL</h2><p class="ddl-view-target"></p></div><button type="button" class="icon-btn ddl-view-close" aria-label="关闭">×</button></div><pre class="definition selectable-text ddl-view-code" aria-live="polite">正在读取 DDL…</pre><div class="dialog-actions"><button type="button" class="secondary-btn ddl-view-copy" disabled>复制 DDL</button><button type="button" class="primary-btn ddl-view-done">关闭</button></div>`;
+  dialog.querySelector('.ddl-view-target').textContent = [object.database || tabDatabase(tab), object.qualifiedName || `${object.schema}.${object.name}`].filter(Boolean).join(' · ');
+  const code = dialog.querySelector('.ddl-view-code');
+  const copy = dialog.querySelector('.ddl-view-copy');
+  for (const close of dialog.querySelectorAll('.ddl-view-close, .ddl-view-done')) close.addEventListener('click', () => dialog.close());
+  dialog.addEventListener('close', () => dialog.remove(), { once: true });
+  document.body.append(dialog);
+  dialog.showModal();
+  try {
+    const details = await call('get_object_details', { connectionId, objectId: object.id, kind: object.kind, database: object.database || tabDatabase(tab) });
+    if (!dialog.open) return;
+    const ddl = contextObjectDdl(object, details, driver);
+    if (!ddl || ddl.startsWith('-- DDL for ')) throw new Error('当前对象没有可用的 DDL 定义');
+    code.textContent = ddl;
+    copy.disabled = false;
+    copy.addEventListener('click', async () => {
+      try { await copyText(ddl); showToast('已复制 DDL'); }
+      catch (error) { showToast(`复制 DDL 失败：${errorText(error)}`, 'error'); }
+    });
+  } catch (error) {
+    if (dialog.open) { code.textContent = `读取 DDL 失败：${errorText(error)}`; code.classList.add('error'); }
+  }
 }
 
 function contextDatabaseDdl(target, driver) {
@@ -4505,7 +4548,7 @@ function shouldInspectJsonCell(cell) {
   const metadata = tab?.browse?.columns?.find(item => item.name === cell.column);
   const column = tab?.result?.columns?.[cell.columnIndex];
   const dataType = metadata?.dataType || (typeof column === 'object' ? column?.dataType : '') || '';
-  return Boolean(jsonCellInfo(displayed, dataType));
+  return Boolean(jsonCellInfo(displayed, dataType, { allowJavaLong: driverForTab(tab) === 'redis' }));
 }
 
 function getCellEditState(cell) {
@@ -4671,7 +4714,7 @@ function openCellInspector({ column, columnIndex, value, rowIndex, context = nul
   const displayedValue = hasDraft ? draftValue : value?.$dbStudio === "mysql-binary" ? cellText(value) : value;
   const columnMetadata = tab?.browse?.columns?.find((item) => item.name === column);
   const dataType = columnMetadata?.dataType || "";
-  const jsonInfo = jsonCellInfo(displayedValue, dataType);
+  const jsonInfo = jsonCellInfo(displayedValue, dataType, { allowJavaLong: driverForTab(tab) === 'redis' });
   state.cellInspector = { tab, column, columnIndex, value, rowIndex, context, capability, jsonInfo, jsonMode: 'pretty', jsonEditing: false, reading: false };
   refs.cellModal.classList.remove('cell-expanded');
   refs.cellModal.classList.toggle('cell-json-view', Boolean(jsonInfo));
@@ -4723,7 +4766,7 @@ function renderCellJsonPreview() {
   const isJson = inspector.jsonInfo.valid !== false;
   let source = inspector.jsonInfo.raw;
   refs.cellJsonFormatControls.hidden = !isJson;
-  refs.cellJsonCaption.textContent = isJson ? 'JSON 预览' : (source === '' ? '空字符串预览' : '文本预览');
+  refs.cellJsonCaption.textContent = isJson ? (inspector.jsonInfo.compatible ? '非标准 JSON，已兼容预览' : 'JSON 预览') : (source === '' ? '空字符串预览' : '文本预览');
   refs.editCellJson.textContent = isJson ? '编辑 JSON' : '编辑内容';
   if (isJson && inspector.jsonMode !== 'raw') {
     try { source = formatJsonSource(source, inspector.jsonMode === 'pretty'); }
@@ -4850,17 +4893,19 @@ function toggleCellJsonEditing() {
     refs.cellValue.select();
     return;
   }
-  let valid = true;
-  try { JSON.parse(refs.cellValue.value); }
+  let valid = true, compatible = false;
+  const source = inspectorSourceValue(inspector, refs.cellValue.value);
+  try { JSON.parse(source); }
   catch {
-    if (!inspector.capability.allowEmpty) {
+    compatible = Boolean(jsonCellInfo(source, '', { allowJavaLong: driverForTab(inspector.tab) === 'redis' })?.compatible);
+    if (!compatible && !inspector.capability.allowEmpty) {
       showToast("JSON 格式无效，请修正后再返回预览", "error");
       refs.cellValue.focus();
       return;
     }
-    valid = false;
+    valid = compatible;
   }
-  inspector.jsonInfo = { raw: inspectorSourceValue(inspector, refs.cellValue.value), valid };
+  inspector.jsonInfo = { raw: source, valid, ...(compatible ? { compatible: true } : {}) };
   inspector.jsonEditing = false;
   refs.cellValue.readOnly = true;
   refs.cellValue.hidden = true;
@@ -5944,6 +5989,10 @@ function bindEvents() {
     renderTabs();
     renderOutput();
     state.editor?.focus();
+  });
+  refs.viewTableDdl.addEventListener("click", () => {
+    const tab = activeTab();
+    if (tab?.browse) void showObjectDdl(tab.browse, tab);
   });
   refs.refreshTableData?.addEventListener("click", async () => {
     const tab = activeTab();

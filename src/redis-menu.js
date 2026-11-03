@@ -1,7 +1,7 @@
 import { redisKeyTypePresentation } from './redis-key-icons.js';
 const paths = {
   open: '<path d="M3 5h7l2 3h9v12H3z"/>', details: '<circle cx="12" cy="12" r="9"/><path d="M12 11v6m0-10v1"/>',
-  refresh: '<path d="M20 7v5h-5M4 17v-5h5M19 12a7 7 0 0 0-12-5l-3 3m1 2a7 7 0 0 0 12 5l3-3"/>',
+  refresh: '<path d="M20 7v5h-5M4 17v-5h5M5.1 7a8 8 0 0 1 13.2-2L20 7M4 17l1.7 2A8 8 0 0 0 18.9 17"/>',
   create: '<path d="M4 5h7l2 3h7v5M4 5v15h9m5-5v7m-4-3.5h8"/>',
   duplicate: '<rect x="8" y="8" width="12" height="13" rx="2"/><path d="M16 8V3H3v13h5"/>',
   copy: '<rect x="8" y="8" width="12" height="13" rx="2"/><path d="M16 8V3H3v13h5"/>',

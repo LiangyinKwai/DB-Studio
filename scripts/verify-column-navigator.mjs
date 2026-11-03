@@ -110,6 +110,29 @@ try {
   assert.equal(await page.evaluate(() => navigatorPanel.isOpen), true);
   await page.keyboard.press('Control+j');
   assert.equal(await page.evaluate(() => navigatorPanel.isOpen), false);
+  // Long selected values must scroll and stay visually inset from the cell's border.
+  const longValue = 'token_' + 'abcdefghijklmnopqrstuvwxyz0123456789'.repeat(8);
+  await page.evaluate(value => grid.setResult({ columns: ['api_token'], rows: [[value]] }), longValue);
+  await page.setViewportSize({ width: 1060, height: 720 });
+  for (const theme of ['dark', 'light']) {
+    await page.evaluate(theme => document.body.dataset.theme = theme, theme);
+    const cell = page.locator('.db-grid-cell').first();
+    await cell.click();
+    await cell.press('Enter');
+    const input = page.locator('.db-grid-edit-input');
+    await input.press('ControlOrMeta+a');
+    const geometry = await input.evaluate(node => {
+      const cell = node.closest('.db-grid-cell').getBoundingClientRect();
+      const editor = node.getBoundingClientRect();
+      return { left: editor.left - cell.left, right: cell.right - editor.right, selection: [node.selectionStart, node.selectionEnd], scrollWidth: node.scrollWidth, clientWidth: node.clientWidth };
+    });
+    assert.ok(geometry.left >= 10 && geometry.right >= 10, 'editor selection stays inset from both cell borders');
+    assert.deepEqual(geometry.selection, [0, longValue.length]);
+    assert.ok(geometry.scrollWidth > geometry.clientWidth, 'long content remains horizontally scrollable');
+    assert.equal(await input.inputValue(), longValue);
+    await input.press('Escape');
+    assert.equal(await cell.textContent(), longValue);
+  }
   assert.deepEqual(errors, []);
   console.log('Column navigation browser verification passed (100 columns, 400 rows, preserved edits/selections, 5 themes, narrow viewport).');
 } finally {

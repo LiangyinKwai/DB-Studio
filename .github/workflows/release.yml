@@ -65,23 +65,20 @@ jobs:
           gh release create "v$RELEASE_VERSION" "$dmg" \
             --target "$GITHUB_SHA" \
             --title "DB Studio v${RELEASE_VERSION}（未公证）" \
-            --notes '优化安装界面，增加拖拽指引及首次打开说明。此版本使用临时签名，尚未通过 Apple 公证；首次打开时 macOS 可能要求在隐私与安全性中确认。仅支持 Apple Silicon。'
-      - name: Verify new asset and remove the previous release
+            --notes '新增 DDL 查看与复制入口，统一刷新图标，优化长单元格编辑显示；Redis 兼容预览带 Java Long 后缀的数据。此版本使用临时签名，尚未通过 Apple 公证；首次打开时 macOS 可能要求在隐私与安全性中确认。仅支持 Apple Silicon。'
+      - name: Verify release asset
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           asset=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/v$RELEASE_VERSION" --jq '[.assets[] | select(.state == "uploaded" and (.name | endswith(".dmg")))] | length')
           if [ "$asset" != "1" ]; then
-            echo "New DMG was not found; the previous release will be retained." >&2
+            echo "New DMG was not found." >&2
             exit 1
           fi
           digest=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/v$RELEASE_VERSION" --jq '.assets[] | select(.state == "uploaded" and (.name | endswith(".dmg"))) | .digest')
           dmg="src-tauri/target/release/bundle/dmg/DB Studio_${RELEASE_VERSION}_aarch64.dmg"
           expected="sha256:$(shasum -a 256 "$dmg" | cut -d ' ' -f 1)"
           if [ "$digest" != "$expected" ]; then
-            echo "Uploaded DMG checksum could not be verified; the previous release will be retained." >&2
+            echo "Uploaded DMG checksum could not be verified." >&2
             exit 1
-          fi
-          if [ "$RELEASE_VERSION" = "0.1.2" ] && gh release view v0.1.1 >/dev/null 2>&1; then
-            gh release delete v0.1.1 --yes
           fi

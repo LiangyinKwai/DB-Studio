@@ -361,6 +361,7 @@ await check("Redis hash cell save uses CAS request and preserves connection scop
   await waitFor(() => page.locator("[data-redis-key='users:1']").count().then((count) => count === 1), "local Redis keys");
   await page.locator("[data-redis-key='users:1']").click();
   await waitFor(() => page.locator("#tableToolbarTitle").innerText().then((value) => value.trim() === "users:1"), "local Redis tab");
+  expect(await page.locator('#viewTableDdl').isHidden(), 'DDL button must not appear for Redis keys');
   expect(await page.locator("#queryConnection, #queryDatabase").count() === 0, "connection/database pickers are still present");
   await ensureConnection("redis-remote");
   await ensureConnection("redis-local");

@@ -22,5 +22,7 @@ test('JSON display formatting preserves numeric tokens and bounds pathological i
   const format = vm.runInNewContext(`(${fn})`);
   const source = '{"id":9007199254740993,"decimal":1.234567890123456789,"id":2,"text":"a \\n b"}';
   assert.equal(format(format(source, true), false), source);
+  const javaLong = '[{"id":9007199254740993123L,"text":"1L","n":-1L}]';
+  assert.equal(format(format(javaLong, true), false), javaLong);
   assert.throws(() => format('['.repeat(40000) + '0' + ']'.repeat(40000), true), /保留完整原文/);
 });
