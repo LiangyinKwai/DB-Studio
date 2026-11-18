@@ -4,11 +4,13 @@ import { orderedObjectGroups, setTreeRowExpanded, syncTreeToggle } from '../src/
 
 test('schema group order is independent of the first alphabetically named object', () => {
   const sequence = { kind: 'sequence', name: 'a_id_seq' };
-  const objects = [sequence, { kind: 'view', name: 'b_view' }, { kind: 'table', name: 'orders' }, { kind: 'table', name: 'users' }, { kind: 'function', name: 'f' }];
+  const procedure = { kind: 'procedure', name: 'f' };
+  const objects = [sequence, procedure, { kind: 'view', name: 'b_view' }, { kind: 'table', name: 'orders' }, { kind: 'table', name: 'users' }, { kind: 'function', name: 'f' }];
   const groups = orderedObjectGroups(objects);
-  assert.deepEqual(groups.map(([kind]) => kind), ['table', 'view', 'sequence', 'function']);
+  assert.deepEqual(groups.map(([kind]) => kind), ['table', 'view', 'routine', 'sequence']);
   assert.deepEqual(groups[0][1].map(item => item.name), ['orders', 'users']);
   assert.equal(objects[0], sequence);
+  assert.deepEqual(groups[2][1].map(item => item.kind), ['function', 'procedure']);
   assert.deepEqual(orderedObjectGroups([...objects].reverse()).map(([kind]) => kind), groups.map(([kind]) => kind));
 });
 

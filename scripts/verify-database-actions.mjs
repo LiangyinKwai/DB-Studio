@@ -2,7 +2,7 @@ import { createServer } from "node:http";
 import { createReadStream, existsSync, mkdirSync, statSync, writeFileSync } from "node:fs";
 import { extname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { chromium } from "./playwright-import.mjs";
+import { chromium, revealObject } from "./playwright-import.mjs";
 import { chooseAppSelect } from "./app-select-driver.mjs";
 import { createWorkspaceFixture } from "./fixtures/workspace-fixture.mjs";
 
@@ -167,6 +167,7 @@ try {
   await noteField.fill('id');
   expect(await designer.getByRole('button', { name: '保存…', exact: true }).isDisabled(), 'duplicate columns accepted');
   await noteField.fill('note');
+  await chooseAppSelect(designer.locator('[data-default-mode]').nth(1), 'expression');
   await designer.locator('[data-field-row="1"][data-field="defaultValue"]').fill("'draft'");
   await designer.locator('[data-field-row="1"][data-field="comment"]').fill('说明');
   await page.screenshot({ path: resolve(evidence, 'new-table-fields.png') });
@@ -183,7 +184,7 @@ try {
   await designer.getByRole('button', { name: '保存…', exact: true }).click();
   expect(await nameField.inputValue() === 'items"new', 'returning to save lost the name');
   expect(fixture.callsFor('execute_mutation').length === beforeTable, 'saving draft executed SQL before final confirmation');
-  for (const theme of ['dark', 'light', 'ocean', 'forest', 'contrast']) {
+  for (const theme of ['dark', 'light']) {
     await page.evaluate(theme => { document.body.dataset.theme = theme; }, theme);
     await designer.screenshot({ path: resolve(evidence, `save-table-${theme}.png`) });
   }
@@ -278,6 +279,7 @@ try {
   if (!await warehouse.evaluate(node => node.open)) await warehouse.locator(':scope > summary [data-tree-toggle]').click();
   await openMenu('warehouse'); await action('refresh-database').click();
   const itemRow = warehouse.locator('.tree-object[data-object-id]').filter({ hasText: 'items' }).first();
+  await revealObject(itemRow);
   await itemRow.locator('.object-main').dblclick();
   await page.locator('#viewTableDdl').click();
   const ddlDialog = page.locator('.ddl-view-dialog');

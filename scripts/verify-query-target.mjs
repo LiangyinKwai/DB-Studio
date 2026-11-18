@@ -2,7 +2,7 @@ import { createServer } from "node:http";
 import { createReadStream, existsSync, mkdirSync, statSync } from "node:fs";
 import { extname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { chromium } from "./playwright-import.mjs";
+import { chromium, revealObject } from "./playwright-import.mjs";
 import { createWorkspaceFixture } from "./fixtures/workspace-fixture.mjs";
 
 // Fixture data verifies visual states, not database runtime behavior.
@@ -138,7 +138,7 @@ try {
   expect(await page.locator("#queryConnection, #queryDatabase").count() === 0, "connection/database pickers still present");
   expect(await page.locator("#queryToolbar [aria-haspopup='listbox']").count() === 1, "toolbar should have only one schema selector");
   expect(await page.locator("#modeToggle").count() === 0, "duplicate toolbar write lock is still present");
-  expect(await page.locator("#modeBadge").isVisible(), "header mode control was removed");
+  expect(await page.locator("#modeBadge").count() === 0, "header still exposes the read-only switch");
   expect(await page.locator("#queryTargetDetail").isHidden(), "healthy queries still have a separate context row");
   expect((await schema.innerText()).includes("默认（public）"), "server default not visible");
   const firstId = await page.locator(".query-tab.active").getAttribute("data-tab-id");
@@ -224,6 +224,7 @@ try {
   // without changing its connection/database or carrying old editable results.
   const publicSchema = stageDatabase.locator(".tree-schema[data-schema='public']");
   if (await publicSchema.getAttribute("open") === null) await publicSchema.locator(" > summary [data-tree-toggle]").click();
+  await revealObject(page.locator("[data-object-id='public.orders']"));
   await page.locator("[data-object-id='public.orders'] .object-open").click();
   await page.locator("#resultGrid .db-grid-cell").first().waitFor();
   expect(await page.locator("#queryTargetBar").isHidden(), "table view still has a separate target panel");
@@ -237,12 +238,13 @@ try {
   expect(await schema.getAttribute("value") === "public" && await schema.isEnabled(), "table editor schema not inherited/editable");
   const detached = await page.evaluate((id) => JSON.parse(localStorage.getItem("db-studio.workspace-tabs.v2")).find((tab) => tab.id === id), queryId);
   expect(!detached.browse && !detached.openedObject && !detached.openedObjectView && detached.tableView === false, "generic query retained table identity or pagination");
+  await revealObject(page.locator("[data-object-id='public.orders']"));
   await page.locator("[data-object-id='public.orders'] .object-open").click();
   expect(await page.locator("#tableToolbar").isVisible(), "opening SQL replaced the table browser");
   expect(await page.locator(".query-tab.active").getAttribute("data-tab-id") === tableId &&
     await page.locator(".query-tab").count() === tabsBeforeSql + 1, "opening a table reused the SQL query or created a duplicate data tab");
   await page.locator(`[data-tab-id='${queryId}'] .tab-select`).click();
-  expect(await page.locator("#pageControls").isHidden() && await page.locator("#structureTab").isEnabled(), "query paging or structure entry incorrect");
+  expect(await page.locator("#pageControls").isHidden() && await page.locator("#structureTab").isHidden(), "a generic query showed paging or a structure tab");
   await page.locator("[data-object-id='public.orders'] .object-main").click();
   expect(await page.locator(".query-tab.active").getAttribute("data-tab-id") === tableId,
     "single-clicking an opened table did not return to its existing data tab");
@@ -251,7 +253,7 @@ try {
   await page.locator("body.structure-only-mode").waitFor();
   expect(await page.locator(".query-tab.active").getAttribute("data-tab-id") !== queryId, "inspecting a table attached its structure to the generic query");
   await page.locator(`[data-tab-id='${queryId}'] .tab-select`).click();
-  expect(await page.locator("#structureTab").isEnabled() && await page.locator("#querySchema").isEnabled(), "generic query lost its structure entry or became table-bound");
+  expect(await page.locator("#structureTab").isHidden() && await page.locator("#querySchema").isEnabled(), "generic query gained a structure tab or became table-bound");
   await selectSchema("analytics");
   const fromTable = await execute("SELECT * FROM events;");
   expect(fromTable.database === "app_stage" && fromTable.connectionId === "conn-stage" && fromTable.schema === "analytics", "table editor schema switch changed fixed database");
@@ -335,7 +337,7 @@ try {
   await page.locator("#addQueryTab").click();
   expect(await menu.isHidden(), "new tab retained previous schema menu");
   await selectSchema("upsell");
-  for (const theme of ["dark", "light", "ocean", "forest", "contrast"]) {
+  for (const theme of ["dark", "light"]) {
     await page.locator("#themeButton").click();
     await page.locator(`[data-theme-option='${theme}']`).click();
     for (const width of [1440, 1060]) {

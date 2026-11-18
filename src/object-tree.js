@@ -1,13 +1,23 @@
-const kindOrder = new Map(['table', 'partitioned_table', 'foreign_table', 'view', 'materialized_view', 'sequence', 'function', 'procedure'].map((kind, index) => [kind, index]));
+const kindOrder = new Map(['table', 'partitioned_table', 'foreign_table', 'view', 'materialized_view', 'routine', 'event', 'sequence'].map((kind, index) => [kind, index]));
+const emptyKinds = {
+  postgres: ['table', 'view', 'materialized_view', 'routine'],
+  mysql: ['table', 'view', 'routine', 'event'],
+};
+
+export function isRoutine(kind) {
+  return kind === 'function' || kind === 'procedure';
+}
 
 // Catalog rows are ordered by object name. Group order must not depend on
 // which kind happens to own the alphabetically first object in a schema.
-export function orderedObjectGroups(objects) {
-  const groups = new Map();
+export function orderedObjectGroups(objects, { driver, searching = false } = {}) {
+  const groups = new Map((searching ? [] : emptyKinds[driver] || []).map(kind => [kind, []]));
   for (const object of objects) {
-    if (!groups.has(object.kind)) groups.set(object.kind, []);
-    groups.get(object.kind).push(object);
+    const group = isRoutine(object.kind) ? 'routine' : object.kind;
+    if (!groups.has(group)) groups.set(group, []);
+    groups.get(group).push(object);
   }
+  groups.get('routine')?.sort((left, right) => Number(left.kind === 'procedure') - Number(right.kind === 'procedure'));
   return [...groups].sort(([left], [right]) => (kindOrder.get(left) ?? 99) - (kindOrder.get(right) ?? 99) || String(left).localeCompare(String(right)));
 }
 

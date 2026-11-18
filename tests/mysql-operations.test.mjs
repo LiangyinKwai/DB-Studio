@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mysqlColumns, mysqlDdlTargets, mysqlDefaultClause } from '../src/mysql-ddl.js';
+import { mysqlColumns, mysqlDdlTargets, mysqlDefaultClause, mysqlCommentLiteral } from '../src/mysql-ddl.js';
 import { buildCreateTablePlan, buildStructurePlan, createStructureDraft, structureFingerprint } from '../src/structure-editor.js';
 import { sqlTypedValueLiteral, buildCellUpdateSql, getCellEditCapability } from '../src/cell-edit.js';
 import { buildImportSql, createExport, readTransferFile } from '../src/data-transfer.js';
@@ -44,6 +44,76 @@ test('MySQL NO_BACKSLASH_ESCAPES retains native literals and quotes comments cor
   assert.equal(mysqlColumns(native).get('name').defaultValue, "'path\\'");
   const rows = createStructureDraft(native); rows[1].comment = "path\\'data";
   assert.ok(buildStructurePlan(native, rows, 'mysql').sql.includes("DEFAULT 'path\\' COMMENT 'path\\''data'"));
+});
+
+test('MySQL reorders existing columns with their complete native definitions', () => {
+  const metadata = { ...details, definition: details.definition.replace('STORED INVISIBLE', 'STORED /*!80023 INVISIBLE */') };
+  const [id, name, updated, computed] = createStructureDraft(metadata);
+  const { sql, changed, dropped } = buildStructurePlan(metadata, [computed, id, updated, name], 'mysql');
+  assert.equal(changed, 2);
+  assert.equal(dropped, 0);
+  assert.match(sql, /MODIFY COLUMN `computed` int GENERATED ALWAYS AS \(\(`id` % 97\)\) STORED \/\*!80023 INVISIBLE \*\/ FIRST/);
+  assert.match(sql, /MODIFY COLUMN `updated` timestamp\(6\) NOT NULL DEFAULT CURRENT_TIMESTAMP\(6\) ON UPDATE CURRENT_TIMESTAMP\(6\) AFTER `id`/);
+  assert.equal(buildStructurePlan(metadata, [id, name, updated, computed], 'mysql').sql, '');
+});
+
+test('MySQL combines ordering with renamed anchors, added columns and removed columns', () => {
+  const [id, name, updated, computed] = createStructureDraft(details);
+  name.name = 'label';
+  updated.removed = true;
+  const added = { name: 'note', dataType: 'text', nullable: true, defaultValue: '', comment: '' };
+  const { sql } = buildStructurePlan(details, [name, added, computed, updated, id], 'mysql');
+  assert.match(sql, /CHANGE COLUMN `name` `label` [^\n]+ COMMENT 'keep' FIRST/);
+  assert.match(sql, /ADD COLUMN `note` text AFTER `label`/);
+  assert.match(sql, /MODIFY COLUMN `computed` [^\n]+ AFTER `note`/);
+  assert.match(sql, /DROP COLUMN `updated`/);
+});
+
+test('MySQL changing a default during a move keeps versioned visibility separate', () => {
+  const metadata = { ...details, definition: details.definition.replace("COMMENT 'keep'", '/*!80023 INVISIBLE */') };
+  const [id, name, ...rest] = createStructureDraft(metadata);
+  assert.equal(name.defaultValue, "'draft'");
+  name.defaultValue = "'ready'";
+  const { sql } = buildStructurePlan(metadata, [name, id, ...rest], 'mysql');
+  assert.match(sql, /COLLATE utf8mb4_bin NOT NULL \/\*!80023 INVISIBLE \*\/ DEFAULT 'ready' FIRST/);
+});
+
+test('MySQL comment plans bind their exact backslash mode and keep real line endings', () => {
+  const comment = "中文\r\nnext\n  trailing spaces  \\n path\\'";
+  for (const mode of ['', 'STRICT_TRANS_TABLES,NO_BACKSLASH_ESCAPES']) {
+    const noBackslash = mode.includes('NO_BACKSLASH_ESCAPES');
+    const rows = [{ name: 'note', dataType: 'text', nullable: true, defaultValue: '', comment }];
+    const create = buildCreateTablePlan({ schema: 'app', name: 'notes', mysql: { sqlMode: mode } }, rows, 'mysql');
+    assert.equal(create.expectedMysqlNoBackslashEscapes, noBackslash);
+    assert.ok(create.sql.includes(`COMMENT ${mysqlCommentLiteral(comment, mode)}`));
+    assert.ok(create.sql.includes('中文\r\nnext\n  trailing spaces  '));
+    const editDetails = { ...details, mysql: { ...details.mysql, sqlMode: mode } };
+    const draft = createStructureDraft(editDetails);
+    draft.push({ name: 'new_note', dataType: 'text', nullable: true, defaultValue: '', comment });
+    draft[1].comment = comment;
+    const alter = buildStructurePlan(editDetails, draft, 'mysql');
+    assert.equal(alter.expectedMysqlNoBackslashEscapes, noBackslash);
+    assert.equal(alter.sql.split(`COMMENT ${mysqlCommentLiteral(comment, mode)}`).length - 1, 2);
+  }
+  assert.throws(() => mysqlCommentLiteral('path\\', undefined), /SQL_MODE/);
+  assert.equal(mysqlCommentLiteral("it's\r\n原文", undefined), "'it''s\r\n原文'");
+  assert.throws(() => mysqlColumns({ ...details, mysql: { engine: 'InnoDB' } }), /SQL_MODE/);
+});
+
+test('MySQL comments reject lossy metadata before CREATE, ADD and MODIFY in every SQL mode', () => {
+  for (const mode of ['', 'NO_BACKSLASH_ESCAPES', 'STRICT_TRANS_TABLES']) {
+    assert.equal(mysqlCommentLiteral('界'.repeat(1024), mode), `'${'界'.repeat(1024)}'`);
+    assert.equal(mysqlCommentLiteral("'".repeat(1024), mode), `'${"''".repeat(1024)}'`);
+    for (const invalid of ['x'.repeat(1025), '界'.repeat(1025), 'x'.repeat(1023) + '\r\n', 'emoji😀', '\ud800', '\0']) {
+      assert.throws(() => mysqlCommentLiteral(invalid, mode), /备注/);
+      assert.throws(() => buildCreateTablePlan({ schema: 'app', name: 'notes', mysql: { sqlMode: mode } }, [{ name: 'note', dataType: 'text', nullable: true, defaultValue: '', comment: invalid }], 'mysql'), /备注/);
+      const editDetails = { ...details, mysql: { ...details.mysql, sqlMode: mode } };
+      const draft = createStructureDraft(editDetails); draft[1].comment = invalid;
+      assert.throws(() => buildStructurePlan(editDetails, draft, 'mysql'), /备注/);
+      const added = createStructureDraft(editDetails); added.push({ name: 'new_note', dataType: 'text', nullable: true, defaultValue: '', comment: invalid });
+      assert.throws(() => buildStructurePlan(editDetails, added, 'mysql'), /备注/);
+    }
+  }
 });
 
 test('MySQL defaults distinguish scalar and expression-only types and support smaller AUTO_INCREMENT types', () => {

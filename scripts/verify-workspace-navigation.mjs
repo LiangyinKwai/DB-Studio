@@ -56,7 +56,7 @@ try {
   await page.locator('[data-connection-id="conn-dev"]').click();
   await page.locator('.tree-database[data-database="app"] > summary [data-tree-toggle]').click();
   await page.locator('.tree-schema[data-schema="public"] > summary [data-tree-toggle]').click();
-  await page.locator('[data-object-id="public.orders"]').waitFor();
+  await page.locator('[data-object-id="public.orders"]').waitFor({ state: 'attached' });
   const beforeSearch = calls.length;
   await page.locator('#openObjectQuick').click(); await page.getByRole('combobox', { name: '搜索对象', exact: true }).fill('db:app orders');
   assert.equal(calls.length, beforeSearch, 'searching cache must not run a query/catalog scan');
@@ -104,14 +104,14 @@ try {
   assert.ok(await page.locator('#tableTransactionActions').isHidden());
   // Native query columns are strings; use table metadata for type search.
   await page.locator('[data-connection-id="mysql-ux"]').click(); await page.locator('.mysql-database[data-database="warehouse"] > summary [data-tree-toggle]').click();
-  await page.locator('[data-object-id="warehouse.wide_table"]').waitFor(); await quickOpen('conn:MySQL wide_table');
+  await page.locator('[data-object-id="warehouse.wide_table"]').waitFor({ state: 'attached' }); await quickOpen('conn:MySQL wide_table');
   await page.locator('#resultGrid [data-grid-cell]').first().waitFor();
   assert.ok(await page.locator('#beginTransaction').isVisible(), 'MySQL table view must expose transactions');
   await page.keyboard.press('Meta+j'); await page.getByRole('combobox', { name: '搜索列', exact: true }).fill('decimal');
   await page.getByRole('combobox', { name: '搜索列', exact: true }).press('Enter');
   assert.equal(await page.evaluate(() => document.activeElement.dataset.columnIndex), '70');
   await page.locator('#beginTransaction').click(); await until(() => page.locator('#commitTransaction').isVisible());
-  for (const theme of ['dark', 'light', 'ocean', 'forest', 'contrast']) {
+  for (const theme of ['dark', 'light']) {
     await page.locator('#themeButton').click(); await page.locator(`[data-theme-option="${theme}"]`).click();
     await page.evaluate(() => Promise.all([...document.querySelectorAll('#objectTree .selected')].flatMap(node => node.getAnimations().map(animation => animation.finished.catch(() => {})))));
     for (const width of [1440, 1060]) {

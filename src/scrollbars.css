@@ -27,11 +27,6 @@ body textarea {
   --scrollbar-track: var(--input-bg);
 }
 
-body[data-theme="contrast"] {
-  --scrollbar-thumb: var(--app-muted);
-  --scrollbar-thumb-hover: var(--app-text);
-}
-
 /* Query tabs intentionally retain their existing hidden horizontal scrollbar. */
 body,
 body *:not(.query-tabs) {

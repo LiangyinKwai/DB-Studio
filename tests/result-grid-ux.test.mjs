@@ -118,6 +118,15 @@ test('clicking a resize handle retains its DOM identity for double-click autofit
   assert.deepEqual(grid.widths, [120, 200]);
 });
 
+test('auto-fit counts CJK characters as double-width cells', () => {
+  const grid = gridState();
+  grid.rows = [[1, '保留TTL的值'], [2, 'abcdefg']];
+  const widths = [];
+  grid.setColumnWidth = (index, width) => widths.push(width);
+  grid.fitColumn(1);
+  assert.deepEqual(widths, [11 * 7 + 28]);
+});
+
 test('copying prioritizes selected rows and preserves explicit native text selections', () => {
   const previousWindow = globalThis.window;
   try {

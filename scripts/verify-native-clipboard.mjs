@@ -3,7 +3,7 @@ import { createServer } from 'node:http';
 import { createReadStream, existsSync, statSync, mkdirSync } from 'node:fs';
 import { extname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { chromium } from './playwright-import.mjs';
+import { chromium, revealObject } from './playwright-import.mjs';
 import { createWorkspaceFixture } from './fixtures/workspace-fixture.mjs';
 
 const root = resolve(fileURLToPath(new URL('..', import.meta.url))), dist = resolve(root, 'dist');
@@ -51,6 +51,7 @@ try {
   await page.locator('.tree-database[data-database="app"] > summary [data-tree-toggle]').click();
   await page.locator('.tree-schema[data-schema="public"] > summary [data-tree-toggle]').click();
   const object = page.locator('[data-object-id="public.orders"]');
+  await revealObject(object);
   await object.click({ button: 'right' });
   await page.locator('[data-context-action="copy-ddl"]').click();
   await page.waitForFunction(() => document.querySelector('#toast').textContent === '已复制 DDL');
@@ -61,7 +62,9 @@ try {
   const refreshPaths = await page.evaluate(() => ['#refreshSchema', '#refreshQueryTarget', '#refreshTableData', '[data-context-action="refresh-object"]'].map(selector => [...document.querySelectorAll(`${selector} svg path`)].map(path => path.getAttribute('d')).join('')));
   assert.ok(refreshPaths.every(path => path === refreshPaths[0] && path.length > 0), 'refresh icons differ');
   const beforeDdl = fixture.callsFor('execute_query').length;
-  assert.equal(await page.locator('#viewTableDdl svg').count(), 1);
+  assert.equal(await page.locator('#viewTableDdl .tab-glyph').innerText(), 'DDL');
+  assert.equal(await page.locator('#openTableSql .tab-glyph').innerText(), 'SQL');
+  assert.equal(await page.locator('#openTableSql').getAttribute('aria-label'), '打开 SQL 编辑器');
   assert.equal(await page.locator('#viewTableDdl').getAttribute('aria-label'), '查看当前对象的 DDL');
   const ddlButtonBox = await page.locator('#viewTableDdl').boundingBox();
   const sqlButtonBox = await page.locator('#openTableSql').boundingBox();
@@ -70,6 +73,12 @@ try {
   assert.ok(sqlButtonBox.x - (ddlButtonBox.x + ddlButtonBox.width) >= 3 && sqlButtonBox.x - (ddlButtonBox.x + ddlButtonBox.width) <= 6, 'DDL and SQL button spacing');
   await page.locator('#viewTableDdl').click();
   const dialog = page.locator('.ddl-view-dialog');
+  assert.equal(await dialog.evaluate(node => node === document.activeElement), true, 'DDL opens without focusing its close button');
+  assert.equal(await dialog.locator('.ddl-view-close').evaluate(node => getComputedStyle(node).outlineStyle), 'none');
+  assert.equal(await dialog.evaluate(node => getComputedStyle(node).outlineStyle), 'none');
+  await page.keyboard.press('Tab');
+  assert.equal(await dialog.locator('.ddl-view-close').evaluate(node => node === document.activeElement), true, 'keyboard can reach DDL close');
+  assert.equal(await dialog.locator('.ddl-view-close').evaluate(node => getComputedStyle(node).outlineStyle), 'solid', 'keyboard focus must remain visible');
   assert.ok(await dialog.locator('.ddl-view-copy').isDisabled());
   await dialog.locator('.ddl-view-code').filter({ hasText: 'CREATE TABLE "public"."orders"' }).waitFor();
   const ddlDisplay = await dialog.locator('.ddl-view-code').evaluate(node => ({ text: [...node.querySelectorAll('.cm-line')].map(line => line.textContent).join('\n'), width: node.getBoundingClientRect().width, parentWidth: node.parentElement.getBoundingClientRect().width }));
@@ -104,8 +113,9 @@ try {
   await page.mouse.click(5, 5);
   await dialog.waitFor({ state: 'hidden' });
   assert.equal(await dialog.isVisible(), false, 'clicking the backdrop should close the DDL dialog');
+  const dataTabId = await page.locator('.query-tab.active').getAttribute('data-tab-id');
   await page.locator('#structureTab').click();
-  assert.equal(await page.locator('#viewTableDdl svg').count(), 1);
+  assert.equal(await page.locator('#viewTableDdl .tab-glyph').innerText(), 'DDL');
   assert.equal(await page.locator('[data-view-ddl]').count(), 0);
   assert.equal(await page.locator('#viewTableDdl').getAttribute('aria-label'), '查看当前对象的 DDL');
   await page.locator('#viewTableDdl').click();
@@ -120,7 +130,7 @@ try {
   assert.ok(await dialog.locator('.ddl-view-copy').isDisabled());
   await dialog.locator('.ddl-view-done').click();
   failDetails = false;
-  await page.locator('#resultTab').click();
+  await page.locator(`[data-tab-id="${dataTabId}"] .tab-select`).click();
   await page.locator('#resultMore').click(); await page.locator('#copyResults').click();
   await page.waitForFunction(() => document.querySelector('#toast').textContent.startsWith('已复制 500 行'));
   assert.ok(writes.at(-1).includes('value-1'));

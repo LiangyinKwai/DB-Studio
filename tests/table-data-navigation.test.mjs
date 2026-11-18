@@ -63,7 +63,7 @@ function pagingFixture({ confirm = async () => true, query } = {}) {
   const calls = [], messages = [];
   const context = vm.createContext({
     activeTab: () => active, cellWritePending: () => false,
-    confirmDiscardCellEdits: confirm, state: { editor: { setState() {} } },
+    state: { editor: { setState() {} } },
     resultGrid: { getViewState: () => ({ widths: [180], scrollLeft: 240, scrollTop: 900 }) },
     browseSql: browse => `OFFSET ${browse.page * browse.pageSize}`,
     setEditorValue: sql => { tab.sql = sql; }, renderOutput() {}, persistTabs() {},
@@ -72,6 +72,7 @@ function pagingFixture({ confirm = async () => true, query } = {}) {
       calls.push(options);
       assert.equal(options.preserveResult, true);
       assert.equal(options.pagingRequest, tab.paging);
+      if (!await confirm()) return false;
       if (query) return query(tab);
       tab.result = { ...result, rows: [[2]] };
       return true;
@@ -143,7 +144,7 @@ test('pending discard confirmation blocks duplicate navigation and declining pre
   assert.equal(tab.paging.page, 1);
   pending.resolve(false);
   await navigation;
-  assert.equal(calls.length, 0);
+  assert.equal(calls.length, 1);
   assert.equal(tab.browse.page, 0);
   assert.equal(tab.paging, null);
 });

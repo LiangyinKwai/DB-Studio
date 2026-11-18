@@ -93,7 +93,7 @@ try {
   await search.press('Enter');
   assert.equal(await page.evaluate(() => document.activeElement.dataset.selectColumn), '80');
   // All themes and small viewports keep the panel inside the visible window.
-  for (const theme of ['dark', 'light', 'ocean', 'forest', 'contrast']) {
+  for (const theme of ['dark', 'light']) {
     await page.evaluate(theme => document.body.dataset.theme = theme, theme);
     await page.locator('#open').click();
     await search.fill('field');

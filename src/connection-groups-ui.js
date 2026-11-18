@@ -65,15 +65,20 @@ export function createConnectionGroups({ list, button, getProfiles, onChange, on
   return {
     open,
     nameFor(id) { return store.snapshot().groups.find(g => g.id === store.groupFor(id))?.name || '未分组'; },
-    moveWith(source, target) { if (store.groupFor(source) !== store.groupFor(target)) store.move(source, store.groupFor(target)); },
+    groupFor: store.groupFor,
+    moveTo(id, group) {
+      if (store.groupFor(id) === group) return false;
+      store.move(id, group);
+      return true;
+    },
     render(profiles, renderCard, query) {
       const { groups, collapsed } = store.snapshot();
       if (!groups.length) return profiles.map(renderCard).join('');
       const searching = Boolean(query.trim());
       return [...groups, { id: '', name: '未分组' }].map(group => {
         const items = profiles.filter(p => store.groupFor(p.id) === group.id);
-        if (!items.length && (searching || !group.id)) return '';
-        return `<details class="connection-group" data-connection-group="${escape(group.id)}" data-searching="${searching}"${searching || !collapsed.includes(group.id) ? ' open' : ''}><summary><span class="connection-group-chevron" aria-hidden="true">›</span><span class="connection-group-name">${escape(group.name)}</span><small>${items.length}</small></summary><div class="connection-group-items">${items.length ? items.map(renderCard).join('') : '<p class="connection-group-empty">在「管理分组」中移入连接</p>'}</div></details>`;
+        if (!items.length && searching) return '';
+        return `<details class="connection-group" data-connection-group="${escape(group.id)}" data-searching="${searching}"${searching || !collapsed.includes(group.id) ? ' open' : ''}><summary><span class="connection-group-chevron" aria-hidden="true">›</span><span class="connection-group-name">${escape(group.name)}</span><small>${items.length}</small></summary><div class="connection-group-items">${items.length ? items.map(renderCard).join('') : '<p class="connection-group-empty">拖动连接到这里</p>'}</div></details>`;
       }).join('');
     },
   };

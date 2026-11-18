@@ -3,7 +3,7 @@ import { createServer } from "node:http";
 import { createReadStream, existsSync, statSync } from "node:fs";
 import { extname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { chromium } from "./playwright-import.mjs";
+import { chromium, revealObject } from "./playwright-import.mjs";
 import { createWorkspaceFixture } from "./fixtures/workspace-fixture.mjs";
 
 // Real browser controls with a catalog/IPC fixture; this does not claim a
@@ -62,7 +62,9 @@ page.on("pageerror", (error) => errors.push(error.message));
 const field = (name) => page.locator('[data-mutation-column="' + name + '"]');
 const open = async (table) => {
   await page.locator("#objectSearch").fill(table.name);
-  await page.locator('[data-object-id="' + table.id + '"] .object-main').dblclick();
+  const object = page.locator('[data-object-id="' + table.id + '"] .object-main');
+  await revealObject(object);
+  await object.dblclick();
   await page.locator("#newRow").waitFor({ state: "visible" });
   await page.waitForFunction(() => document.querySelector("#resultCount")?.textContent.trim() === "1");
   await page.locator("#newRow").click();

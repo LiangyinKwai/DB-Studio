@@ -1,135 +1,33 @@
-# DB Studio
+# Keybay
 
-第一版可运行的桌面数据库管理工具。
+[简体中文](#简体中文) · [English](#english)
 
-## 当前能力
+## 简体中文
 
-- 查询收藏库：收藏全部或选中的 SQL，命名、搜索、重命名、删除、JSON 导入导出，并从快速操作打开。最多 200 条，保留连接/数据库/Schema，在新标签打开；缺失原连接时保留草稿并阻止误用其他连接
-- 完整恢复最多 100 个 SQL 标签；后台结果按约 24 MiB 总内存预算回收，普通查询额外最多缓存 6 份；Redis Key 小预览不受份数限制，超预算释放后再次打开自动读取，保护活动结果、未保存编辑与未提交事务
-- MySQL 读取使用服务端单语句验证及只读事务，读写结果有完整流超时和返回上限；64 位整数以精确文本传递。行编辑/删除使用精确文本主键，断开时清理关联事务与 Redis 控制台
+Keybay 是一款桌面数据库客户端，让 PostgreSQL、MySQL 和 Redis 共用一个工作区。
 
-全局审查结论、剩余问题及各阶段验收标准见 [审查与路线](docs/AUDIT-ROADMAP.md)。
+- **连接管理**：连接可搜索、分组和拖动排序，也能拖入其他分组。连接与最近查询之间的分隔线可上下拖动，位置会自动保存。
+- **SQL 工作区**：支持语法高亮、自动补全、格式化、选中语句执行、查询历史和草稿恢复。
+- **数据表格**：支持分页、排序、筛选、行列选择和单元格编辑。PostgreSQL 和 MySQL 支持手动提交与回滚。
+- **表结构与 DDL**：按字段、索引、约束和定义浏览结构，支持查看和复制 DDL，以及可视化编辑字段。MySQL 支持调整字段位置并预览变更 SQL。
+- **Redis 控制台**：按数据库浏览 Key，查看类型和 TTL，编辑常见数据类型，并执行 Redis 命令。
+- **数据导入导出**：支持 SQL、CSV、JSON、TXT 和 XLSX，结构化导入支持预览和字段映射。
 
-- 桌面端复制 DDL、结果和单元格通过原生剪贴板通道写入，异步读取结构后不依赖浏览器复制权限；浏览器预览仍保留浏览器剪贴板及选择复制后备方式
-- 桌面包禁用WebView开发者工具与浏览器右键菜单；工作区、连接、SQL/文本输入、真实文字、列头和单元格各自提供应用操作菜单
-- 列头右键支持复制列名、复制列数据、选中整列、排序与筛选；列选择保留横向行分隔线
+**平台**　[GitHub Releases](https://github.com/LiangyinKwai/DB-Studio/releases) 提供 macOS Apple Silicon 安装包。Windows 和 Linux 的原生验证与打包待完成。
 
-- 对象树各层级使用一致的选中底色、7px圆角、34px行高与左侧标记；数据库、Schema、分组及Redis DB使用统一矢量展开箭头，仅箭头热区展开/折叠、无高亮底色；单击名称选中、双击展开/折叠，Esc清除选中且不残留焦点框；分组固定表/视图在前、序列在后
+**许可证**　[MIT](LICENSE)
 
-- 布局留白、按钮、表格容器不产生原生文字选区；真实结构字段/定义、SQL、输入框、日志和详情仍支持选择复制
+## English
 
-- 排序使用无外框的上下双按钮：上升序、下降序，再点当前方向恢复原始顺序；只有箭头按钮触发排序，列名用于选中整列（支持Shift连选及⌘/Ctrl多选）
-- 可写表的普通列和主键值，以及 Redis string/hash 值，支持在单元格内部直接编辑（双击、Enter、F2 或选中后输入）；单元格右键菜单提供查看详情、复制值与设为 NULL，草稿可转入详情弹窗继续修改。主键值保存使用修改前的完整主键定位，成功后更新同一行的后续草稿与行编辑定位；复合主键、MySQL 自增主键、PostgreSQL BY DEFAULT identity 均支持。主键不能设为 NULL，生成列与 PostgreSQL GENERATED ALWAYS identity 仍由数据库维护；重复值和外键冲突时保留草稿并展示数据库错误
-- 单元格详情提供 JSON 高亮、行号、节点折叠、查找、格式化/压缩/原文模式，以及自动换行和扩大阅读区。长文本默认阅读，可切回编辑；折叠后仍复制完整内容，原文保留大整数、精确小数和原始换行。大 JSON 默认原文，异常缩进增长退回完整原文；未保存修改关闭前确认，详情中支持 ⌘/Ctrl+S 保存
-- 长 Redis Key 可通过对象树行尾详情按钮、右键「查看 Key 详情」及已打开 Key 标题查看；完整名称可换行、查找、选择并原样复制，显示连接、DB、类型及已读取的 TTL，不为查看名称额外读取 Key 的值
-- 单元格可自由切换，每格独立保留未保存草稿（角标及数量提示），切回可继续；草稿随当前结果在标签之间保留，刷新/重新查询/关闭时确认放弃；异步保存绑定原始连接、数据库与行，事务回滚后清除未提交的显示值
-- 导出菜单支持 SQL（INSERT）、CSV、JSON、TXT（制表符）和 XLSX，遵循当前已加载数据的选中/筛选范围；SQL 导出跳过生成列，XLSX 保留长整数文本。导入菜单支持同样五种格式：SQL 打开为绑定原库的待执行脚本，CSV/JSON/TXT/XLSX 提供预览、字段映射、SQL 预览和确认新增记录，失败保留预览；XLSX 可选择工作表。当前文件上限 20 MiB、数据上限 10000 行/512 列，单次 INSERT 上限 8 MiB。CSV/TXT 使用未加引号的 `\N` 表示 NULL，空字符串保持独立
-- 表工具栏仅提供「保存」「取消修改」，无草稿时置灰；⌘/Ctrl+S 直接保存当前表全部单元格草稿（含筛选隐藏的修改），不跨标签。Enter/Esc 仍保存/取消当前格；批量保存校验全部草稿后逐格写入，遇错停止，成功项清除，失败和未执行项保留；若当前事务回滚则保留整批草稿
-- 建表 DDL 使用 PostgreSQL 精确目录元数据或 MySQL 原生 SHOW CREATE TABLE，包含字段、自增/序列、生成表达式、约束、索引及注释；缺失精确元数据、分区子表和继承表明确提示，不再输出不完整的简化定义
+Keybay is a desktop database client for PostgreSQL, MySQL, and Redis in one workspace.
 
-- 工作区统一视觉层级、留白与控件尺寸，五套主题保持一致；无连接/无查询时提供直接操作入口，浏览器预览明确标示运行模式
-- `⌘/Ctrl P` 快速操作：搜索常用操作、切换已打开标签与数据库连接、切换主题；连接列表和查询历史支持独立搜索
-- `⌘/Ctrl K` 快速打开已加载的表、视图、函数与 Redis Key，支持多词及 `db:`、`schema:`、`conn:`、`type:`、`col:` 限定；Enter 打开数据，Shift+Enter 查看结构。只查当前缓存，不会因打字而扫描远端。`⌘/Ctrl Shift K` 聚焦左侧对象树筛选
-- `⌘/Ctrl J` 搜索定位结果列：按名称、类型、列序号跳转宽表字段，保留筛选、排序、行列选择、复制导出范围和未保存草稿。工具栏也提供入口；同名列通过原始序号区分
-- 表标签显示未保存格数；底栏「待处理修改」集中定位各表草稿和未提交事务，只负责导航，不跨表保存。事务关闭最后一个数据标签后仍能从底栏恢复操作入口；MySQL/PostgreSQL 表视图均在结果底部提供事务状态和提交/回滚按钮。断开含活动事务的连接前提示回滚，断开进行中锁定查询、保存与事务操作
-- 快捷键帮助、静态按钮提示和命令列表按 macOS / Windows、Linux 显示 ⌘ / Ctrl；对象、列定位及快速操作可从单元格编辑中调用，输入法选字期间不抢占快捷键
-- 查询标签支持方向键切换；快捷键帮助可从底栏打开；`⌘/Ctrl Enter` 保留当前 SQL 选区后执行，避免编辑器默认快捷键插入空行
-- 结果网格支持 Shift 连续选行、空格选行、全选/取消、快捷复制、三态排序、双击自适应列宽，以及包含全局搜索的一键清除筛选
-- 连接测试与保存会锁定重复操作，失败保留配置与原因；SQL 文件在空标签打开或新建草稿，避免覆盖已有查询
+- **Connection management** — Search, group, and drag connections to reorder them or move them between groups. Resize the connection list and recent queries with a divider that remembers its position.
+- **SQL workspace** — Syntax highlighting, autocomplete, formatting, execution of selected statements, query history, and draft restoration.
+- **Data grid** — Browse pages, sort, filter, select rows and columns, and edit cells. PostgreSQL and MySQL support manual commits and rollbacks.
+- **Schema and DDL** — Browse fields, indexes, constraints, and definitions. View or copy DDL and edit fields visually. MySQL supports reordering fields with an SQL preview.
+- **Redis console** — Browse keys by database, inspect their types and TTL, edit common data types, and run Redis commands.
+- **Data transfer** — Import and export SQL, CSV, JSON, TXT, and XLSX. Preview structured imports and map fields before applying them.
 
-- 连接列表与连接状态展示
-- 可拖动三栏工作区、独立滚动区域、可调编辑器/结果区高度；连接/最近查询与数据库对象可在标题栏独立收起，原位置保留窄侧边标签，点击恢复并记住宽度及布局；底部状态栏提供重置布局
-- MySQL 对象树采用「实例 → 数据库 → 表」，不展示重复的 schema 层；数据库展开后按需加载表，视图、函数和存储过程单独分组，搜索支持表名/字段/备注，保留右键操作和按数据库隔离的查询绑定。三种驱动统一使用品牌矢量图标，导入/导出使用成对的图标下拉按钮
-- 连接实例支持拖动排序，放置位置显示指示线；也可聚焦实例后按 Alt+↑/↓ 调整顺序。顺序在本机保存，筛选列表中调整不会丢失隐藏实例，排序不触发连接或改变已有标签的绑定
-- PostgreSQL 数据库 → schema → 表、视图、序列、函数/过程目录，按需读取对象和结构
-- 数据库右键支持刷新、新建查询、新建数据库、PostgreSQL schema、新建表和复制 DDL；建库/建 schema 在名称对话框中直接点击「创建」，SQL 预览可展开，成功自动刷新目录，失败保留名称且防止重复提交。新建表先可视化编辑字段、主键、自增、默认值和备注，保存时再输入表名并查看完整 SQL，点击「创建表」后生效；返回编辑或创建失败保留草稿，成功刷新目录并打开结构
-- 表右键支持打开数据、查看结构、可视化编辑表结构、重命名、复制建表 SQL 和刷新；重命名在对话框内直接执行，更新原表标签绑定并刷新目录，不新增 SQL 标签；有未保存修改时先保存或取消。实例、数据库、schema、对象分组、表及 Redis DB/key 均提供刷新入口，树节点单击或右键有主题适配的选中效果，刷新后保留选中和分组展开状态
-- 结果区操作栏自适应宽度：刷新、增删行、保存/取消和导出以图标分组排列，复制与 CSV 导出收进下拉菜单，选中行后显示编辑/删除；分页固定在结果区底部，点击页码展开跳页输入框，保留筛选、复制、导出和全部行操作。表结构统一从「结构」页签进入
-- 单击表打开结构后，首次切换到数据页会自动查询第一页（每页 500 行），沿用原连接和数据库；之后在结构与数据间切换保留已加载结果。翻页保留列宽与横向位置，通过淡入淡出及细进度条提示加载；输入页码后按 Enter 或点击「跳转」直达指定页，失败或取消保留原页，空页明确提示。目前不执行总行数统计
-- Redis 单机连接：PING/状态、SCAN key 浏览（避免 KEYS）、字符串/哈希/列表/集合/有序集合/Stream 首屏查看、Redis 命令工作区，以及 Key 新建/重命名/删除和 string/hash 单元格编辑
-- Redis Key 以真实 TYPE 区分 String、Hash、List、Set、ZSet、Stream 文字标识，类型名称与颜色双重辨识；对象树、标签、快速打开及新建 Key 入口一致。当前 SCAN 页在同一 DB 连接批量读取最多 500 项类型，TYPE 权限不足或失败时保留 Key 列表并显示未知类型，不逐项读取值；手动展开或重新展开 DB 会刷新第一页及 DBSIZE 总数，加载期间保留列表，实例切换仍复用缓存；无法读取总数时明确显示已加载数量。类型标识按主题采用深浅配色，五主题文字对比度至少 4.5:1。Redis 隐藏不适用的「结构」页签，数据底部显示类型及读取时 TTL；重复打开同一连接/DB 的 Key 复用标签
-- Redis 命令工作区使用 CodeMirror：行号、语法高亮、命令及当前 DB 已加载 Key 的补全、光标行参数说明；Tab/Enter 接受补全，⌘/Ctrl+Enter 执行选中内容或完整命令。编辑区可调高度，执行后保留命令；结果独立展示状态、DB 和耗时，支持复用命令、复制结果及清空记录，适配五套主题和最小窗口
-- Redis DB 右键支持新建 String/Hash/List/Set/Sorted Set/Stream，可填写初始值和过期秒数；创建原子检查重名，不覆盖现有 Key。新查询和历史重开准确继承 Redis DB，不回落到连接默认 DB
-- PostgreSQL 新增行可输入手动/复合主键；区分 GENERATED ALWAYS 与 BY DEFAULT identity，生成列由数据库维护，全空表单可插入默认行
-- 已连接实例之间切换时，各自保留本次会话的数据库/schema/分组展开、选中节点和已加载目录；不会重新连接或重复扫描 Redis key。断开后重连、重启应用时清空展开状态，Redis 手动展开 DB 后才扫描 key；普通刷新保留展开状态。切换连接或返回查询标签会退出 Redis 控制台，控制台命令始终使用其显示的连接和 DB
-- CodeMirror PostgreSQL/MySQL SQL 编辑器：语法高亮、表名/字段/表别名补全（自动加载当前数据库目录）、搜索、格式化、多标签恢复；对象搜索支持列名和备注
-- 补全优先显示当前语句字段，标注类别、数据类型、所属表和备注，支持 Tab/Enter 接受；五套主题区分当前行、文本选择和同名字段，选中 SQL 后显示执行范围及选中字符/行数
-- 查询工具栏使用主题适配的 Schema 搜索菜单，支持键盘选择和长列表滚动，紧邻执行按钮；从 schema/表打开的窗口自动继承位置，连接和数据库固定绑定，详情可从底部提示或悬浮提示查看；只读切换统一放在顶部
-- SQL/Redis 查询与写入模式：默认可写，可点击锁定只读；PostgreSQL/MySQL 支持事务提交/回滚。MySQL 显式事务预先拒绝可能隐式提交的 DDL、CALL 和会话指令，拒绝时保留事务；运行错误回滚并同步界面状态。Redis 控制台使用独立会话，支持 SELECT、KEYS、MULTI/EXEC 等完整命令，结果集虚拟化
-- MySQL 脚本支持 DELIMITER 和函数/存储过程定义，逐条执行并完整消费多个结果集，显示最后一条语句的最后一个有效结果集；取消通过独立连接 KILL QUERY，防止阻塞在原查询连接上。执行 DDL 后刷新目录并使受影响表的旧编辑元数据失效
-- PostgreSQL 可写模式支持整段 SQL（如 ALTER TABLE + COMMENT），也可只执行选中部分；应用内确认框显示目标库及完整 SQL，批量执行显示最后一条语句的结果，消息页显示完成条数
-- 表头漏斗支持包含、相等、大小比较、NULL/空字符串筛选，多列条件与全局搜索叠加；仅作用于当前已加载结果/当前页，排序、选行、复制、导出和单元格编辑遵循筛选结果，切换标签保留筛选状态
-- 表结构可视化编辑：PostgreSQL 支持字段增删、改名、类型、非空、默认值、备注；MySQL 8+ 在取得原生 SHOW CREATE 元数据后支持相同的普通字段修改，保留字符集、排序规则、自增、生成表达式、自动更新时间等原生属性。提供实时 SQL 预览、绑定执行位置和应用确认，失败保留草稿，成功刷新结构及目录；自增/生成字段的特殊属性、索引/约束、跨字符与非字符类型的转换暂通过 SQL 编辑器修改
-- MySQL 导入/导出、行编辑和单元格编辑按字段类型处理布尔、BIT 和二进制数据；BLOB/BINARY 使用 `0x` 十六进制展示与文件交换，JSON 内保留带类型标签的对象。空间字段不直接写回内部字节，需用 MySQL 原生几何函数。无变化 UPDATE 仍按匹配行数判断，避免误报记录不存在。持久化实测方法及覆盖范围见 [MySQL 验证](docs/MYSQL-AUDIT.md)
-- 查询消息、表数据分页预览、结果集快速过滤、单元格详情、复制与原生 CSV/SQL 保存、取消查询和最近查询历史；Redis 编辑采用并发版本校验并保留 string TTL
-- 深色桌面端布局，已接入 Tauri 2 + Rust
-- 提供暗黑、白天、海蓝、森林和高对比五套预设主题，主题菜单不再要求手动调色
+**Platforms**　[GitHub Releases](https://github.com/LiangyinKwai/DB-Studio/releases) provides an installer for macOS on Apple Silicon. Native validation and packaging for Windows and Linux are pending.
 
-## 本地预览
-
-当前版本通过 Tauri 启动，不再使用 Python 本地 HTTP 后端。浏览器预览只验证前端工作区，不提供 Tauri 连接能力：
-
-```bash
-npm install
-npm run tauri dev
-```
-
-只做 macOS 桌面应用时，Xcode Command Line Tools 就够了；完整 Xcode 只在要做 iOS 目标或需要完整 Xcode 工具链时安装。当前机器已检测到 `/Library/Developer/CommandLineTools`。`cargo check` 不需要启动图形窗口。
-
-启动后点击“新建连接”即可选择 PostgreSQL、MySQL 或 Redis 驱动。PostgreSQL 需要初始连接库（默认 `postgres`），MySQL 可不填写默认数据库，连接后从左侧数据库树选择；Redis 使用 DB 编号（默认 0）。连接名称、主机、端口、数据库/Redis DB 和用户名保存在应用配置目录，密码只保存到系统钥匙串；编辑连接时密码留空会保留原钥匙串凭据。Redis 当前支持单机 TCP/TLS 连接和自定义 PEM CA，Cluster、Sentinel 尚未接入。应用不会创建或展示本地 SQLite 数据库。也可以通过环境变量自动注入一条临时 PostgreSQL 连接。
-
-远端模式示例（密码只通过环境变量传入）：
-
-```bash
-export DB_STUDIO_PGHOST=pgm-xxx.pg.rds.aliyuncs.com
-export PGPORT=5432 PGDATABASE=shopify PGUSER=shopify
-export PGPASSWORD='由密码管理器注入'
-export PGSSLMODE=disable
-npm run tauri dev
-```
-
-生成本地 macOS debug 应用：
-
-```bash
-npm run tauri -- build --debug --bundles app
-```
-
-生成带安装指引的 Apple Silicon release DMG：
-
-```bash
-npm run tauri -- build --bundles app
-python3 -m venv /tmp/db-studio-dmg-venv
-/tmp/db-studio-dmg-venv/bin/pip install 'dmgbuild==1.6.7' 'ds_store==1.3.3' 'mac_alias==2.2.3'
-DMGBUILD=/tmp/db-studio-dmg-venv/bin/dmgbuild npm run build:dmg
-```
-
-DMG 位于 `src-tauri/target/release/bundle/dmg/`。安装窗口使用 Finder 布局元数据，不依赖 CI 中启动 Finder。当前默认使用临时签名，未经过 Apple 公证；macOS 首次打开可能提示无法检查应用。正式分发需要 Developer ID 证书和 Apple 公证。
-
-## 后续实现边界
-
-- `src/`：查询界面、CodeMirror 编辑器和虚拟结果网格；查询文本会保存到本地，查询结果不会持久化
-- `src-tauri/`：Tauri 2 + Rust 核心目录，包含 PostgreSQL 目录/结构 API、读写事务、连接生命周期和钥匙串管理
-- Rust 侧已接入 PostgreSQL、MySQL 和 Redis；后续优先补事务一致性、PostgreSQL TLS、Redis 游标分页及 Cluster/Sentinel
-- 连接密码使用系统 Keychain/Credential Manager，不写入本地配置文件
-
-Redis TLS 和写入链路可以用临时本地服务验证：
-
-```bash
-sh scripts/verify-redis.sh
-```
-
-Redis 类型操作提供字段/成员增删、列表头尾插入、有序集合分数调整、Stream 追加和删除消息、有效期设置和永久保留。String/Hash/List 的值和 ZSet 的分数支持双击编辑，保存时原子校验原值；Set 显示成员，Stream 按消息 ID 展示字段。大集合预览最多 500 项，并提示是否为部分预览及可用总数。
-
-真实环境 UI 验证可显式指定 Redis 测试主机（当前测试桥为无密码 TCP 6379）；固定使用 DB 15，只操作当次 `dbstudio:ux:<时间戳>:` 前缀，保留测试数据：
-
-```bash
-cargo build --locked --manifest-path src-tauri/Cargo.toml --example redis_ux_bridge
-npm run build:frontend
-DB_STUDIO_REDIS_TEST_HOST=<测试主机> node scripts/verify-redis-types-live.mjs
-```
-
-Redis Key 右键菜单按查看、创建、修改、复制和删除分组，提供类型对应的成员入口、复制值与复制为新 Key（保留/移除有效期，目标重名不覆盖）。对象树支持 F2 重命名、⌘/Ctrl+C 复制名称、⌘/Ctrl+R 刷新和 Backspace/Delete 删除确认；只读写入项置灰。操作弹窗统一显示连接、DB 和完整 Key，支持已加载成员选择、有效期快捷按钮及键盘/空白区域关闭。
-
-Redis 对象树的 Key 搜索默认限定在所选 DB，也可从范围菜单选择「全部 DB」搜索当前实例。各 DB、各实例及全部 DB 的搜索词分别保留；切回单 DB 后恢复原搜索和展开状态。全局搜索最多并行扫描 3 个 DB，自动越过空 SCAN 页；达到单 DB 的批次、结果数量或时间预算后可点「继续搜索」。单 DB 权限错误不影响其他 DB。搜索采用 220ms 防抖并隔离过期请求，按名称包含查找，区分大小写，空格和 Redis MATCH 特殊字符按原字符处理。
-
-连接分组、Redis 搜索范围、Key 操作和数据导入等单选菜单统一使用主题适配的自定义下拉列表，支持搜索选项、方向键与 Enter 选择、Esc 关闭，以及禁用状态和长列表滚动。
+**License**　[MIT](LICENSE)

@@ -1,14 +1,31 @@
 import { createValueReader } from './value-reader.js';
 import { redisKeyTypePresentation } from './redis-key-icons.js';
 
-/** A cache-only name inspector. Opening it never fetches the key's value. */
-export function createRedisKeyDetails({ copyText, onError = console.error }) {
+/** Inspect the full name and refresh TTL without fetching the key's value. */
+export function createRedisKeyDetails({ copyText, readTtl, onError = console.error }) {
   const dialog = document.createElement('dialog'); dialog.className = 'redis-key-details';
+  dialog.tabIndex = -1;
   dialog.setAttribute('aria-labelledby', 'redis-key-detail-title');
   dialog.innerHTML = '<div class="dialog-header"><h2 id="redis-key-detail-title">Key 详情</h2><button class="icon-btn" type="button" aria-label="关闭 Key 详情">×</button></div><div class="key-context"></div><div class="value-reader"></div><div class="dialog-actions"><span class="toolbar-spacer"></span><button class="secondary-btn" type="button" data-key-copy>复制完整 Key</button></div>';
   document.body.append(dialog);
   const reader = createValueReader(dialog.querySelector('.value-reader'), { label: '完整 Redis Key', showLineNumbers: false });
   let current = null, previousFocus = null, backdropPointerDown = false;
+  let ttlRequest = 0;
+  const ttlLabel = ttl => ttl === -1 ? '无过期时间' : ttl === -2 ? 'Key 已不存在' : Number.isFinite(ttl) ? `TTL ${ttl} 秒（读取时）` : 'TTL 未读取';
+  async function refreshTtl(entry, status, retry) {
+    if (!readTtl) return;
+    const request = ++ttlRequest;
+    retry.hidden = true; status.textContent = 'TTL 读取中…'; status.title = '';
+    try {
+      const ttl = await readTtl(entry);
+      if (current !== entry || !dialog.open || request !== ttlRequest) return;
+      if (!Number.isInteger(ttl) || ttl < -2) throw new Error('返回的 TTL 无效');
+      entry.ttl = ttl; status.textContent = ttlLabel(ttl);
+    } catch (error) {
+      if (current !== entry || !dialog.open || request !== ttlRequest) return;
+      status.textContent = 'TTL 读取失败'; status.title = error?.message || String(error); retry.hidden = false;
+    }
+  }
   const close = () => { current = null; backdropPointerDown = false; dialog.close(); previousFocus?.isConnected && previousFocus.focus({ preventScroll: true }); reader.destroy(); };
   dialog.querySelector('[aria-label="关闭 Key 详情"]').addEventListener('click', close);
   dialog.addEventListener('cancel', event => { event.preventDefault(); close(); });
@@ -43,11 +60,15 @@ export function createRedisKeyDetails({ copyText, onError = console.error }) {
       const type = redisKeyTypePresentation(entry.type);
       const context = dialog.querySelector('.key-context'); context.replaceChildren();
       const icon = document.createElement('span'); icon.innerHTML = type.icon; context.append(icon);
-      const ttl = entry.ttl === -1 ? '无过期时间' : entry.ttl === -2 ? 'Key 已不存在' : Number.isFinite(entry.ttl) ? `TTL ${entry.ttl} 秒（读取时）` : 'TTL 未读取';
-      for (const value of [entry.connectionName, `DB ${entry.database}`, ttl]) { const span = document.createElement('span'); span.textContent = value; context.append(span); }
+      for (const value of [entry.connectionName, `DB ${entry.database}`]) { const span = document.createElement('span'); span.textContent = value; context.append(span); }
+      const status = document.createElement('span'); status.dataset.keyTtl = ''; status.setAttribute('role', 'status'); status.textContent = ttlLabel(entry.ttl); context.append(status);
+      const retry = document.createElement('button'); retry.type = 'button'; retry.className = 'quiet-btn'; retry.dataset.keyTtlRetry = ''; retry.textContent = '重试 TTL'; retry.hidden = true; context.append(retry);
+      const target = current;
+      retry.addEventListener('click', () => void refreshTtl(target, status, retry));
       dialog.querySelector('[data-key-copy]').textContent = '复制完整 Key';
       dialog.querySelector('[data-key-copy]').title = '';
-      reader.setWrap(true); reader.show(entry.key); dialog.showModal(); reader.measure(); reader.focus();
+      reader.setWrap(true); reader.show(entry.key); dialog.showModal(); dialog.focus({ preventScroll: true }); reader.measure();
+      void refreshTtl(target, status, retry);
     }, close,
   };
 }

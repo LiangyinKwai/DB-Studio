@@ -142,7 +142,7 @@ export async function createExport(data, format, { table, driver = 'postgres', t
   const name = `${title.replace(/[\\/:*?"<>|\x00-\x1f]/g, '_') || 'query'}.${format}`;
   if (format === 'xlsx') {
     const Excel = await excel(); const workbook = new Excel.Workbook();
-    workbook.creator = 'DB Studio'; const sheet = workbook.addWorksheet('Data');
+    workbook.creator = 'Keybay'; const sheet = workbook.addWorksheet('Data');
     const matrix = [data.columns, ...data.rows].map(row => row.map(value => {
       if (typeof value === 'number' && Number.isInteger(value) && !Number.isSafeInteger(value)) throw new Error('数据含不可靠的整数，请重新查询并以文本返回');
       const cell = value == null ? null : typeof value === 'object' ? scalarText(value) : value;
@@ -168,7 +168,7 @@ export async function createExport(data, format, { table, driver = 'postgres', t
     // Export may intentionally contain only selected columns. Missing required
     // columns are valid for an excerpt, and are checked when importing it.
     const exportTable = { ...table, columns: table.columns.map(field => ({ ...field, nullable: true })) };
-    contents = data.rows.length ? '-- DB Studio 数据导出；生成列由数据库维护。\n' + buildImportSql(data, mapping, exportTable, driver) : '-- 没有可导出的数据\n';
+    contents = data.rows.length ? '-- Keybay 数据导出；生成列由数据库维护。\n' + buildImportSql(data, mapping, exportTable, driver) : '-- 没有可导出的数据\n';
   } else contents = '\uFEFF' + encodeDelimited(data, format === 'txt' ? '\t' : ',');
   return { name, contents, mime: format === 'json' ? 'application/json;charset=utf-8' : 'text/plain;charset=utf-8' };
 }

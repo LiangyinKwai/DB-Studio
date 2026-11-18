@@ -3,7 +3,7 @@ import { createServer } from 'node:http';
 import { createReadStream, existsSync, mkdirSync, statSync } from 'node:fs';
 import { extname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { chromium } from './playwright-import.mjs';
+import { chromium, revealObject, setTabReadOnly } from './playwright-import.mjs';
 import { createWorkspaceFixture } from './fixtures/workspace-fixture.mjs';
 
 // UI/IPC contract with disposable fixture data; no user database is contacted.
@@ -65,6 +65,7 @@ try {
   await page.locator('[data-connection-id="conn-dev"]').click();
   await page.locator('.tree-database[data-database="app"] > summary [data-tree-toggle]').click();
   await page.locator('.tree-schema[data-schema="public"] > summary [data-tree-toggle]').click();
+  await revealObject(page.locator('[data-object-id="public.orders"] .object-main'));
   await page.locator('[data-object-id="public.orders"] .object-main').dblclick();
   await page.locator('#resultGrid [data-grid-cell]').first().waitFor();
   const originalTab = await page.locator('.query-tab.active').getAttribute('data-tab-id');
@@ -77,6 +78,15 @@ try {
   assert.ok(await page.locator('#confirmActionModal').isHidden());
   assert.deepEqual(rows.slice(0, 2), [['9007199254740993', 'paid', 'updated note'], ['2', 'processing', 'note B']]);
   await page.locator('#resultFilter').fill('');
+  await edit(0, 1, 'keep draft on cancel');
+  await page.locator('#refreshTableData').click();
+  assert.equal(await page.locator('#confirmActionTitle').innerText(), '执行 SQL？');
+  await page.locator('#confirmActionCancel').click();
+  await page.locator('#confirmActionModal').waitFor({ state: 'hidden' });
+  assert.ok(await page.locator('#saveTableChanges').isEnabled());
+  await page.locator('#resultGrid [data-position="0"][data-column-index="1"]').dblclick();
+  assert.equal(await page.locator('.db-grid-edit-input').inputValue(), 'keep draft on cancel');
+  await page.locator('#discardTableChanges').click();
   await edit(0, 1, 'cancel A'); await edit(1, 2, 'cancel B');
   await page.locator('#discardTableChanges').click();
   assert.ok(await page.locator('#saveTableChanges').isDisabled());
@@ -123,11 +133,11 @@ try {
   assert.equal(rows[0][1], 'held save');
   await page.locator(`.query-tab[data-tab-id="${originalTab}"] .tab-select`).click();
   assert.ok(await page.locator('#saveTableChanges').isEnabled());
-  await page.locator('#modeBadge').click();
+  await setTabReadOnly(page, true);
   assert.ok(await page.locator('#saveTableChanges').isDisabled());
   assert.ok(await page.locator('#discardTableChanges').isEnabled());
   await page.locator('#discardTableChanges').click();
-  await page.locator('#modeBadge').click();
+  await setTabReadOnly(page, false);
   const beforePrimary = writes.length, oldKey = rows[0][0], newKey = '9007199254740997';
   await edit(0, 0, newKey); await edit(0, 2, 'after primary key');
   await page.keyboard.press('Control+s'); await saved(beforePrimary + 2);

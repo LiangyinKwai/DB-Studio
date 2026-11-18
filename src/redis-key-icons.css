@@ -4,10 +4,11 @@
   --redis-type-color: var(--app-muted);
   display: inline-flex; align-items: center; justify-content: center;
   flex: none; width: 46px; height: 19px; border-radius: 5px;
-  font: 10px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+  font: 550 10px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
   letter-spacing: -.2px; white-space: nowrap;
   color: var(--redis-type-color);
-  background: color-mix(in srgb, var(--redis-type-color) 12%, var(--app-panel));
+  background-color: color-mix(in srgb, var(--redis-type-color) 12%, var(--app-panel));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--redis-type-color) 20%, transparent);
 }
 .redis-key-icon--string { --redis-type-color: #9ebcff; }
 .redis-key-icon--hash { --redis-type-color: #c6abff; }

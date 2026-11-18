@@ -26,11 +26,22 @@ function fixture(type, { driver = "mysql", row = ["001", "001", { ok: true }, tr
   };
   const calls = [];
   const confirmations = [];
+  const focused = [];
   const refs = {
-    mutationFields: { innerHTML: "", querySelectorAll: () => inputs },
+    mutationFields: {
+      innerHTML: "", querySelectorAll: () => inputs,
+      querySelector(selector) {
+        // Model only the input lookup used after the real renderer builds the
+        // dialog; disabled generated fields must not become the initial focus.
+        const tag = [...this.innerHTML.matchAll(/<input\b[^>]*>/g)]
+          .find(([html]) => !selector.includes(':not(:disabled)') || !/\sdisabled\b/.test(html))?.[0];
+        return tag ? { focus() { focused.push(tag.match(/data-mutation-column="([^"]+)"/)[1]); } } : null;
+      },
+    },
     mutationFeedback: { textContent: "", classList: { add() {}, remove() {} } },
     mutationTitle: {}, mutationHint: {}, applyMutation: {},
     mutationModal: { showModal() {}, close() {} },
+    cancelMutation: { focus() { focused.push('cancel'); } },
   };
   const sandbox = {
     refs, state, sqlValueLiteral, sqlTypedValueLiteral, cellColumnName, cellText: formatCellValue,
@@ -49,7 +60,7 @@ function fixture(type, { driver = "mysql", row = ["001", "001", { ok: true }, tr
   };
   const runtime = vm.createContext(sandbox);
   vm.runInContext(transactionSource + mutationSource, runtime, { filename: "main-row-mutation.js" });
-  return { tab, state, refs, calls, confirmations, runtime, submit: () => runtime.applyMutation() };
+  return { tab, state, refs, calls, confirmations, focused, runtime, submit: () => runtime.applyMutation() };
 }
 
 test("shared SQL literals distinguish real values from numeric-looking and boolean-looking text", () => {
@@ -102,6 +113,45 @@ test("MySQL row mutation synchronizes a confirmed rollback while retaining an un
     assert.equal(f.state.transactionKeys.has('db/app'), retained);
     assert.equal(Boolean(f.tab.result.transactionRolledBack), !retained);
   }
+});
+
+test("PostgreSQL row errors distinguish rejected work, confirmed rollback and uncertain outcomes", async () => {
+  for (const [message, retained, unknown] of [
+    ['waiting for database operation timed out', true, false],
+    ['[TX_ROLLED_BACK] conflict', false, false],
+    ['[TX_MISSING] [TX_OUTCOME_UNKNOWN] transport failure', false, true],
+  ]) {
+    const f = fixture('edit', { driver: 'postgres', values: { code: 'changed' } });
+    f.runtime.call = async () => { throw new Error(message); };
+    await f.submit();
+    assert.equal(f.state.transactionKeys.has('db/app'), retained);
+    assert.equal(Boolean(f.tab.result.transactionRolledBack), !retained && !unknown);
+    assert.equal(Boolean(f.tab.result.transactionOutcomeUnknown), unknown);
+    assert.equal(f.state.mutation.type, 'edit', 'keep the form and its values for review');
+    if (unknown) {
+      assert.match(f.tab.message, /事务结果未知/);
+      assert.doesNotMatch(f.tab.message, /已回滚/);
+    }
+  }
+});
+
+test("an uncertain isolated insert retains its form and blocks a duplicate submission", async () => {
+  const f = fixture('insert', { driver: 'postgres' });
+  f.state.transactionKeys.clear();
+  let writes = 0;
+  f.runtime.call = async () => {
+    writes++;
+    f.state.transactionKeys.add('db/app');
+    throw new Error('[PG_OUTCOME_UNKNOWN] insert outcome unknown');
+  };
+  await f.submit();
+  assert.equal(f.state.transactionKeys.has('db/app'), true, 'preserve an unrelated transaction started after dispatch');
+  assert.equal(f.tab.result.writeOutcomeUnknown, true);
+  assert.equal(f.state.mutation.type, 'insert');
+  assert.match(f.refs.mutationFeedback.textContent, /PG_OUTCOME_UNKNOWN/);
+  await f.submit();
+  assert.equal(writes, 1);
+  assert.match(f.refs.mutationFeedback.textContent, /状态已改变/);
 });
 
 test("row mutation refuses stale results, readonly state and nontransactional MySQL writes in a transaction", async () => {
@@ -166,6 +216,19 @@ test("insert and edit dialogs allow primary key values", () => {
   assert.match(f.refs.mutationFields.innerHTML, /data-mutation-column="id" value=""\/>/);
   f.runtime.openMutation("edit");
   assert.match(f.refs.mutationFields.innerHTML, /data-mutation-column="id" value="001"\/>/);
+});
+
+test('row dialogs focus the first editable field and skip database-generated fields', () => {
+  for (const type of ['insert', 'edit']) {
+    const f = fixture(type, { driver: 'postgres' });
+    f.tab.browse.columns[0] = { name: 'id', identity: true, identityGeneration: 'always' };
+    f.tab.browse.columns[1] = { name: 'code', generated: true };
+    f.runtime.openMutation(type);
+    assert.equal(f.focused.at(-1), 'payload');
+    f.tab.browse.columns.forEach(column => { column.generated = true; });
+    f.runtime.openMutation(type);
+    assert.equal(f.focused.at(-1), 'cancel');
+  }
 });
 
 test('row edit updates a primary key using its old value and later delete uses its new value within the transaction', async () => {

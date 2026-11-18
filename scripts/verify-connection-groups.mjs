@@ -55,6 +55,28 @@ try {
   await group(production).locator('[data-connection-card="conn-dev"]').dragTo(group(testing).locator('[data-connection-card="conn-stage"]'));
   await group(testing).locator('[data-connection-card="conn-dev"]').waitFor();
   assert.equal(await page.locator('[data-connection-card]').count(), 3);
+  const card = id => page.locator(`[data-connection-card="${id}"]`);
+  const membership = id => group(id).locator('[data-connection-card]').evaluateAll(cards => cards.map(card => card.dataset.connectionCard));
+  await card('conn-dev').dragTo(group(production).locator('.connection-group-empty'));
+  assert.deepEqual(await membership(production), ['conn-dev']);
+  await group(testing).locator('summary').click();
+  const origin = await card('conn-dev').boundingBox();
+  const heading = await group(testing).locator('summary').boundingBox();
+  await page.mouse.move(origin.x + 30, origin.y + 12);
+  await page.mouse.down();
+  await page.mouse.move(heading.x + 30, heading.y + heading.height / 2, { steps: 8 });
+  await group(testing).locator('summary[data-drop-position="into"]').waitFor();
+  await page.mouse.up();
+  assert.equal(await group(testing).getAttribute('open'), null);
+  assert.deepEqual(await membership(testing), ['conn-stage', 'conn-dev']);
+  await group(testing).locator('summary').click();
+  await card('redis-local').dragTo(group(testing).locator('summary'));
+  assert.deepEqual(await membership(''), []);
+  await card('redis-local').dragTo(group('').locator('summary'));
+  assert.deepEqual(await membership(''), ['redis-local']);
+  await page.reload({ waitUntil: 'networkidle' });
+  assert.deepEqual(await membership(testing), ['conn-stage', 'conn-dev']);
+  assert.deepEqual(await membership(''), ['redis-local']);
   // Per-connection context menu provides a direct route to assignment.
   await page.locator('[data-connection-id="conn-dev"]').click({ button: 'right' });
   await page.getByText('移动到分组…', { exact: true }).click();
@@ -79,6 +101,18 @@ try {
   await page.locator('#connectionSearch').fill('project-40.local');
   assert.equal(await page.locator('[data-connection-card]').count(), 1);
   await page.locator('#connectionSearch').fill('');
+  const list = page.locator('#connectionList');
+  const scrollable = await list.boundingBox();
+  const first = group('').locator('[data-connection-card]').first();
+  const firstId = await first.getAttribute('data-connection-card');
+  const firstLabel = await first.locator('strong').boundingBox();
+  await page.mouse.move(firstLabel.x + 5, firstLabel.y + 5);
+  await page.mouse.down();
+  await page.mouse.move(firstLabel.x + 5, scrollable.y + scrollable.height - 12, { steps: 10 });
+  await page.waitForFunction(() => document.querySelector('#connectionList').scrollTop > 80);
+  await page.mouse.up();
+  assert.notEqual(await first.getAttribute('data-connection-card'), firstId);
+  assert.equal(await list.locator('[data-drop-position], .connection-dragging').count(), 0);
   await page.locator('#manageConnectionGroups').click();
   assert.ok(await dialog.locator('.connection-group-members').evaluate(node => node.scrollHeight > node.clientHeight));
   await dialog.locator('input[type="search"]').fill('project-40.local');
@@ -86,5 +120,5 @@ try {
   await page.evaluate(() => { document.body.dataset.theme = 'light'; });
   await page.screenshot({ path: resolve(evidence, 'manager-light-many.png') });
   assert.deepEqual(errors, []);
-  console.log('Connection groups verified: create, assign, collapse persistence, group search, cross-group drag, context menu, rename, delete and reload.');
+  console.log('Connection groups verified: create, assign, collapse persistence, group search, cross-group drag, auto-scroll, context menu, rename, delete and reload.');
 } finally { await context.close(); await browser.close(); await new Promise(done => server.close(done)); }

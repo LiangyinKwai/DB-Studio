@@ -50,22 +50,29 @@ jobs:
           npm run build:dmg
       - name: Verify installer and application signature
         run: |
-          dmg="src-tauri/target/release/bundle/dmg/DB Studio_${RELEASE_VERSION}_aarch64.dmg"
+          dmg="src-tauri/target/release/bundle/dmg/Keybay_${RELEASE_VERSION}_aarch64.dmg"
           mount_point="$RUNNER_TEMP/db-studio-release-check"
           mkdir -p "$mount_point"
           hdiutil attach "$dmg" -nobrowse -readonly -mountpoint "$mount_point"
           trap 'hdiutil detach "$mount_point"' EXIT
-          codesign --verify --deep --strict --verbose=2 "$mount_point/DB Studio.app"
+          codesign --verify --deep --strict --verbose=2 "$mount_point/Keybay.app"
+          test "$(lipo -archs "$mount_point/Keybay.app/Contents/MacOS/db-studio")" = arm64
           "$RUNNER_TEMP/dmg-venv/bin/python" scripts/verify-dmg-layout.py "$mount_point"
       - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          dmg="src-tauri/target/release/bundle/dmg/DB Studio_${RELEASE_VERSION}_aarch64.dmg"
+          dmg="src-tauri/target/release/bundle/dmg/Keybay_${RELEASE_VERSION}_aarch64.dmg"
+          notes=".github/release-notes/v$RELEASE_VERSION.md"
+          if [ -f "$notes" ]; then
+            set -- --notes-file "$notes"
+          else
+            set -- --generate-notes
+          fi
           gh release create "v$RELEASE_VERSION" "$dmg" \
             --target "$GITHUB_SHA" \
-            --title "DB Studio v${RELEASE_VERSION}（未公证）" \
-            --notes '优化 PostgreSQL 和 MySQL 的 DDL 查看与复制、SQL 高亮及自动换行；单击表后自动加载数据与结构，并统一顶部操作栏。此版本使用临时签名，尚未通过 Apple 公证；首次打开时 macOS 可能要求在隐私与安全性中确认。仅支持 Apple Silicon。'
+            --title "Keybay v${RELEASE_VERSION}（未公证）" \
+            "$@"
       - name: Verify release asset
         env:
           GH_TOKEN: ${{ github.token }}
@@ -76,7 +83,7 @@ jobs:
             exit 1
           fi
           digest=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/v$RELEASE_VERSION" --jq '.assets[] | select(.state == "uploaded" and (.name | endswith(".dmg"))) | .digest')
-          dmg="src-tauri/target/release/bundle/dmg/DB Studio_${RELEASE_VERSION}_aarch64.dmg"
+          dmg="src-tauri/target/release/bundle/dmg/Keybay_${RELEASE_VERSION}_aarch64.dmg"
           expected="sha256:$(shasum -a 256 "$dmg" | cut -d ' ' -f 1)"
           if [ "$digest" != "$expected" ]; then
             echo "Uploaded DMG checksum could not be verified." >&2

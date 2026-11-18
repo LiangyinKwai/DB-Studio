@@ -44,7 +44,7 @@ export const redisEditorTheme = EditorView.theme({
   ".cm-content": { padding: "14px 0", minHeight: "100px", caretColor: "var(--app-text)" },
   ".cm-line": { padding: "0 18px" },
   ".cm-gutters": { backgroundColor: "var(--input-bg)", color: "var(--app-muted)", border: "none", minWidth: "40px" },
-  ".cm-activeLine, .cm-activeLineGutter": { backgroundColor: "color-mix(in srgb, var(--selected-bg) 45%, transparent)" },
+  ".cm-activeLine, .cm-activeLineGutter": { backgroundColor: "var(--editor-line-bg)" },
   "&.cm-focused": { outline: "none" },
   ".cm-cursor": { borderLeftColor: "var(--app-text)" },
   "&.cm-focused .cm-selectionBackground, .cm-selectionBackground, ::selection": { backgroundColor: "var(--selected-bg)" },

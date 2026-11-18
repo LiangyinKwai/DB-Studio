@@ -39,7 +39,7 @@ export const valueReaderSource = view => sources.get(view) ?? view.state.doc.toS
 
 /** Read-only document rendering: formatting and folding never rewrite saved values. */
 export function createValueReader(parent, { label = '内容阅读器', showLineNumbers = true, onSearchChange = () => {} } = {}) {
-  const wrapping = new Compartment(); let view = null, wrap = true;
+  const wrapping = new Compartment(); let view = null, wrap = true, inputEvents = null;
   const theme = EditorView.theme({
     '&': { height: '100%', backgroundColor: 'var(--input-bg)', color: 'var(--app-text)', fontSize: '13px' },
     '.cm-scroller': { overflow: 'auto', fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', lineHeight: '1.75' },
@@ -49,7 +49,7 @@ export function createValueReader(parent, { label = '内容阅读器', showLineN
     '.cm-foldPlaceholder': { color: 'var(--app-text)', backgroundColor: 'var(--selected-bg)', borderColor: 'var(--app-border)' },
     '.cm-panels': { backgroundColor: 'var(--app-panel)', color: 'var(--app-text)', borderColor: 'var(--app-border)' },
     '.cm-selectionBackground': { backgroundColor: 'var(--editor-selection-bg, var(--selected-bg))' },
-    '&.cm-focused': { outline: '2px solid var(--accent-focus)', outlineOffset: '-2px' },
+    '&.cm-focused': { outline: 'none' },
   });
   return {
     show(text, { isJson = false, sqlDriver = null } = {}) {
@@ -73,6 +73,11 @@ export function createValueReader(parent, { label = '内容阅读器', showLineN
       ] });
       if (view) view.setState(state); else {
         view = new EditorView({ state, parent });
+        inputEvents = new AbortController();
+        parent.addEventListener('pointerdown', () => parent.classList.add('reader-pointer-focus'), { capture: true, signal: inputEvents.signal });
+        document.addEventListener('keydown', event => {
+          if (!event.metaKey && !event.ctrlKey && !event.altKey && !event.isComposing && !['Shift', 'Control', 'Alt', 'Meta'].includes(event.key)) parent.classList.remove('reader-pointer-focus');
+        }, { capture: true, signal: inputEvents.signal });
         view.dom.addEventListener('keydown', event => {
           if (event.key === 'Escape' && !event.isComposing && searchPanelOpen(view.state)) {
             event.preventDefault(); event.stopPropagation(); closeSearchPanel(view);
@@ -90,7 +95,7 @@ export function createValueReader(parent, { label = '内容阅读器', showLineN
     closeFind() { if (view && searchPanelOpen(view.state)) closeSearchPanel(view); },
     focus() { view?.contentDOM.focus({ preventScroll: true }); },
     measure() { view?.requestMeasure(); },
-    destroy() { if (view) { sources.delete(view); view.destroy(); view = null; onSearchChange(false); } },
+    destroy() { if (view) { sources.delete(view); view.destroy(); view = null; inputEvents?.abort(); inputEvents = null; parent.classList.remove('reader-pointer-focus'); onSearchChange(false); } },
     get view() { return view; },
   };
 }

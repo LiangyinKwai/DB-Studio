@@ -7,7 +7,7 @@ import { createInterface } from 'node:readline';
 import { createServer } from 'node:http';
 import { createReadStream, existsSync, mkdirSync, statSync } from 'node:fs';
 import { extname, resolve } from 'node:path';
-import { chromium } from './playwright-import.mjs';
+import { chromium, setTabReadOnly } from './playwright-import.mjs';
 import { createWorkspaceFixture } from './fixtures/workspace-fixture.mjs';
 if (!process.env.DB_STUDIO_REDIS_TEST_HOST) throw new Error('Explicit DB_STUDIO_REDIS_TEST_HOST required');
 const prefix = `dbstudio:ux:${Date.now()}:`, dist = resolve('dist'), evidence = resolve('output/playwright/redis-types'); mkdirSync(evidence, { recursive: true });
@@ -140,7 +140,7 @@ try {
   assert.ok(await details.evaluate(node => node.scrollWidth <= node.clientWidth));
   await page.screenshot({ path: resolve(evidence, 'key-compact.png') });
   await page.keyboard.press('Escape'); assert.ok(await details.isVisible()); await page.mouse.click(5, 5); await details.waitFor({ state: 'hidden' });
-  await page.locator('#modeBadge').click(); assert.ok(await page.locator('#redisMemberAction').isDisabled()); assert.ok(await page.locator('#redisTtlAction').isDisabled()); await page.locator('#modeBadge').click();
+  await setTabReadOnly(page, true); assert.ok(await page.locator('#redisMemberAction').isDisabled()); assert.ok(await page.locator('#redisTtlAction').isDisabled()); await setTabReadOnly(page, false);
   await page.locator('#resultGrid [data-grid-cell]').first().click(); await page.locator('#redisMemberAction').click();
   const operationDialog = page.locator('.redis-operation-dialog'); await chooseAppSelect(operationDialog.locator('[name=action]'), 'remove');
   assert.equal(await operationDialog.locator('[name=value]').inputValue(), (await get('stream')).rows[0][0]);
@@ -187,7 +187,7 @@ try {
   assert.equal(await native('delete_redis_key', { database: 15, key: prefix + 'delete-test', readOnly: false }), 1);
   assert.equal((await native('get_redis_value', { database: 15, key: prefix + 'delete-test' })).rows.length, 0);
   await page.setViewportSize({ width: 1060, height: 680 });
-  for (const theme of ['dark', 'light', 'ocean', 'forest', 'contrast']) {
+  for (const theme of ['dark', 'light']) {
     await page.locator('#themeButton').click(); await page.locator(`[data-theme-option=${theme}]`).click();
     await page.locator('#redisTtlAction').click(); const ttlDialog = page.locator('.redis-operation-dialog');
     const bounds = await ttlDialog.boundingBox(); assert.ok(bounds.height < 460 && bounds.y >= 0 && bounds.y + bounds.height <= 680);

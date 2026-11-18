@@ -10,19 +10,19 @@ export function initResultControls(refs) {
     if (restoreFocus && trigger.isConnected) trigger.focus({ preventScroll: true });
   }
   function attach(trigger, panel, firstFocus, menu = false) {
-    function open() {
+    function open({ focus = true } = {}) {
       if (trigger.disabled) return;
       close();
       panel.hidden = false;
       trigger.setAttribute('aria-expanded', 'true');
-      opened = { trigger, panel };
+      opened = { trigger, panel, menu };
       const anchor = trigger.getBoundingClientRect();
       panel.style.left = `${Math.max(8, Math.min(anchor.right - panel.offsetWidth, window.innerWidth - panel.offsetWidth - 8))}px`;
       panel.style.top = `${anchor.bottom + panel.offsetHeight + 8 <= window.innerHeight ? anchor.bottom + 6 : Math.max(8, anchor.top - panel.offsetHeight - 6)}px`;
-      firstFocus()?.focus({ preventScroll: true });
+      if (focus || !menu) firstFocus()?.focus({ preventScroll: true });
       if (!menu) firstFocus()?.select();
     }
-    trigger.addEventListener('click', () => opened?.trigger === trigger ? close(true) : open());
+    trigger.addEventListener('click', event => opened?.trigger === trigger ? close(event.detail === 0) : open({ focus: event.detail === 0 }));
     trigger.addEventListener('keydown', event => {
       if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
         event.preventDefault(); open();
@@ -42,11 +42,21 @@ export function initResultControls(refs) {
         buttons[next]?.focus();
       }
     });
-    if (menu) panel.addEventListener('click', event => { if (event.target.closest('button:not(:disabled)')) close(true); });
+    if (menu) panel.addEventListener('click', event => { if (event.target.closest('button:not(:disabled)')) close(event.detail === 0); });
   }
   attach(refs.resultMore, refs.resultMoreMenu, () => refs.resultMoreMenu.querySelector('button:not(:disabled)'), true);
   attach(refs.dataImportButton, refs.dataImportMenu, () => refs.dataImportMenu.querySelector('button:not(:disabled)'), true);
   attach(refs.pageJumpToggle, refs.pageJumpPanel, () => refs.pageJumpInput);
+  // Some macOS WebViews do not focus a button when it is clicked. Keyboard
+  // navigation should still reach a mouse-opened menu in that case.
+  document.addEventListener('keydown', event => {
+    if (!opened?.menu || event.isComposing || opened.panel.contains(document.activeElement) || opened.trigger === document.activeElement) return;
+    if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); close(true); return; }
+    if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return;
+    event.preventDefault(); event.stopPropagation();
+    const buttons = [...opened.panel.querySelectorAll('button:not(:disabled)')];
+    (event.key === 'ArrowUp' || event.key === 'End' ? buttons.at(-1) : buttons[0])?.focus();
+  }, true);
   document.addEventListener('pointerdown', event => {
     if (opened && !opened.panel.contains(event.target) && !opened.trigger.contains(event.target)) close();
   }, true);

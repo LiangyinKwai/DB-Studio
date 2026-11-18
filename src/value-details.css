@@ -4,6 +4,11 @@ body #cellModal .dialog-header { margin-bottom: 12px; }
 .cell-view-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 5px 8px; margin-bottom: 10px; }
 body #cellModal .cell-json-toolbar { flex-wrap: wrap; }
 body #cellModal #cellJsonPreview { display: block; height: min(52dvh, 540px); min-height: 180px; padding: 0; max-height: none; overflow: hidden; border: 1px solid var(--app-border); border-radius: 6px; }
+/* Keyboard focus outlines the whole reader, including its gutter. Mouse and
+   initial dialog focus leave the reading surface visually quiet. */
+body .value-reader:not(.reader-pointer-focus):has(.cm-content:focus-visible) { outline: 2px solid var(--accent-focus); outline-offset: 1px; }
+body .value-reader .cm-content:focus-visible { outline: none; }
+body :is(.cell-dialog, .ddl-view-dialog, .redis-key-details):focus-visible { outline: none; }
 body #cellModal #cellValue { height: min(46dvh, 450px); max-height: none; min-height: 150px; font-size: 13px; }
 body #cellModal .dialog-actions { flex-wrap: wrap; margin-top: 12px; padding-top: 12px; }
 body #cellModal #cellMeta { flex: 1 1 240px; }

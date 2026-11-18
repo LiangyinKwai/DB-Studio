@@ -225,10 +225,89 @@ async fn redis_runtime_contract() {
     assert_eq!(preview.rows.len(), 500);
     assert_eq!(preview.total_count, Some(501));
     assert!(preview.partial);
+    assert!(!preview.truncated, "whole-row preview limits must not disable safe cell edits");
     redis::cmd("DEL").arg(&large_key).query_async::<i64>(&mut connection).await.unwrap();
     let missing = get_value(&mut connection, &large_key).await.unwrap();
     assert!(missing.rows.is_empty());
     assert_eq!(missing.total_count, Some(0));
+    assert_eq!(redis_adapter::get_ttl(&mut connection, &large_key).await.unwrap(), -2);
+
+    // Read only a bounded string prefix. An exact boundary remains complete;
+    // the extra probe byte identifies longer strings without STRLEN/GET races.
+    let exact = "x".repeat(512 * 1024);
+    redis::cmd("SET").arg(&large_key).arg(&exact).query_async::<()>(&mut connection).await.unwrap();
+    let preview = get_value(&mut connection, &large_key).await.unwrap();
+    assert!(!preview.partial && !preview.truncated);
+    assert_eq!(preview.rows[0][0].as_str(), Some(exact.as_str()));
+    assert_eq!(redis_adapter::get_ttl(&mut connection, &large_key).await.unwrap(), -1);
+    redis::cmd("EXPIRE").arg(&large_key).arg(60).query_async::<i64>(&mut connection).await.unwrap();
+    assert!((1..=60).contains(&redis_adapter::get_ttl(&mut connection, &large_key).await.unwrap()));
+    let oversized = "\0".repeat(4 * 1024 * 1024);
+    redis::cmd("SET").arg(&large_key).arg(&oversized).query_async::<()>(&mut connection).await.unwrap();
+    let preview = get_value(&mut connection, &large_key).await.unwrap();
+    assert!(preview.partial && preview.truncated);
+    assert_eq!(preview.truncated_reason.as_deref(), Some("result_size"));
+    assert_eq!(preview.rows[0][0].as_str().unwrap().len(), 512 * 1024);
+    assert!(serde_json::to_vec(&preview).unwrap().len() < 8 * 1024 * 1024);
+    let serialized = serde_json::to_value(&preview).unwrap();
+    assert_eq!(serialized["truncatedReason"], "result_size");
+    // A truncated preview must never be accepted as the original string for a
+    // compare-and-set edit, even if a client misses the read-only UI guard.
+    assert!(save_cell(&mut connection, &CellEdit {
+        key: large_key.clone(), key_type: "string".into(), field: None,
+        expected_value: preview.rows[0][0].as_str().unwrap().into(), value: "unsafe".into(), read_only: false,
+    }).await.is_err());
+    let unicode = "界".repeat(180_000);
+    redis::cmd("SET").arg(&large_key).arg(&unicode).query_async::<()>(&mut connection).await.unwrap();
+    let unicode_preview = get_value(&mut connection, &large_key).await.unwrap();
+    assert!(unicode_preview.truncated);
+    let text = unicode_preview.raw.as_str().unwrap();
+    assert!(!text.starts_with("0x"), "a partial UTF-8 character at the preview boundary must not turn the whole value into hex");
+    assert!(unicode.starts_with(text));
+    assert_eq!(text.len(), 512 * 1024 - 2);
+    redis::cmd("SET").arg(&large_key).arg(&oversized).query_async::<()>(&mut connection).await.unwrap();
+    let output = redis_adapter::execute_console_command(&mut connection, &format!("GET {large_key}")).await.unwrap();
+    assert!(output.truncated);
+    assert_eq!(output.truncated_reason.as_deref(), Some("result_size"));
+    assert!(serde_json::to_vec(&output).unwrap().len() < 8 * 1024 * 1024);
+    redis::cmd("DEL").arg(&large_key).query_async::<i64>(&mut connection).await.unwrap();
+
+    // A single oversized hash member is bounded too; every returned row must
+    // be treated as read-only when result_size is set.
+    redis::cmd("HSET").arg(&large_key).arg("field").arg(&oversized).query_async::<i64>(&mut connection).await.unwrap();
+    let preview = get_value(&mut connection, &large_key).await.unwrap();
+    assert!(preview.partial && preview.truncated);
+    assert!(serde_json::to_vec(&preview).unwrap().len() < 8 * 1024 * 1024);
+    redis::cmd("DEL").arg(&large_key).query_async::<i64>(&mut connection).await.unwrap();
+
+    redis::cmd("RPUSH").arg(&large_key).arg((0..1001).collect::<Vec<i32>>()).query_async::<i64>(&mut connection).await.unwrap();
+    let output = redis_adapter::execute_console_command(&mut connection, &format!("LRANGE {large_key} 0 -1")).await.unwrap();
+    assert_eq!(output.rows.len(), 1000);
+    assert_eq!(output.raw.as_array().unwrap().len(), 1000);
+    assert!(output.truncated);
+    assert_eq!(output.truncated_reason.as_deref(), Some("row_limit"));
+    redis::cmd("DEL").arg(&large_key).query_async::<i64>(&mut connection).await.unwrap();
+
+    // Limiting the display must never retry a successful mutating command.
+    let command = format!("EVAL \"redis.call('INCR', KEYS[1]); return string.rep('x', 800000)\" 1 {large_key}");
+    let output = redis_adapter::execute_console_command(&mut connection, &command).await.unwrap();
+    assert!(output.truncated);
+    assert_eq!(redis::cmd("GET").arg(&large_key).query_async::<i64>(&mut connection).await.unwrap(), 1);
+    assert_eq!(ping(&mut connection).await.unwrap(), "PONG");
+    redis::cmd("DEL").arg(&large_key).query_async::<i64>(&mut connection).await.unwrap();
+
+    // RESP3 map keys can differ by type while having the same text label.
+    // Keep both entries in grid rows and in the raw console representation.
+    redis_adapter::execute_console_command(&mut connection, "HELLO 3").await.unwrap();
+    let mapped = redis_adapter::execute_console_command(&mut connection,
+        "EVAL \"redis.setresp(3); return {map = {[1] = 'number', ['1'] = 'text'}}\" 0").await.unwrap();
+    assert_eq!(mapped.columns, ["key", "value"]);
+    assert_eq!(mapped.rows.len(), 2);
+    let pairs = mapped.raw.as_array().expect("colliding JSON keys must retain typed pairs");
+    assert!(pairs.contains(&serde_json::json!([1, "number"])));
+    assert!(pairs.contains(&serde_json::json!(["1", "text"])));
+    assert!(!mapped.truncated);
+    redis_adapter::execute_console_command(&mut connection, "HELLO 2").await.unwrap();
     for kind in ["string", "hash", "list", "set", "zset", "stream"] {
         let source = format!("{prefix}{kind}");
         let destination = format!("{prefix}copy-{kind}");

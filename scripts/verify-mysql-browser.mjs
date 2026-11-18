@@ -3,7 +3,7 @@ import { createServer } from 'node:http';
 import { createReadStream, existsSync, mkdirSync, statSync } from 'node:fs';
 import { extname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { chromium } from './playwright-import.mjs';
+import { chromium, revealObject } from './playwright-import.mjs';
 import { createWorkspaceFixture } from './fixtures/workspace-fixture.mjs';
 
 const root = resolve(fileURLToPath(new URL('..', import.meta.url))), dist = resolve(root, 'dist');
@@ -70,10 +70,23 @@ try {
   await select('mysql-local');
   assert.equal(mysqlCalls('get_schema_objects').length, 0);
   await page.locator('.mysql-database[data-database="warehouse"] > summary [data-tree-toggle]').click();
-  await page.locator('[data-object-id="warehouse.orders"]').waitFor();
+  await page.locator('[data-object-id="warehouse.orders"]').waitFor({ state: "attached" });
   assert.equal(await page.locator('.tree-schema').count(), 0);
   assert.equal(await page.locator('[data-display-schemas]').count(), 0);
-  assert.equal(await page.locator('.mysql-database-objects > .tree-object').count(), 2);
+  const tableGroup = page.locator('.mysql-database[data-database="warehouse"] .tree-category[data-kind="table"]');
+  assert.equal(await tableGroup.locator('.tree-object').count(), 2);
+  assert.equal(await tableGroup.locator('.category-summary').getAttribute('aria-expanded'), 'false');
+  assert.equal(await tableGroup.locator('.tree-object:visible').count(), 0);
+  assert.ok(await page.locator('.mysql-database[data-database="warehouse"] .tree-category[data-kind="routine"] > .category-summary').isVisible());
+  await page.locator('#objectSearch').fill('customers');
+  assert.equal(await tableGroup.locator('.tree-object:visible').count(), 1);
+  assert.equal(await page.locator('.mysql-database[data-database="warehouse"] .tree-category[data-kind="event"]').count(), 0);
+  await page.locator('#objectSearch').fill('');
+  assert.equal(await tableGroup.locator('.tree-object:visible').count(), 0);
+  assert.equal(await page.locator('.mysql-database[data-database="warehouse"] .tree-category[data-kind="event"] .count').innerText(), '0');
+  assert.equal(await page.locator('.mysql-database[data-database="warehouse"] .tree-category[data-kind="saved_query"]').count(), 0);
+  await tableGroup.getByRole('button', { name: '展开 表', exact: true }).click();
+  assert.equal(await tableGroup.locator('.tree-object:visible').count(), 2);
   assert.equal(mysqlCalls('list_schemas').length, 0);
   assert.equal(mysqlCalls('get_schema_objects').length, 1);
   await page.locator('[data-object-id="warehouse.orders"] .object-main').click();
@@ -95,12 +108,27 @@ try {
   // Native metadata enables safe attribute edits rather than a rename-only form.
   await page.locator('#structureTab').click(); await page.locator('[data-edit-structure]').click();
   const editor = page.locator('.structure-editor-dialog'); await editor.waitFor();
+  assert.deepEqual(await editor.getByRole('tab').allInnerTexts(), ['字段', '索引', '约束', '触发器', '定义']);
+  assert.equal(await page.locator('#resultFooter').isVisible(), false);
+  const apply = editor.getByRole('button', { name: '预览并应用' });
+  assert.ok(await apply.isDisabled());
+  await editor.getByRole('button', { name: 'status · 上移' }).click();
+  assert.ok(await apply.isEnabled());
+  assert.match(await editor.locator('.structure-sql-preview pre').innerText(), /DEFAULT 'draft' FIRST/);
+  await editor.getByRole('button', { name: 'status · 下移' }).click();
+  assert.ok(await apply.isDisabled());
   assert.ok(await editor.locator('[data-field-row="1"][data-field="dataType"]').isEnabled());
   assert.equal(await editor.locator('[data-field-row="1"][data-field="defaultValue"]').inputValue(), "'draft'");
   await editor.locator('[data-field-row="1"][data-field="dataType"]').fill('varchar(128)');
-  assert.match(await editor.locator('pre').innerText(), /MODIFY COLUMN `status` varchar\(128\) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT 'draft'/);
+  await editor.getByRole('button', { name: 'status · 上移' }).click();
+  assert.deepEqual(await editor.locator('[data-field="name"]').evaluateAll(fields => fields.map(field => field.value)), ['status', 'id']);
+  assert.match(await editor.locator('.structure-sql-preview pre').innerText(), /MODIFY COLUMN `status` varchar\(128\) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT 'draft' FIRST/);
+  await editor.getByRole('tab', { name: '索引' }).click();
+  assert.ok(await editor.getByRole('tabpanel').getByText('没有索引').isVisible());
+  await editor.getByRole('tab', { name: '字段' }).click();
+  assert.equal(await editor.locator('[data-field-row="0"][data-field="name"]').inputValue(), 'status');
   await editor.getByRole('button', { name: '取消', exact: true }).click(); await page.locator('#confirmActionAccept').click(); await editor.waitFor({ state: 'detached' });
-  await page.locator('#resultTab').click();
+  await page.locator(`[data-tab-id="${dataTabId}"] .tab-select`).click();
   const styles = await page.locator('#dataImportButton, #resultMore').evaluateAll(buttons => buttons.map(button => {
     const style = getComputedStyle(button); return [style.width, style.height, style.padding, style.border, style.backgroundColor, style.gap];
   }));
@@ -111,10 +139,12 @@ try {
   assert.equal(await page.locator('.connection-card[data-connection-card="redis-local"] .driver-brand-icon').count(), 1);
   await page.screenshot({ path: resolve(evidence, 'mysql-toolbar-and-icons.png') });
   // A function can have the same name as a table without reusing its data tab.
-  await page.locator('.mysql-database [data-kind="function"] [data-tree-toggle]').click();
-  await page.locator('.mysql-database [data-kind="function"] .tree-object .object-main').dblclick();
-  await page.locator('#structurePanel pre').waitFor();
+  await page.locator('.mysql-database [data-kind="routine"] [data-tree-toggle]').click();
+  await page.locator('.mysql-database .tree-object[data-kind="function"] .object-main').dblclick();
+  await page.locator('#structurePanel .routine-definition .cm-content').waitFor();
   assert.match(await page.locator('#structurePanel').innerText(), /CREATE FUNCTION/);
+  assert.equal(await page.locator('.query-tab.active .tab-glyph[data-catalog-icon="function"] svg text').textContent(), 'ƒx');
+  assert.equal(await page.locator('.query-tab.active .tab-label').innerText(), 'orders');
   assert.notEqual(await page.locator('.query-tab.active').getAttribute('data-tab-id'), dataTabId);
   await page.locator(`[data-tab-id="${dataTabId}"] .tab-select`).click();
   await page.locator('#openTableSql').click();
@@ -163,7 +193,7 @@ try {
   await page.locator('#databaseModal input[type="checkbox"][value="archive"]').check();
   await page.locator('#applyDatabasePicker').click();
   await page.locator('.mysql-database[data-database="archive"] > summary [data-tree-toggle]').click();
-  await page.locator('[data-object-id="archive.orders"]').waitFor();
+  await page.locator('[data-object-id="archive.orders"]').waitFor({ state: 'attached' });
   assert.ok(mysqlCalls('get_schema_objects').some(call => call.args.database === 'archive'));
   assert.equal(await page.locator('.tree-schema').count(), 0);
   holdObjects = true;
@@ -175,7 +205,23 @@ try {
   const connectionsBeforeDrag = callsFor('connect_connection').length;
   const queriesBeforeDrag = callsFor('execute_query').length;
   const card = id => page.locator(`[data-connection-card="${id}"]`);
-  await card('mysql-local').dragTo(card('conn-dev'), { sourcePosition: { x: 4, y: 4 }, targetPosition: { x: 4, y: 2 } });
+  const source = await card('mysql-local').locator('strong').boundingBox();
+  const target = await card('conn-dev').boundingBox();
+  const beforeDrag = await order();
+  const startDrag = async () => {
+    await page.mouse.move(source.x + 5, source.y + 5);
+    await page.mouse.down();
+    await page.mouse.move(target.x + 30, target.y + 10, { steps: 8 });
+    await card('conn-dev').locator('xpath=self::*[@data-drop-position="before"]').waitFor();
+    assert.equal(await card('mysql-local').evaluate(node => getComputedStyle(node).opacity), '1');
+  };
+  await startDrag();
+  await page.keyboard.press('Escape');
+  await page.mouse.up();
+  assert.deepEqual(await order(), beforeDrag);
+  assert.equal(await page.locator('[data-drop-position], .connection-dragging').count(), 0);
+  await startDrag();
+  await page.mouse.up();
   await until(() => order().then(ids => ids[0] === 'mysql-local'));
   assert.equal(callsFor('connect_connection').length, connectionsBeforeDrag);
   assert.equal(callsFor('execute_query').length, queriesBeforeDrag);
@@ -192,8 +238,8 @@ try {
   await until(() => order().then(ids => ids[0] === 'mysql-local'));
   assert.deepEqual(await order(), ['mysql-local', 'conn-dev', 'conn-stage', 'redis-local']);
   await page.locator('.mysql-database[data-database="warehouse"] > summary [data-tree-toggle]').click();
-  await page.locator('[data-object-id="warehouse.orders"]').waitFor();
-  for (const theme of ['light', 'dark', 'ocean', 'forest', 'contrast']) {
+  await revealObject(page.locator('[data-object-id="warehouse.orders"]'));
+  for (const theme of ['light', 'dark']) {
     await page.locator('#themeButton').click(); await page.locator(`[data-theme-option="${theme}"]`).click();
     await page.setViewportSize({ width: 1060, height: 680 });
     await page.evaluate(() => new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done))));
@@ -212,5 +258,5 @@ try {
   await page.locator('#refreshTableData').click(); await page.locator('#resultGrid [data-grid-cell]').first().waitFor();
   assert.match(callsFor('execute_query').at(-1).args.request.sql, /`warehouse`\.`orders_new`/);
   assert.deepEqual(errors, []);
-  console.log('PASS: MySQL native attribute editor, routine/table name isolation, transaction rejection versus rollback, DDL catalog/data invalidation, import/export style and menus, brand icons, flat DB tree/scope/search/views/retry, stale-response isolation, PG schema retention and persistent drag/keyboard ordering.');
+  console.log('PASS: MySQL native attribute editor, routine/table name isolation, transaction rejection versus rollback, DDL catalog/data invalidation, import/export style and menus, brand icons, collapsible table group, DB scope/search/views/retry, stale-response isolation, PG schema retention and persistent drag/keyboard ordering.');
 } finally { await browser.close(); await new Promise(done => server.close(done)); }

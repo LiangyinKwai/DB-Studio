@@ -6,7 +6,7 @@ import { extname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import ExcelJS from 'exceljs';
 import { encodeDelimited } from '../src/data-transfer.js';
-import { chromium } from './playwright-import.mjs';
+import { chromium, revealObject } from './playwright-import.mjs';
 import { createWorkspaceFixture } from './fixtures/workspace-fixture.mjs';
 
 // UI/IPC fixture only: no user database is read or modified.
@@ -38,6 +38,8 @@ await context.exposeFunction('__FIXTURE_INVOKE__', async (command, args) => {
 });
 const page = await context.newPage(); page.setDefaultTimeout(10000);
 const errors = []; page.on('pageerror', error => errors.push(error.message));
+const excelRequests = [];
+page.on('request', request => { if (/\/chunks\/exceljs[^/]*\.js(?:\?|$)/.test(request.url())) excelRequests.push(request.url()); });
 const until = async predicate => { for (let i = 0; i < 200; i++) { if (await predicate()) return; await new Promise(done => setTimeout(done, 25)); } throw new Error('condition timeout'); };
 async function choose(format, name, contents) {
   await page.locator('#dataImportButton').click();
@@ -58,15 +60,18 @@ try {
   await page.locator('[data-connection-id="conn-dev"]').click();
   await page.locator('.tree-database[data-database="app"] > summary [data-tree-toggle]').click();
   await page.locator('.tree-schema[data-schema="public"] > summary [data-tree-toggle]').click();
+  await revealObject(page.locator('[data-object-id="public.orders"] .object-main'));
   await page.locator('[data-object-id="public.orders"] .object-main').dblclick();
   await page.locator('#resultGrid [data-grid-cell]').first().waitFor();
   await page.locator('#resultFilter').fill('alpha');
   for (const format of ['sql', 'csv', 'json', 'txt', 'xlsx']) {
+    assert.equal(excelRequests.length, 0, 'XLSX code must stay unloaded during startup and text exports');
     await page.locator('#resultMore').click();
     await page.locator(`[data-export-format="${format}"]`).click();
     await until(() => saves.some(save => save.fileName.endsWith('.' + format)));
     const save = saves.at(-1); assert.ok(save.fileName.endsWith('.' + format));
     if (format === 'xlsx') {
+      assert.equal(excelRequests.length, 1, 'the first XLSX export must load its local runtime chunk');
       assert.equal(save.command, 'save_binary_file');
       const book = new ExcelJS.Workbook(); await book.xlsx.load(Buffer.from(save.contents));
       assert.equal(book.worksheets[0].rowCount, 2);
@@ -126,6 +131,7 @@ try {
   await page.waitForFunction(() => document.querySelector('#sqlEditor .cm-content')?.textContent.includes('VALUES (5)'));
   assert.equal(imports.length, beforeSql, 'SQL imports must open a draft without executing');
   assert.equal(await page.locator('.query-tab.active .tab-label').innerText(), 'source.sql');
+  assert.equal(excelRequests.length, 1, 'later XLSX operations must reuse the loaded runtime');
   assert.deepEqual(errors, []);
   console.log('PASS: SQL/CSV/JSON/TXT/XLSX exports respect filters; native XLSX is valid; CSV mapping/cancel, lossless JSON, TXT NULL/empty, XLSX sheet selection, failure retention, target binding and SQL draft-only import.');
 } finally {

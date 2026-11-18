@@ -1,10 +1,10 @@
 .db-grid-host { position: relative; display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden; }
 .db-grid-viewport, .db-grid-viewport * { box-sizing: border-box; }
-.db-grid-viewport { position: relative; flex: 1; min-height: 0; width: 100%; height: 100%; overflow: auto; overscroll-behavior: contain; background: var(--grid-background, #11151b); color: #d0d6e2; font: 12px/1.4 "SFMono-Regular", Consolas, "Liberation Mono", monospace; scrollbar-width: thin; scrollbar-color: #465063 #131820; contain: strict; }
+.db-grid-viewport { position: relative; flex: 1; min-height: 0; width: 100%; height: 100%; overflow: auto; overscroll-behavior: contain; background: var(--grid-background, #11151b); color: #d0d6e2; font: 12px/1.4 ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; scrollbar-width: thin; scrollbar-color: #465063 #131820; contain: strict; }
 .db-grid-viewport:focus-visible { outline: 1px solid #9489ff; outline-offset: -1px; }
 .db-grid-canvas { position: relative; min-width: 100%; }
 .db-grid-canvas[hidden], .db-grid-empty[hidden] { display: none; }
-.db-grid-header { position: sticky; top: 0; z-index: 5; width: 100%; height: var(--db-grid-header-height); background: #1a202b; border-bottom: 1px solid #343d4d; }
+.db-grid-header { position: sticky; top: 0; z-index: 5; width: 100%; height: var(--db-grid-header-height); background: #1a202b; border-bottom: 1px solid #343d4d; box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08); }
 .db-grid-column { position: absolute; top: 0; height: 100%; border-right: 1px solid #303848; }
 .db-grid-sort { display: flex; align-items: center; gap: 8px; width: 100%; height: 100%; padding: 0 13px; color: #b4bece; background: transparent; border: 0; font: 600 11px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; text-align: left; cursor: pointer; border-radius: 0; }
 .db-grid-sort:hover { background: #252d3d; color: #e4e9f2; }
@@ -43,7 +43,13 @@ body .db-grid-cell-draft::after { position: absolute; top: 2px; right: 2px; widt
 .db-grid-empty-clear:focus-visible { outline: 2px solid var(--accent-focus, #a99bff); outline-offset: 2px; }
 .db-grid-empty-clear[hidden], .db-grid-footer[hidden] { display: none; }
 .db-grid-empty-value { color: var(--app-muted, #68758a); font-style: italic; font-size: 10px; }
-.db-grid-boolean { color: var(--syntax-keyword, #bcb5f3); }
+.db-grid-boolean { color: var(--syntax-boolean, var(--syntax-keyword, #8bc7ff)); font-weight: 500; }
+.db-grid-boolean:not(.db-grid-cell-editing)::before {
+  content: ''; display: inline-block; width: 6px; height: 6px; margin-right: 6px;
+  border-radius: 50%; vertical-align: 1px; box-sizing: border-box;
+}
+.db-grid-boolean-true:not(.db-grid-cell-editing)::before { background-color: currentColor; }
+.db-grid-boolean-false:not(.db-grid-cell-editing)::before { border: 1.4px solid currentColor; background-color: transparent; }
 .db-grid-footer { display: flex; flex: none; align-items: center; justify-content: space-between; gap: 14px; min-height: 28px; box-sizing: border-box; padding: 5px 12px; border-top: 1px solid var(--app-border, #343d4d); background: var(--app-panel, #1a202b); color: var(--app-muted, #8b97a9); font: 10px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
 .db-grid-footer-hint { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .db-grid-footer-status { min-width: 0; max-width: 50%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: right; color: var(--app-text, #d0d6e2); }
@@ -70,7 +76,7 @@ body .db-grid-column .db-grid-sort-control .db-grid-sort:focus-visible { outline
 
 /* The editor occupies the actual cell, including its original column width. */
 body .db-grid-cell-editing { padding: 0 11px; outline: 1px solid var(--accent-focus, #a99bff); outline-offset: -1px; background: var(--input-bg, #11151b); }
-body .db-grid-cell > .db-grid-edit-input { display: block; width: 100%; height: 100%; min-width: 0; max-width: 100%; min-height: 0; max-height: 100%; box-sizing: border-box; margin: 0; padding: 7px 1px; resize: none; border: 0; border-radius: 0; outline: none; background: transparent; color: var(--app-text, #d0d6e2); caret-color: var(--app-text, #d0d6e2); cursor: text; font: 12px/16px "SFMono-Regular", Consolas, "Liberation Mono", monospace; white-space: pre; overflow: auto; scrollbar-width: none; }
+body .db-grid-cell > .db-grid-edit-input { display: block; width: 100%; height: 100%; min-width: 0; max-width: 100%; min-height: 0; max-height: 100%; box-sizing: border-box; margin: 0; padding: 7px 1px; resize: none; border: 0; border-radius: 0; outline: none; background: transparent; color: var(--app-text, #d0d6e2); caret-color: var(--app-text, #d0d6e2); cursor: text; font: 12px/16px ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; white-space: pre; overflow: auto; scrollbar-width: none; }
 body .db-grid-cell > .db-grid-edit-input::-webkit-scrollbar { display: none; }
 body .db-grid-cell > .db-grid-edit-input[readonly] { opacity: .65; }
 body .db-grid-cell > .db-grid-edit-input[aria-invalid="true"] { outline: 1px solid var(--error, #f2a0aa); outline-offset: -1px; }

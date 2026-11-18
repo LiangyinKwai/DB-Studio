@@ -11,6 +11,16 @@ function columnName(column) {
   return typeof column === 'string' ? column : String(column?.name ?? column ?? '');
 }
 
+// Wide CJK glyphs occupy approximately two monospace cells.
+function displayCells(text, limit) {
+  let cells = 0;
+  for (const char of text) {
+    cells += char.codePointAt(0) > 255 ? 2 : 1;
+    if (cells >= limit) return limit;
+  }
+  return cells;
+}
+
 function columnDataType(column) {
   return typeof column === 'object' ? column?.dataType ?? column?.data_type ?? column?.type : undefined;
 }
@@ -351,12 +361,12 @@ export class ResultGrid {
     this.activeCell = null;
     this.selectionAnchor = null;
     if (!sameColumns) this.widths = columns.map((column, index) => {
-      let length = columnName(column).length + 3;
+      let length = displayCells(columnName(column), 36) + 3;
       // Sampling bounds startup work independently of the returned row count.
       for (let row = 0; row < Math.min(rows.length, 20); row++) {
         const value = rows[row]?.[index];
-        const displayLength = typeof value === 'object' && value !== null ? 28 : String(value ?? 'NULL').length;
-        length = Math.max(length, Math.min(displayLength, 36));
+        const displayLength = typeof value === 'object' && value !== null ? 28 : displayCells(String(value ?? 'NULL'), 36);
+        length = Math.max(length, displayLength);
       }
       return Math.max(112, Math.min(300, length * 7 + 28));
     });
@@ -593,6 +603,8 @@ export class ResultGrid {
         cell.classList.toggle('db-grid-number', typeof value === 'number' || typeof value === 'bigint');
         cell.classList.toggle('db-grid-empty-value', value === '');
         cell.classList.toggle('db-grid-boolean', typeof value === 'boolean');
+        cell.classList.toggle('db-grid-boolean-true', value === true);
+        cell.classList.toggle('db-grid-boolean-false', value === false);
         const text = formatCellValue(value);
         cell.textContent = value === '' ? '空字符串' : text.length > 1000 ? `${text.slice(0, 1000)}…` : text;
         // Keep large text/JSON out of native tooltip buffers. The inspector
@@ -962,6 +974,8 @@ export class ResultGrid {
     cell.classList.toggle('db-grid-number', typeof value === 'number' || typeof value === 'bigint');
     cell.classList.toggle('db-grid-empty-value', value === '');
     cell.classList.toggle('db-grid-boolean', typeof value === 'boolean');
+    cell.classList.toggle('db-grid-boolean-true', value === true);
+    cell.classList.toggle('db-grid-boolean-false', value === false);
     cell.title = `${value === '' ? '空字符串（长度为 0）' : text.length > 400 ? `${text.slice(0, 400)}…` : text}\n${draft ? draft.pending ? '保存中 · ' : '未保存草稿 · ' : ''}输入文字直接编辑 · 双击查看 JSON 或编辑 · Enter 编辑 · 右键查看详情`;
   }
 
@@ -1850,10 +1864,7 @@ export class ResultGrid {
   fitColumn(index) {
     let length = columnName(this.columns[index]).length + 5;
     for (const rowIndex of this.visibleOrder.slice(0, 200)) {
-      const text = formatCellValue(this.rows[rowIndex]?.[index]);
-      // Wide CJK glyphs occupy approximately two monospace cells.
-      const lengthEstimate = [...text.slice(0, 120)].reduce((sum, char) => sum + (char.codePointAt(0) > 255 ? 2 : 1), 0);
-      length = Math.max(length, Math.min(110, lengthEstimate));
+      length = Math.max(length, displayCells(formatCellValue(this.rows[rowIndex]?.[index]), 110));
     }
     this.setColumnWidth(index, length * 7 + 28);
     this.header.querySelector(`[data-resize-column="${index}"]`)?.focus({ preventScroll: true });

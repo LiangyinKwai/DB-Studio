@@ -34,6 +34,60 @@ pub struct SchemaColumn {
     pub identity: bool,
     pub identity_generation: Option<String>,
     pub generated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sequence: Option<ColumnSequence>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ColumnSequence {
+    pub id: String,
+    pub schema: String,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SequenceDetails {
+    pub data_type: String,
+    pub start: String,
+    pub increment: String,
+    pub min: String,
+    pub max: String,
+    pub cache: String,
+    pub cycle: bool,
+    pub last_value: Option<String>,
+    pub owned_by: Option<String>,
+    pub identity: bool,
+    pub persistence: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RoutineParameter {
+    pub name: Option<String>,
+    pub data_type: String,
+    pub mode: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TableTrigger {
+    pub id: String,
+    pub name: String,
+    pub timing: String,
+    pub event: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EventDetails {
+    pub status: String,
+    pub scheduler: String,
+    pub time_zone: String,
+    pub schedule: String,
+    pub starts: Option<String>,
+    pub ends: Option<String>,
 }
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -47,6 +101,8 @@ pub struct SchemaObject {
     pub comment: Option<String>,
     pub columns: Vec<SchemaColumn>,
     pub signature: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sequence_owned_by_column: Option<bool>,
 }
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -80,6 +136,18 @@ pub struct ObjectDetails {
     pub signature: Option<String>,
     pub table_ddl: Option<TableDdl>,
     pub mysql: Option<MySqlMetadata>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sequence: Option<SequenceDetails>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parameters: Option<Vec<RoutineParameter>>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub triggers: Vec<TableTrigger>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub event: Option<EventDetails>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auto_increment: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub view_ddl: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -141,7 +209,31 @@ pub async fn list_databases(client: &Client) -> Result<Vec<DatabaseInfo>, String
         .collect())
 }
 
-const OBJECT_SQL: &str = "SELECT c.oid::text AS object_id,n.nspname AS schema_name,c.relname AS object_name,CASE c.relkind WHEN 'r' THEN 'table' WHEN 'p' THEN 'partitioned_table' WHEN 'v' THEN 'view' WHEN 'm' THEN 'materialized_view' WHEN 'f' THEN 'foreign_table' WHEN 'S' THEN 'sequence' ELSE c.relkind::text END AS object_kind,pg_get_userbyid(c.relowner) AS owner_name,obj_description(c.oid,'pg_class') AS object_comment,NULL::text AS signature FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname <> 'information_schema' AND left(n.nspname, 3) <> 'pg_' AND c.relkind IN ('r','p','v','m','f','S') AND ($1::text IS NULL OR n.nspname=$1) UNION ALL SELECT p.oid::text,n.nspname,p.proname,CASE WHEN p.prokind='p' THEN 'procedure' ELSE 'function' END,pg_get_userbyid(p.proowner),obj_description(p.oid,'pg_proc'),p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ')' FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE p.prokind IN ('f','p','w') AND n.nspname <> 'information_schema' AND left(n.nspname, 3) <> 'pg_' AND ($1::text IS NULL OR n.nspname=$1) ORDER BY 2,3,5";
+const OBJECT_SQL: &str = r#"
+    SELECT c.oid::text AS object_id, n.nspname AS schema_name, c.relname AS object_name,
+           CASE c.relkind
+               WHEN 'r' THEN 'table' WHEN 'p' THEN 'partitioned_table' WHEN 'v' THEN 'view'
+               WHEN 'm' THEN 'materialized_view' WHEN 'f' THEN 'foreign_table' WHEN 'S' THEN 'sequence'
+           END AS object_kind,
+           pg_get_userbyid(c.relowner) AS owner_name, obj_description(c.oid,'pg_class') AS object_comment,
+           NULL::text AS signature,
+           CASE WHEN c.relkind='S' THEN EXISTS (
+               SELECT 1 FROM pg_depend d
+               WHERE d.classid='pg_class'::regclass AND d.objid=c.oid AND d.objsubid=0
+                 AND d.refclassid='pg_class'::regclass AND d.refobjsubid>0 AND d.deptype IN ('a','i')
+           ) END AS sequence_owned_by_column
+    FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+    WHERE n.nspname <> 'information_schema' AND left(n.nspname, 3) <> 'pg_'
+      AND c.relkind IN ('r','p','v','m','f','S') AND ($1::text IS NULL OR n.nspname=$1)
+    UNION ALL
+    SELECT p.oid::text, n.nspname, p.proname, CASE WHEN p.prokind='p' THEN 'procedure' ELSE 'function' END,
+           pg_get_userbyid(p.proowner), obj_description(p.oid,'pg_proc'),
+           p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ')', NULL::boolean
+    FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
+    WHERE p.prokind IN ('f','p','w') AND n.nspname <> 'information_schema'
+      AND left(n.nspname, 3) <> 'pg_' AND ($1::text IS NULL OR n.nspname=$1)
+    ORDER BY 2,3,5
+"#;
 
 pub async fn load_schema_objects(
     client: &Client,
@@ -167,6 +259,7 @@ pub async fn load_schema_objects(
             comment: col(&r, "object_comment"),
             columns: Vec::new(),
             signature: col(&r, "signature"),
+            sequence_owned_by_column: r.get("sequence_owned_by_column"),
         })
         .collect();
     // Fetch the entire schema's column catalog once, instead of one request per table.
@@ -191,6 +284,7 @@ pub async fn load_schema_objects(
                 identity: false,
                 identity_generation: None,
                 generated: false,
+                sequence: None,
             });
     }
     for object in &mut objects {
@@ -223,6 +317,7 @@ pub async fn load_object_details(
         let schema: String = r.get("schema_name");
         let name: String = r.get("name");
         let signature: String = r.get("args");
+        let parameters = load_routine_parameters(client, oid, r.get::<_, String>("kind") == "procedure").await?;
         return Ok(ObjectDetails {
             id: r.get("id"),
             schema: schema.clone(),
@@ -238,6 +333,12 @@ pub async fn load_object_details(
             signature: Some(format!("{name}({signature})")),
             table_ddl: None,
             mysql: None,
+            sequence: None,
+            parameters: Some(parameters),
+            triggers: vec![],
+            event: None,
+            auto_increment: None,
+            view_ddl: None,
         });
     }
     let sql = "SELECT c.oid::text AS id,n.nspname AS schema_name,c.relname AS name,CASE c.relkind WHEN 'r' THEN 'table' WHEN 'p' THEN 'partitioned_table' WHEN 'v' THEN 'view' WHEN 'm' THEN 'materialized_view' WHEN 'f' THEN 'foreign_table' WHEN 'S' THEN 'sequence' ELSE c.relkind::text END AS kind,pg_get_userbyid(c.relowner) AS owner_name,obj_description(c.oid,'pg_class') AS comment,CASE WHEN c.relkind IN ('v','m') THEN pg_get_viewdef(c.oid,true) END AS definition FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE c.oid=$1::oid";
@@ -247,7 +348,65 @@ pub async fn load_object_details(
         .map_err(|e| postgres_error("读取对象详情失败", &e))?;
     let schema: String = r.get("schema_name");
     let name: String = r.get("name");
-    let col_sql = "SELECT a.attname AS name,a.attnum::smallint AS ordinal_position,format_type(a.atttypid,a.atttypmod) AS data_type,NOT a.attnotnull AS nullable,pg_get_expr(ad.adbin,ad.adrelid) AS default_value,col_description(a.attrelid,a.attnum) AS comment,EXISTS (SELECT 1 FROM pg_constraint pk WHERE pk.conrelid=a.attrelid AND pk.contype='p' AND a.attnum=ANY(pk.conkey)) AS primary_key,a.attidentity <> '' AS identity,CASE a.attidentity WHEN 'a' THEN 'always' WHEN 'd' THEN 'byDefault' END AS identity_generation,a.attgenerated <> '' AS generated FROM pg_attribute a LEFT JOIN pg_attrdef ad ON ad.adrelid=a.attrelid AND ad.adnum=a.attnum WHERE a.attrelid=$1::oid AND a.attnum>0 AND NOT a.attisdropped ORDER BY a.attnum";
+    let object_kind: String = r.get("kind");
+    let qualified = format!("{}.{}", quote_identifier(&schema), quote_identifier(&name));
+    let qualified_name = format!("{schema}.{name}");
+    let mut details = ObjectDetails {
+        id: oid.to_string(),
+        schema,
+        name,
+        qualified_name,
+        kind: object_kind,
+        owner: col(&r, "owner_name"),
+        comment: col(&r, "comment"),
+        columns: vec![],
+        indexes: vec![],
+        constraints: vec![],
+        definition: col(&r, "definition"),
+        signature: None,
+        table_ddl: None,
+        mysql: None,
+        sequence: None,
+        parameters: None,
+        triggers: vec![],
+        event: None,
+        auto_increment: None,
+        view_ddl: None,
+    };
+    if details.kind == "sequence" {
+        let sequence = load_sequence(client, oid).await?;
+        details.definition = Some(sequence_ddl(&qualified, &sequence, details.comment.as_deref()));
+        details.sequence = Some(sequence);
+        return Ok(details);
+    }
+    if let Some(definition) = details.definition.as_deref().filter(|_| details.kind == "view") {
+        let row = timeout(QUERY_TIMEOUT, client.query_one(
+            "SELECT COALESCE(array_agg(format('%I = %L', option_name, option_value) ORDER BY option_name), ARRAY[]::text[]) FROM pg_class c CROSS JOIN LATERAL pg_options_to_table(c.reloptions) WHERE c.oid=$1",
+            &[&oid],
+        )).await.map_err(|_| timeout_error("读取视图选项"))?
+            .map_err(|e| postgres_error("读取视图选项失败", &e))?;
+        let options: Vec<String> = row.get(0);
+        let options = if options.is_empty() { String::new() } else { format!(" WITH ({})", options.join(", ")) };
+        details.view_ddl = Some(format!("CREATE OR REPLACE VIEW {qualified}{options} AS\n{};", definition.trim().trim_end_matches(';')));
+    }
+    let col_sql = r#"
+        SELECT a.attname AS name,a.attnum::smallint AS ordinal_position,format_type(a.atttypid,a.atttypmod) AS data_type,
+               NOT a.attnotnull AS nullable,pg_get_expr(ad.adbin,ad.adrelid) AS default_value,col_description(a.attrelid,a.attnum) AS comment,
+               EXISTS (SELECT 1 FROM pg_constraint pk WHERE pk.conrelid=a.attrelid AND pk.contype='p' AND a.attnum=ANY(pk.conkey)) AS primary_key,
+               a.attidentity <> '' AS identity,CASE a.attidentity WHEN 'a' THEN 'always' WHEN 'd' THEN 'byDefault' END AS identity_generation,
+               a.attgenerated <> '' AS generated, seq.*
+        FROM pg_attribute a
+        LEFT JOIN pg_attrdef ad ON ad.adrelid=a.attrelid AND ad.adnum=a.attnum
+        LEFT JOIN LATERAL (
+            SELECT s.oid::text AS sequence_id, ns.nspname AS sequence_schema, s.relname AS sequence_name
+            FROM pg_depend d JOIN pg_class s ON s.oid=d.objid AND s.relkind='S'
+            JOIN pg_namespace ns ON ns.oid=s.relnamespace
+            WHERE d.refclassid='pg_class'::regclass AND d.refobjid=a.attrelid AND d.refobjsubid=a.attnum
+              AND d.classid='pg_class'::regclass AND d.deptype IN ('a','i')
+            ORDER BY d.deptype='i' DESC, s.oid LIMIT 1
+        ) seq ON true
+        WHERE a.attrelid=$1::oid AND a.attnum>0 AND NOT a.attisdropped ORDER BY a.attnum
+    "#;
     let cr = timeout(QUERY_TIMEOUT, client.query(col_sql, &[&oid]))
         .await
         .map_err(|_| timeout_error("读取对象列"))?
@@ -265,6 +424,11 @@ pub async fn load_object_details(
             identity: x.get("identity"),
             identity_generation: col(&x, "identity_generation"),
             generated: x.get("generated"),
+            sequence: col::<String>(&x, "sequence_id").map(|id| ColumnSequence {
+                id,
+                schema: x.get("sequence_schema"),
+                name: x.get("sequence_name"),
+            }),
         })
         .collect();
     let ir=timeout(QUERY_TIMEOUT,client.query("SELECT c.relname AS name,pg_get_indexdef(i.indexrelid) AS definition,i.indisunique AS unique,i.indisprimary AS primary,EXISTS (SELECT 1 FROM pg_constraint k WHERE k.conrelid=i.indrelid AND k.conindid=i.indexrelid AND k.contype IN ('p','u','x')) AS constraint_owned FROM pg_index i JOIN pg_class c ON c.oid=i.indexrelid WHERE i.indrelid=$1::oid ORDER BY c.relname",&[&oid])).await.map_err(|_|timeout_error("读取对象索引"))?.map_err(|e|postgres_error("读取对象索引失败",&e))?;
@@ -300,28 +464,94 @@ pub async fn load_object_details(
             definition: x.get("definition"),
         })
         .collect();
-    let object_kind: String = r.get("kind");
-    let table_ddl = if matches!(object_kind.as_str(), "table" | "partitioned_table") {
+    details.table_ddl = if matches!(details.kind.as_str(), "table" | "partitioned_table") {
         Some(load_table_ddl(client, oid, constraint_indexes).await?)
     } else {
         None
     };
-    Ok(ObjectDetails {
-        id: oid.to_string(),
-        schema: schema.clone(),
-        name: name.clone(),
-        qualified_name: format!("{schema}.{name}"),
-        kind: r.get("kind"),
-        owner: col(&r, "owner_name"),
-        comment: col(&r, "comment"),
-        columns,
-        indexes,
-        constraints,
-        definition: col(&r, "definition"),
-        signature: None,
-        table_ddl,
-        mysql: None,
+    details.columns = columns;
+    details.indexes = indexes;
+    details.constraints = constraints;
+    Ok(details)
+}
+
+async fn load_routine_parameters(client: &Client, oid: u32, procedure: bool) -> Result<Vec<RoutineParameter>, String> {
+    let rows = timeout(QUERY_TIMEOUT, client.query(r#"
+        SELECT p.proargnames[arg.pos] AS name, format_type(arg.type_oid, NULL) AS data_type,
+               COALESCE(p.proargmodes[arg.pos]::text, 'i') AS mode
+        FROM pg_proc p
+        CROSS JOIN LATERAL unnest(COALESCE(p.proallargtypes, p.proargtypes::oid[]))
+            WITH ORDINALITY arg(type_oid, pos)
+        WHERE p.oid=$1 ORDER BY arg.pos
+    "#, &[&oid])).await.map_err(|_| timeout_error("读取例程参数"))?
+        .map_err(|e| postgres_error("读取例程参数失败", &e))?;
+    Ok(rows.into_iter().filter_map(|row| {
+        let mode: String = row.get("mode");
+        let mode = match mode.as_str() {
+            "i" => "IN",
+            "b" => "INOUT",
+            "v" => "VARIADIC",
+            "o" if procedure => "OUT",
+            _ => return None,
+        };
+        Some(RoutineParameter {
+            name: col(&row, "name"),
+            data_type: row.get("data_type"),
+            mode: mode.into(),
+        })
+    }).collect())
+}
+
+async fn load_sequence(client: &Client, oid: u32) -> Result<SequenceDetails, String> {
+    let row = timeout(QUERY_TIMEOUT, client.query_one(r#"
+        SELECT format_type(s.seqtypid,NULL) AS data_type, s.seqstart::text AS start,
+               s.seqincrement::text AS increment, s.seqmin::text AS min, s.seqmax::text AS max,
+               s.seqcache::text AS cache, s.seqcycle AS cycle, ps.last_value::text,
+               owned.column_name AS owned_by, COALESCE(owned.identity, false) AS identity, c.relpersistence::text
+        FROM pg_sequence s
+        JOIN pg_class c ON c.oid=s.seqrelid JOIN pg_namespace n ON n.oid=c.relnamespace
+        LEFT JOIN pg_sequences ps ON ps.schemaname=n.nspname AND ps.sequencename=c.relname
+        LEFT JOIN LATERAL (
+            SELECT format('%I.%I.%I', ns.nspname, t.relname, a.attname) AS column_name, d.deptype='i' AS identity
+            FROM pg_depend d JOIN pg_class t ON t.oid=d.refobjid JOIN pg_namespace ns ON ns.oid=t.relnamespace
+            JOIN pg_attribute a ON a.attrelid=t.oid AND a.attnum=d.refobjsubid
+            WHERE d.classid='pg_class'::regclass AND d.objid=c.oid AND d.objsubid=0
+              AND d.refclassid='pg_class'::regclass AND d.deptype IN ('a','i')
+            LIMIT 1
+        ) owned ON true
+        WHERE s.seqrelid=$1
+    "#, &[&oid])).await.map_err(|_| timeout_error("读取序列属性"))?
+        .map_err(|e| postgres_error("读取序列属性失败", &e))?;
+    Ok(SequenceDetails {
+        data_type: row.get("data_type"),
+        start: row.get("start"),
+        increment: row.get("increment"),
+        min: row.get("min"),
+        max: row.get("max"),
+        cache: row.get("cache"),
+        cycle: row.get("cycle"),
+        last_value: col(&row, "last_value"),
+        owned_by: col(&row, "owned_by"),
+        identity: row.get("identity"),
+        persistence: row.get("relpersistence"),
     })
+}
+
+fn sequence_ddl(qualified: &str, sequence: &SequenceDetails, comment: Option<&str>) -> String {
+    let options = format!("START WITH {} INCREMENT BY {} MINVALUE {} MAXVALUE {} CACHE {} {}CYCLE",
+        sequence.start, sequence.increment, sequence.min, sequence.max, sequence.cache,
+        if sequence.cycle { "" } else { "NO " });
+    let mut ddl = if sequence.identity {
+        format!("-- IDENTITY 序列由归属列创建。以下语句配置已存在的序列。\nALTER SEQUENCE {qualified} {options};")
+    } else {
+        let owned = sequence.owned_by.as_deref().unwrap_or("NONE");
+        let persistence = match sequence.persistence.as_str() { "u" => "UNLOGGED ", "t" => "TEMPORARY ", _ => "" };
+        format!("CREATE {persistence}SEQUENCE {qualified} AS {} {options} OWNED BY {owned};", sequence.data_type)
+    };
+    if let Some(comment) = comment {
+        ddl.push_str(&format!("\nCOMMENT ON SEQUENCE {qualified} IS {};", quote_text(comment)));
+    }
+    ddl
 }
 
 fn quote_identifier(value: &str) -> String {

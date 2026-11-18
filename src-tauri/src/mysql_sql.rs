@@ -15,7 +15,7 @@ fn words_mode(sql: &str, no_backslash: bool) -> Vec<String> {
             b'\'' | b'"' | b'`' => {
                 let quote = bytes[index]; index += 1; let start = index;
                 while index < bytes.len() {
-                    if !no_backslash && bytes[index] == b'\\' { index += 2; continue; }
+                    if !no_backslash && quote != b'`' && bytes[index] == b'\\' { index += 2; continue; }
                     if bytes[index] == quote {
                         if bytes.get(index + 1) == Some(&quote) { index += 2; continue; }
                         break;
@@ -25,9 +25,9 @@ fn words_mode(sql: &str, no_backslash: bool) -> Vec<String> {
                 if quote == b'`' { result.push(sql[start..index.min(bytes.len())].to_ascii_uppercase()); }
                 index += 1;
             }
-            b'#' => { while index < bytes.len() && bytes[index] != b'\n' { index += 1; } }
+            b'#' => { while index < bytes.len() && !matches!(bytes[index], b'\n' | b'\r') { index += 1; } }
             b'-' if bytes.get(index + 1) == Some(&b'-') && bytes.get(index + 2).is_none_or(u8::is_ascii_whitespace) => {
-                while index < bytes.len() && bytes[index] != b'\n' { index += 1; }
+                while index < bytes.len() && !matches!(bytes[index], b'\n' | b'\r') { index += 1; }
             }
             b'/' if bytes.get(index + 1) == Some(&b'*') => {
                 let executable = bytes.get(index + 2) == Some(&b'!');
@@ -52,15 +52,24 @@ fn words_mode(sql: &str, no_backslash: bool) -> Vec<String> {
 }
 
 pub fn statements(sql: &str, no_backslash: bool) -> Result<Vec<String>, String> {
+    Ok(split_statements(sql, no_backslash, true, false)?.into_iter().map(str::to_string).collect())
+}
+
+fn split_statements(sql: &str, no_backslash: bool, allow_routine_body: bool, transaction_script: bool) -> Result<Vec<&str>, String> {
     let has_directive = sql.lines().any(|line| line.trim_start().to_ascii_uppercase().starts_with("DELIMITER "));
-    if !has_directive && routine(sql, no_backslash) { return Ok(vec![sql.trim().to_string()]); }
+    if !has_directive && allow_routine_body && routine(sql, no_backslash) { return Ok(vec![sql.trim()]); }
     let mut delimiter = ";".to_string(); let mut buffer = String::new(); let mut result = Vec::new();
     let mut quote = None; let mut block_comment = false;
-    for line in sql.split_inclusive('\n') {
+    let mut statement_start = 0;
+    let mut next_line = 0;
+    for line in sql.split_inclusive(['\n', '\r']) {
+        let line_start = next_line;
+        next_line += line.len();
         let trimmed = line.trim();
         if quote.is_none() && !block_comment && trimmed.to_ascii_uppercase().starts_with("DELIMITER ") {
+            if !allow_routine_body { return Err("此操作不接受 DELIMITER 指令".into()); }
             if !words_mode(&buffer, no_backslash).is_empty() { return Err("DELIMITER 前的 SQL 未结束".into()); }
-            buffer.clear(); delimiter = trimmed[10..].trim().to_string();
+            buffer.clear(); statement_start = next_line; delimiter = trimmed[10..].trim().to_string();
             if delimiter.is_empty() || delimiter.len() > 16 || delimiter.chars().any(char::is_whitespace) { return Err("MySQL DELIMITER 无效".into()); }
             continue;
         }
@@ -68,7 +77,7 @@ pub fn statements(sql: &str, no_backslash: bool) -> Result<Vec<String>, String> 
         while index < bytes.len() {
             if let Some(active) = quote {
                 let ch = line[index..].chars().next().unwrap(); buffer.push(ch); index += ch.len_utf8();
-                if !no_backslash && ch == '\\' && index < bytes.len() {
+                if !no_backslash && active != b'`' && ch == '\\' && index < bytes.len() {
                     let next = line[index..].chars().next().unwrap(); buffer.push(next); index += next.len_utf8();
                 } else if ch as u32 == active as u32 {
                     if bytes.get(index) == Some(&active) { buffer.push(ch); index += 1; }
@@ -80,11 +89,15 @@ pub fn statements(sql: &str, no_backslash: bool) -> Result<Vec<String>, String> 
                     let ch = line[index..].chars().next().unwrap(); buffer.push(ch); index += ch.len_utf8();
                 }
             } else if line[index..].starts_with(&delimiter) {
-                if !words_mode(&buffer, no_backslash).is_empty() { result.push(buffer.trim().to_string()); }
+                if !words_mode(&buffer, no_backslash).is_empty() { result.push(sql[statement_start..line_start + index].trim()); }
                 buffer.clear(); index += delimiter.len();
+                statement_start = line_start + index;
             } else if bytes[index] == b'#' || (line[index..].starts_with("--") && bytes.get(index + 2).is_none_or(u8::is_ascii_whitespace)) {
                 buffer.push_str(&line[index..]); break;
             } else if line[index..].starts_with("/*") {
+                if transaction_script && (line[index..].starts_with("/*!") || line[index..].starts_with("/*M!") || line[index..].starts_with("/*m!")) {
+                    return Err("事务脚本不支持 MySQL 可执行注释，未执行任何语句".into());
+                }
                 block_comment = true; buffer.push_str("/*"); index += 2;
             } else {
                 let ch = line[index..].chars().next().unwrap(); buffer.push(ch); index += ch.len_utf8();
@@ -93,24 +106,48 @@ pub fn statements(sql: &str, no_backslash: bool) -> Result<Vec<String>, String> 
         }
     }
     if quote.is_some() || block_comment { return Err("MySQL SQL 引号或注释未闭合".into()); }
-    if !words_mode(&buffer, no_backslash).is_empty() { result.push(buffer.trim().to_string()); }
+    if !words_mode(&buffer, no_backslash).is_empty() { result.push(sql[statement_start..].trim()); }
     if result.is_empty() { return Err("SQL 不能为空".into()); }
     Ok(result)
 }
 
+pub fn validate_single(sql: &str, no_backslash: bool) -> Result<Vec<String>, String> {
+    let statements = split_statements(sql, no_backslash, false, false)?;
+    if statements.len() != 1 { return Err("此操作只允许执行一条 SQL".into()); }
+    validate_statements(&statements, false, no_backslash)?;
+    Ok(statements.into_iter().map(str::to_string).collect())
+}
+
+pub(crate) fn transaction_statements(
+    sql: &str, no_backslash: bool,
+) -> Result<(Vec<&str>, crate::transaction_script::End), crate::transaction_script::ScriptError> {
+    let statements = split_statements(sql, no_backslash, false, true)?;
+    let (body, end) = crate::transaction_script::body(&statements, true)?;
+    for (index, statement) in body.iter().enumerate() {
+        validate_statements(std::slice::from_ref(statement), true, no_backslash)
+            .map_err(|error| crate::transaction_script::ScriptError::from(error).at(sql, &statements, index + 1, true))?;
+    }
+    Ok((statements, end))
+}
+
 pub fn validate(sql: &str, transaction_open: bool, no_backslash: bool) -> Result<Vec<String>, String> {
     let statements = statements(sql, no_backslash)?;
-    for statement in &statements {
-        let tokens = words_mode(statement, no_backslash); let first = tokens.first().map(String::as_str).unwrap_or("");
+    validate_statements(&statements, transaction_open, no_backslash)?;
+    Ok(statements)
+}
+
+fn validate_statements(statements: &[impl AsRef<str>], transaction_open: bool, no_backslash: bool) -> Result<(), String> {
+    for statement in statements {
+        let tokens = words_mode(statement.as_ref(), no_backslash); let first = tokens.first().map(String::as_str).unwrap_or("");
         if matches!(first, "USE" | "BEGIN" | "START" | "COMMIT" | "ROLLBACK" | "SAVEPOINT" | "RELEASE" | "XA" | "LOCK" | "UNLOCK")
             || (first == "SET" && tokens.iter().any(|word| matches!(word.as_str(), "AUTOCOMMIT" | "TRANSACTION"))) {
-            return Err("请使用应用的事务按钮或新建绑定目标库的查询，不能用 SQL 改变会话/事务归属".into());
+            return Err("事务命令请单独执行 BEGIN、COMMIT 或 ROLLBACK，或使用事务按钮；切换数据库请新建绑定目标库的查询".into());
         }
         if transaction_open && !matches!(first, "SELECT" | "WITH" | "SHOW" | "DESCRIBE" | "DESC" | "EXPLAIN" | "VALUES" | "INSERT" | "UPDATE" | "DELETE" | "REPLACE") {
             return Err("当前 MySQL 事务保留未提交；DDL、CALL 及会话操作可能隐式提交，请先提交或回滚事务后执行".into());
         }
     }
-    Ok(statements)
+    Ok(())
 }
 
 pub fn definition_clauses(sql: &str, no_backslash: bool) -> Vec<String> {

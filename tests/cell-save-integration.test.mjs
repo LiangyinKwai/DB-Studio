@@ -5,6 +5,7 @@ import vm from 'node:vm';
 import { buildCellUpdateSql, cellColumnName, getCellEditCapability, validateCellDraft } from '../src/cell-edit.js';
 import { formatCellValue } from '../src/result-grid.js';
 import { inspectorSourceValue } from '../src/value-reader.js';
+import { estimateResultBytes, MAX_RESULT_BYTES, selectResultsToRelease } from '../src/query-memory.js';
 
 // Execute the production service functions, with only the application boundary
 // (dialogs, database IPC and rendered grid) replaced by controlled fixtures.
@@ -94,6 +95,33 @@ function fixture() {
 }
 
 const batchDraft = (context, newValue, isNull = false) => ({ context, newValue, isNull });
+test('saved large values enter the result budget once their tab is no longer protected', async () => {
+  const f = fixture();
+  f.tab.result.bytes = estimateResultBytes(f.tab.result);
+  const other = { id: 'other-tab', result: { executed: true, bytes: MAX_RESULT_BYTES - 4096 } };
+  const tabs = [f.tab, other];
+  assert.deepEqual(selectResultsToRelease(tabs, { activeTab: other }), []);
+
+  await f.runtime.commitCellValue(f.capture(), 'x'.repeat(4096), false, { confirm: false });
+  assert.ok(estimateResultBytes(f.tab.result) > 4096);
+  assert.deepEqual(selectResultsToRelease(tabs, { activeTab: f.tab, currentTab: other }), []);
+  assert.deepEqual(selectResultsToRelease(tabs, { activeTab: other, isProtected: tab => tab === f.tab }), []);
+  assert.deepEqual(selectResultsToRelease(tabs, { activeTab: other }), [f.tab]);
+
+  f.tab.result.cellEditsInTransaction = true;
+  assert.deepEqual(selectResultsToRelease(tabs, { activeTab: other }), []);
+});
+
+test('failed cell saves preserve the original data and its valid size estimate', async () => {
+  const f = fixture();
+  const original = f.tab.result.rows[0];
+  const originalBytes = f.tab.result.bytes = estimateResultBytes(f.tab.result);
+  f.runtime.call = async () => { throw new Error('connection unavailable'); };
+  await assert.rejects(f.runtime.commitCellValue(f.capture(), 'x'.repeat(4096), false, { confirm: false }), /connection unavailable/);
+  assert.equal(f.tab.result.rows[0], original);
+  assert.equal(f.tab.result.bytes, originalBytes);
+});
+
 test('saving composite primary key drafts rebases later cells to the new keys in either edit order', async () => {
   for (const keyFirst of [true, false]) {
     const f = fixture();
@@ -141,11 +169,13 @@ test('MySQL save-all rebases typed BIT and binary primary key values before subs
   assert.match(f.calls[2].args.request.sql, /WHERE `mask` <=> 254 AND `raw_key` <=> X'aabb'/);
 });
 
-test('MySQL only invalidates transaction results when the backend confirms rollback', () => {
+test('transaction rollback requires backend confirmation for every SQL driver', () => {
   const f = fixture();
   assert.equal(f.runtime.transactionDidRollback(new Error('DDL cannot run inside the active transaction'), 'mysql'), false);
   assert.equal(f.runtime.transactionDidRollback(new Error('[TX_ROLLED_BACK] failed update'), 'mysql'), true);
-  assert.equal(f.runtime.transactionDidRollback(new Error('failed update'), 'postgres'), true);
+  assert.equal(f.runtime.transactionDidRollback(new Error('failed update'), 'postgres'), false);
+  assert.equal(f.runtime.transactionDidRollback(new Error('[TX_ROLLED_BACK] failed update'), 'postgres'), true);
+  assert.equal(f.runtime.transactionDidRollback(new Error('[TX_MISSING] [TX_OUTCOME_UNKNOWN] lost connection'), 'postgres'), false);
 });
 
 test('table save writes multiple cells directly without per-cell confirmations and preserves sibling row changes', async () => {
@@ -189,12 +219,62 @@ test('a rolled-back transaction cannot mark earlier cells in the same batch as s
   const f = fixture();
   f.state.transactionKeys.add('pg\0commerce');
   let writes = 0;
-  f.runtime.call = async () => { if (++writes === 2) throw new Error('transaction failed'); return { row_count: 1 }; };
+  f.runtime.call = async () => { if (++writes === 2) throw new Error('[TX_ROLLED_BACK] transaction failed'); return { row_count: 1 }; };
   const outcomes = await f.runtime.commitTableCellEdits([batchDraft(f.capture(), 'paid'), batchDraft(f.capture(1, 0), 'ready2')]);
   assert.deepEqual(Array.from(outcomes, outcome => outcome.saved), [false, false]);
   assert.equal(f.tab.result.transactionRolledBack, true);
   assert.equal(f.state.transactionKeys.has('pg\0commerce'), false);
   assert.match(f.notifications.at(-1), /事务已回滚/);
+});
+
+test('an unknown PostgreSQL transaction outcome retains the whole batch without claiming rollback', async () => {
+  const f = fixture();
+  f.state.transactionKeys.add('pg\0commerce');
+  let writes = 0;
+  f.runtime.call = async () => { if (++writes === 2) throw new Error('[TX_MISSING] [TX_OUTCOME_UNKNOWN] cancellation cleanup unconfirmed'); return { row_count: 1 }; };
+  const drafts = [batchDraft(f.capture(), 'paid'), batchDraft(f.capture(1, 0), 'ready2')];
+  const outcomes = await f.runtime.commitTableCellEdits(drafts);
+  assert.deepEqual(Array.from(outcomes, outcome => outcome.saved), [false, false]);
+  assert.equal(f.state.transactionKeys.has('pg\0commerce'), false);
+  assert.equal(f.tab.result.transactionRolledBack, false);
+  assert.equal(f.tab.result.transactionOutcomeUnknown, true);
+  assert.match(f.notifications.at(-1), /事务结果未知.*草稿已保留/);
+  assert.doesNotMatch(f.notifications.at(-1), /已回滚|已撤销/);
+  assert.doesNotMatch(f.tab.message, /已回滚|已撤销/);
+  assert.equal(drafts[0].newValue, 'paid');
+  assert.equal(drafts[1].newValue, 'ready2');
+  await assert.rejects(f.runtime.commitCellValue(drafts[1].context, 'retry', false, { confirm: false }), /事务结果未知/);
+  assert.equal(writes, 2, 'stale uncertain values cannot be written again without refresh');
+});
+
+test('an uncertain isolated write blocks retry without clearing a transaction started later', async () => {
+  const f = fixture();
+  let writes = 0;
+  f.runtime.call = async () => {
+    writes++;
+    f.state.transactionKeys.add('pg\0commerce'); // A later independent transaction.
+    throw new Error('[PG_OUTCOME_UNKNOWN] write timeout');
+  };
+  const context = f.capture(), original = f.tab.result.rows[0];
+  await assert.rejects(f.runtime.commitCellValue(context, 'paid', false, { confirm: false }), /PG_OUTCOME_UNKNOWN/);
+  assert.equal(f.state.transactionKeys.has('pg\0commerce'), true);
+  assert.equal(f.tab.result.rows[0], original);
+  assert.equal(f.tab.result.transactionRolledBack, false);
+  assert.equal(f.tab.result.writeOutcomeUnknown, true);
+  assert.match(f.tab.message, /写入结果未知.*草稿已保留/);
+  await assert.rejects(f.runtime.commitCellValue(context, 'paid', false, { confirm: false }), /结果未知/);
+  assert.equal(writes, 1);
+});
+
+test('an uncertain isolated batch preserves known saves and keeps the uncertain draft', async () => {
+  const f = fixture();
+  let writes = 0;
+  f.runtime.call = async () => { if (++writes === 2) throw new Error('[PG_OUTCOME_UNKNOWN] write timeout'); return { row_count: 1 }; };
+  const outcomes = await f.runtime.commitTableCellEdits([batchDraft(f.capture(), 'paid'), batchDraft(f.capture(1, 0), 'ready2')]);
+  assert.deepEqual(Array.from(outcomes, outcome => outcome.saved), [true, false]);
+  assert.equal(f.tab.result.writeOutcomeUnknown, true);
+  assert.match(f.notifications.at(-1), /已保存 1 格.*1 格修改已保留/);
+  assert.doesNotMatch(f.notifications.at(-1), /已回滚/);
 });
 
 test('table save locks duplicate and single-cell writes for the full operation', async () => {
@@ -342,7 +422,7 @@ test('backend failures retain the original row, release the save lock and clear 
   const f = fixture();
   const original = f.tab.result.rows[0];
   f.state.transactionKeys.add('pg\0commerce');
-  f.runtime.call = async () => { throw new Error('database rejected value'); };
+  f.runtime.call = async () => { throw new Error('[TX_ROLLED_BACK] database rejected value'); };
   await assert.rejects(f.runtime.commitCellValue(f.capture(), 'paid'), /database rejected value/);
   assert.equal(f.tab.result.rows[0], original);
   assert.equal(f.tab.cellSaving, false);
@@ -440,4 +520,18 @@ test('saving one cell preserves and rebases sibling drafts only for the same cap
   assert.equal(f.tab.result.rows[0][0], 'paid');
   assert.equal(f.tab.result.rows[0][2], '{"n":9007199254740995}');
   assert.equal(f.calls.length, 2);
+});
+
+test('PostgreSQL boolean cell edits normalize saved local values to canonical booleans without affecting text columns', async () => {
+  const f = fixture();
+  f.tab.browse.columns.push({ name: 'enabled', dataType: 'boolean', nullable: true });
+  f.tab.result.columns.push('enabled');
+  f.tab.result.rows[0].push(true);
+  f.tab.result.rows[1].push(false);
+  assert.equal(await f.runtime.commitCellValue(f.capture(0, 4), 'false', false, { confirm: false }), true);
+  assert.equal(f.tab.result.rows[0][4], false);
+  assert.equal(await f.runtime.commitCellValue(f.capture(1, 4), 't', false, { confirm: false }), true);
+  assert.equal(f.tab.result.rows[1][4], true);
+  assert.equal(await f.runtime.commitCellValue(f.capture(0, 0), 't', false, { confirm: false }), true);
+  assert.equal(f.tab.result.rows[0][0], 't');
 });

@@ -2,7 +2,7 @@ import { redisKeyTypePresentation } from './redis-key-icons.js';
 import { redisPageKeyType } from './redis-key-metadata.js';
 
 const normalize = (value) => String(value ?? "").normalize("NFKC").toLocaleLowerCase();
-const kindLabels = { table: "表", partitioned_table: "分区表", foreign_table: "外部表", view: "视图", materialized_view: "物化视图", sequence: "序列", function: "函数", procedure: "存储过程", "redis-key": "Redis key" };
+const kindLabels = { table: "表", partitioned_table: "分区表", foreign_table: "外部表", view: "视图", materialized_view: "物化视图", sequence: "序列", function: "函数", procedure: "存储过程", event: "定时事件", "redis-key": "Redis key" };
 const dataKinds = new Set(["table", "partitioned_table", "foreign_table", "view", "materialized_view", "redis-key"]);
 
 /** Snapshot only existing caches. This function never loads a catalog or scans Redis. */

@@ -2,6 +2,8 @@ const DEFAULT_LAYOUT = Object.freeze({
   connectionsWidth: 228,
   objectsWidth: 260,
   editorSize: 40,
+  historyHeight: 240,
+  historyCollapsed: true,
   connectionsCollapsed: false,
   objectsCollapsed: false,
 });
@@ -14,9 +16,12 @@ const LIMITS = Object.freeze({
   mainMin: 400,
   editorMin: 100,
   resultsMin: 180,
-  columnSeparator: 5,
+  connectionsSectionMin: 160,
+  historyHeading: 48,
+  historyExpandedMin: 132,
+  columnSeparator: 1,
   restoreRail: 32,
-  rowSeparator: 7,
+  rowSeparator: 1,
 });
 
 const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
@@ -41,13 +46,18 @@ export function normalizeLayout(value = {}) {
       0,
       100,
     ),
+    historyHeight: Math.max(
+      LIMITS.historyExpandedMin,
+      numberOr(value.historyHeight, DEFAULT_LAYOUT.historyHeight),
+    ),
+    historyCollapsed: value.historyCollapsed !== false,
     connectionsCollapsed: value.connectionsCollapsed === true,
     objectsCollapsed: value.objectsCollapsed === true,
   };
 }
 
 /** Fit preferred pane sizes to the current window without discarding saved preferences. */
-export function calculateWorkspaceLayout(preferences, width, height) {
+export function calculateWorkspaceLayout(preferences, width, height, sidebarHeight = height) {
   const layout = normalizeLayout(preferences);
   width = Math.max(0, numberOr(width, 0));
   height = Math.max(
@@ -95,6 +105,14 @@ export function calculateWorkspaceLayout(preferences, width, height) {
       editorMax,
     ),
   );
+  const historyAvailable = Math.max(0, Math.floor(numberOr(sidebarHeight, 0)) - LIMITS.rowSeparator);
+  const historyCollapsedHeight = Math.min(LIMITS.historyHeading, historyAvailable);
+  const historyMaxHeight = Math.max(historyCollapsedHeight, historyAvailable - LIMITS.connectionsSectionMin);
+  const historyResizable = connectionsVisible && historyMaxHeight >= LIMITS.historyExpandedMin;
+  const historyExpanded = historyResizable && !layout.historyCollapsed;
+  const historyHeight = historyExpanded
+    ? Math.round(clamp(layout.historyHeight, LIMITS.historyExpandedMin, historyMaxHeight))
+    : historyCollapsedHeight;
   return {
     connectionsVisible,
     objectsVisible,
@@ -120,6 +138,12 @@ export function calculateWorkspaceLayout(preferences, width, height) {
     editorMax,
     editorAvailable: height - LIMITS.rowSeparator,
     resultsHeight: height - LIMITS.rowSeparator - editorHeight,
+    historyAvailable,
+    historyCollapsedHeight,
+    historyMaxHeight,
+    historyHeight,
+    historyResizable,
+    historyExpanded,
     mainWidth: width - separators - railSpace - connectionsWidth - objectsWidth,
   };
 }
@@ -136,9 +160,15 @@ export function initWorkspaceLayout({
     "connectionsRail",
     "objectsRail",
     "editorPane",
+    "sidebarSplit",
     "connectionsSplitter",
     "objectsSplitter",
     "editorSplitter",
+    "historySplitter",
+    "toggleHistory",
+    "historySearchBox",
+    "recentQueries",
+    "clearHistory",
     "toggleConnections",
     "toggleObjects",
     "resetLayout",
@@ -163,6 +193,7 @@ export function initWorkspaceLayout({
   const sizes = () => [
     elements.workspaceBody.clientWidth,
     elements.editorResult.clientHeight,
+    elements.sidebarSplit.clientHeight,
   ];
   const listen = (element, event, handler, options) => {
     element.addEventListener(event, handler, options);
@@ -182,6 +213,18 @@ export function initWorkspaceLayout({
     element.setAttribute("aria-valuetext", `${Math.round(now)} 像素`);
     element.tabIndex = visible ? 0 : -1;
   };
+  const historyPosition = (layout, height) => layout.historyAvailable - height;
+  const separatorSizes = (kind) => {
+    if (kind === "history") {
+      return [
+        historyPosition(applied, applied.historyMaxHeight),
+        historyPosition(applied, applied.historyCollapsedHeight),
+        historyPosition(applied, applied.historyHeight),
+      ];
+    }
+    if (kind === "editor") return [LIMITS.editorMin, applied.editorMax, applied.editorHeight];
+    return [LIMITS[`${kind}Min`], applied[`${kind}Max`], applied[`${kind}Width`]];
+  };
   const render = () => {
     frame = 0;
     if (destroyed) return;
@@ -192,6 +235,11 @@ export function initWorkspaceLayout({
     );
     rootStyle.setProperty("--objects-width", `${applied.objectsWidth}px`);
     rootStyle.setProperty("--editor-height", `${applied.editorHeight}px`);
+    rootStyle.setProperty("--history-height", `${applied.historyHeight}px`);
+    elements.toggleHistory.setAttribute("aria-expanded", String(applied.historyExpanded));
+    elements.toggleHistory.disabled = !applied.historyResizable;
+    elements.historySearchBox.hidden = elements.recentQueries.hidden = elements.clearHistory.hidden = !applied.historyExpanded;
+    setSeparator(elements.historySplitter, ...separatorSizes("history"), applied.historyResizable);
     document.body.classList.toggle(
       "hide-connections",
       !applied.connectionsVisible,
@@ -239,7 +287,13 @@ export function initWorkspaceLayout({
   };
   const adjust = (kind, value) => {
     const current = calculateWorkspaceLayout(preferences, ...sizes());
-    if (kind === "editor")
+    if (kind === "history") {
+      const height = current.historyAvailable - value;
+      const beforeDrag = drag?.kind === "history" ? drag.preferences : null;
+      preferences.historyCollapsed = height <= current.historyCollapsedHeight + 8;
+      if (preferences.historyCollapsed) preferences.historyHeight = beforeDrag?.historyHeight ?? preferences.historyHeight;
+      else preferences.historyHeight = clamp(height, LIMITS.historyExpandedMin, current.historyMaxHeight);
+    } else if (kind === "editor")
       preferences.editorSize =
         (clamp(value, LIMITS.editorMin, current.editorMax) /
           current.editorAvailable) *
@@ -270,10 +324,10 @@ export function initWorkspaceLayout({
     flush();
     if (!cancelled) persist();
   };
-  for (const kind of ["connections", "objects", "editor"]) {
+  for (const kind of ["connections", "objects", "editor", "history"]) {
     const element = elements[`${kind}Splitter`];
-    const horizontal = kind === "editor";
-    element.setAttribute("aria-controls", `${kind}Pane`);
+    const horizontal = kind === "editor" || kind === "history";
+    if (kind !== "history") element.setAttribute("aria-controls", `${kind}Pane`);
     element.setAttribute(
       "aria-orientation",
       horizontal ? "horizontal" : "vertical",
@@ -282,12 +336,13 @@ export function initWorkspaceLayout({
     listen(element, "pointerdown", (event) => {
       if (event.button !== 0 || drag) return;
       flush();
+      if (kind === "history" && !applied.historyResizable) return;
       drag = {
         kind,
         element,
         pointerId: event.pointerId,
         start: horizontal ? event.clientY : event.clientX,
-        base: horizontal ? applied.editorHeight : applied[`${kind}Width`],
+        base: separatorSizes(kind)[2],
         preferences: { ...preferences },
       };
       element.classList.add("dragging");
@@ -328,13 +383,13 @@ export function initWorkspaceLayout({
       const increase = horizontal ? "ArrowDown" : "ArrowRight";
       if (![decrease, increase, "Home", "End"].includes(event.key)) return;
       flush();
-      const min = horizontal ? LIMITS.editorMin : LIMITS[`${kind}Min`];
-      const max = horizontal ? applied.editorMax : applied[`${kind}Max`];
-      const now = horizontal ? applied.editorHeight : applied[`${kind}Width`];
+      if (kind === "history" && !applied.historyResizable) return;
+      const [min, max, now] = separatorSizes(kind);
+      const collapseHistory = kind === "history" && event.key === increase && applied.historyHeight <= LIMITS.historyExpandedMin;
       const value =
         event.key === "Home"
           ? min
-          : event.key === "End"
+          : event.key === "End" || collapseHistory
             ? max
             : now +
               (event.key === decrease ? -1 : 1) * (event.shiftKey ? 40 : 10);
@@ -345,12 +400,19 @@ export function initWorkspaceLayout({
     });
     listen(element, "dblclick", () => {
       finishDrag(true);
-      const key = horizontal ? "editorSize" : `${kind}Width`;
+      const key = kind === "history" ? "historyHeight" : kind === "editor" ? "editorSize" : `${kind}Width`;
       preferences[key] = DEFAULT_LAYOUT[key];
+      if (kind === "history") preferences.historyCollapsed = false;
       flush();
       persist();
     });
   }
+  listen(elements.toggleHistory, "click", () => {
+    finishDrag(true);
+    preferences.historyCollapsed = !preferences.historyCollapsed;
+    flush();
+    persist();
+  });
   const setPaneVisible = (kind, visible) => {
     finishDrag(true);
     flush();
@@ -396,6 +458,7 @@ export function initWorkspaceLayout({
   const observer = new ResizeObserver(resize);
   observer.observe(elements.workspaceBody);
   observer.observe(elements.editorResult);
+  observer.observe(elements.sidebarSplit);
   listen(window, "blur", () => finishDrag(true));
   render();
   return {

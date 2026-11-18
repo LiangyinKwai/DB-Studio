@@ -26,7 +26,12 @@ await build({
   format: 'esm',
   platform: 'browser',
   target: 'es2022',
-  outfile: resolve(dist, 'src', 'main.js'),
+  // Preserve dynamic imports so the XLSX runtime is loaded only when needed.
+  // All chunks remain local assets embedded by Tauri's frontendDist.
+  outdir: resolve(dist, 'src'),
+  splitting: true,
+  chunkNames: 'chunks/[name]-[hash]',
+  minify: true,
   sourcemap: false,
   logLevel: 'warning',
 });

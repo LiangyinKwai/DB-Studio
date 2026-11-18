@@ -104,6 +104,24 @@ test('Redis permits values with safe type-specific identities and finite scores'
   assert.equal(getCellEditCapability(tab, cell, 'redis').editable, false);
 });
 
+test('Redis byte-truncated values cannot be edited, while complete rows from a partial page remain editable', () => {
+  const tab = { connectionId: 'redis', mode: 'write', redisKey: 'key', redisType: 'string',
+    result: { executed: true, columns: ['value'], rows: [['prefix']], truncated: true, redisValueTruncated: true } };
+  const cell = { columnIndex: 0, rowIndex: 0 };
+  assert.match(getCellEditCapability(tab, cell, 'redis').reason, /截断预览/);
+  tab.redisType = 'hash'; tab.result.columns = ['field', 'value']; tab.result.rows = [['field', 'complete']];
+  tab.result.redisValueTruncated = false;
+  assert.equal(getCellEditCapability(tab, { columnIndex: 1, rowIndex: 0 }, 'redis').editable, true);
+});
+
+test('an uncertain transaction blocks editing without falsely saying it rolled back', () => {
+  const tab = tableTab(); tab.result.transactionOutcomeUnknown = true;
+  const capability = getCellEditCapability(tab, nameCell);
+  assert.equal(capability.editable, false);
+  assert.match(capability.reason, /事务结果未知/);
+  assert.doesNotMatch(capability.reason, /已回滚/);
+});
+
 test('SQL update locates primary keys using result order and preserves precision', () => {
   assert.equal(update(), 'UPDATE "public"."accounts" SET "name" = E\'Bob\' WHERE "id" IS NOT DISTINCT FROM E\'9007199254740993\';');
   assert.equal(update({ columns: [{ name: 'name' }, { name: 'id' }] }), update());

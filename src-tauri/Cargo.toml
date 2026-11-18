@@ -1,8 +1,8 @@
 [package]
 name = "db-studio"
-version = "0.1.4"
-description = "DB Studio desktop database client"
-authors = ["DB Studio"]
+version = "0.1.5"
+description = "Keybay desktop database client"
+authors = ["Keybay"]
 edition = "2021"
 
 [build-dependencies]

@@ -28,6 +28,7 @@ body .redis-console-entry { margin: 0 0 12px; border: 1px solid var(--app-border
 body .redis-console .redis-console-command { display: block; width: 100%; margin: 0; padding: 10px 14px; color: var(--app-text); font: 12px/1.7 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; overflow-wrap: anywhere; border-bottom: 1px solid var(--app-border); }
 body .redis-console .redis-console-result { display: block; width: 100%; margin: 0; padding: 12px 14px; color: var(--app-text); font: 12px/1.7 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 350px; overflow: auto; }
 body .redis-console-result.error { color: var(--error); }
+.redis-console-notice { margin: 0; padding: 8px 14px; color: var(--warning); font-size: 11px; overflow-wrap: anywhere; }
 body .redis-console-empty { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; min-height: 190px; height: 100%; padding: 18px; color: var(--app-muted); text-align: center; }
 .redis-empty-symbol { color: var(--driver-redis); font: 500 22px/1 ui-monospace, monospace; margin-bottom: 8px; }
 .redis-console-empty h3 { color: var(--app-text); margin: 0; font-size: 14px; font-weight: 600; }

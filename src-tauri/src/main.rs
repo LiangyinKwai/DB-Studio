@@ -24,6 +24,7 @@ mod query_context;
 #[path = "redis.rs"]
 mod redis_adapter;
 mod redis_mutation;
+mod transaction_script;
 use catalog::{DatabaseInfo, DatabaseSchema, ObjectDetails, SchemaObject};
 
 const KEYRING_SERVICE: &str = "com.dbstudio.desktop";
@@ -83,6 +84,14 @@ struct QueryRequest {
     console: bool,
     #[serde(default)]
     console_id: Option<String>,
+    #[serde(default)]
+    expected_mysql_no_backslash_escapes: Option<bool>,
+    #[serde(default)]
+    outside_transaction: bool,
+    #[serde(default)]
+    single_statement: bool,
+    #[serde(default)]
+    transaction_script: bool,
 }
 
 fn deserialize_optional_database<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
@@ -160,6 +169,8 @@ struct QueryResponse {
     truncated_reason: Option<String>,
     #[serde(rename = "queryId")]
     query_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    transaction_script: Option<transaction_script::End>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -176,6 +187,26 @@ struct ConnectionStatus {
 struct ActiveQuery {
     token: CancelToken,
     cancelled: Arc<AtomicBool>,
+    live: Arc<tokio::sync::Mutex<bool>>,
+}
+
+#[derive(Default)]
+struct RedisConsoleSession {
+    closed: tokio::sync::watch::Sender<bool>,
+    connecting: tokio::sync::Mutex<()>,
+}
+
+impl RedisConsoleSession {
+    fn close(&self) {
+        self.closed.send_replace(true);
+    }
+
+    async fn cancelled(&self) {
+        let mut closed = self.closed.subscribe();
+        while !*closed.borrow_and_update() {
+            if closed.changed().await.is_err() { break; }
+        }
+    }
 }
 
 #[derive(Default)]
@@ -187,6 +218,7 @@ struct BackendState {
     /// Explicit write transactions stay alive until the user commits or
     /// rolls them back. Keys include the selected database.
     transactions: Mutex<std::collections::HashMap<String, Arc<tokio::sync::Mutex<Client>>>>,
+    postgres_operation_gates: Mutex<std::collections::HashMap<String, std::sync::Weak<tokio::sync::Mutex<()>>>>,
     redis_connections: Mutex<
         std::collections::HashMap<
             String,
@@ -199,6 +231,7 @@ struct BackendState {
             Arc<tokio::sync::Mutex<redis::aio::MultiplexedConnection>>,
         >,
     >,
+    redis_console_sessions: Mutex<std::collections::HashMap<String, Arc<RedisConsoleSession>>>,
     mysql_connections: Mutex<std::collections::HashMap<String, Arc<mysql_async::Pool>>>,
     mysql_transactions:
         Mutex<std::collections::HashMap<String, Arc<tokio::sync::Mutex<mysql_async::Conn>>>>,
@@ -537,6 +570,22 @@ fn transaction_key(connection_id: &str, database: Option<&str>, profile_database
     format!("{connection_id}\u{1f}{database}")
 }
 
+async fn postgres_operation_guard(state: &BackendState, key: &str) -> Result<tokio::sync::OwnedMutexGuard<()>, String> {
+    let gate = {
+        let mut gates = state.postgres_operation_gates.lock().map_err(|error| state_error("读取 PostgreSQL 操作锁失败", error))?;
+        gates.retain(|_, gate| gate.strong_count() > 0);
+        match gates.get(key).and_then(std::sync::Weak::upgrade) {
+            Some(gate) => gate,
+            None => {
+                let gate = Arc::new(tokio::sync::Mutex::new(()));
+                gates.insert(key.to_string(), Arc::downgrade(&gate));
+                gate
+            }
+        }
+    };
+    timeout(QUERY_TIMEOUT, gate.lock_owned()).await.map_err(|_| timeout_error("等待 PostgreSQL 数据库操作"))
+}
+
 async fn transaction_client(
     app: &AppHandle,
     state: &BackendState,
@@ -561,12 +610,16 @@ async fn transaction_client(
     let client = Arc::new(tokio::sync::Mutex::new(
         connect_postgres(&profile, &password).await?,
     ));
-    client
-        .lock()
-        .await
-        .batch_execute("BEGIN; SET LOCAL statement_timeout = '30000ms'")
-        .await
-        .map_err(|error| postgres_error("开启写入事务失败", &error))?;
+    {
+        let guard = client.lock().await;
+        match timeout(QUERY_TIMEOUT, guard.batch_execute("BEGIN; SET LOCAL statement_timeout = '30000ms'")).await {
+            Ok(result) => result.map_err(|error| postgres_error("开启写入事务失败", &error))?,
+            Err(_) => {
+                let _ = query::cancel_and_rollback(&guard).await;
+                return Err(timeout_error("开启写入事务"));
+            }
+        }
+    }
     state
         .transactions
         .lock()
@@ -672,7 +725,7 @@ async fn redis_console_client_for(
     connection_id: &str,
     console_id: &str,
     database: Option<i64>,
-) -> Result<Arc<tokio::sync::Mutex<redis::aio::MultiplexedConnection>>, String> {
+) -> Result<(Arc<tokio::sync::Mutex<redis::aio::MultiplexedConnection>>, Arc<RedisConsoleSession>), String> {
     if console_id.trim().is_empty() {
         return Err("Redis 控制台缺少会话标识".into());
     }
@@ -682,16 +735,7 @@ async fn redis_console_client_for(
     }
     let (_, database) = selected_redis_database(&profile, database)?;
     let key = redis_console_key(connection_id, console_id);
-    if let Some(client) = state
-        .redis_console_connections
-        .lock()
-        .map_err(|error| state_error("读取 Redis 控制台状态失败", error))?
-        .get(&key)
-        .cloned()
-    {
-        return Ok(client);
-    }
-    let client = Arc::new(tokio::sync::Mutex::new(
+    redis_console_client_with(state, &key, || async {
         redis_adapter::connect(
             &profile.host,
             profile.port,
@@ -701,14 +745,82 @@ async fn redis_console_client_for(
             profile.tls,
             profile.redis_ca_cert_path.as_deref(),
         )
-        .await?,
-    ));
-    state
-        .redis_console_connections
-        .lock()
-        .map_err(|error| state_error("保存 Redis 控制台状态失败", error))?
-        .insert(key, client.clone());
-    Ok(client)
+        .await
+    }).await
+}
+
+async fn run_redis_console_operation<T>(
+    session: &RedisConsoleSession,
+    operation: impl std::future::Future<Output = Result<T, String>>,
+) -> Result<T, String> {
+    tokio::select! {
+        biased;
+        _ = session.cancelled() => Err("Redis 控制台已关闭，命令不会继续等待；已发送命令的执行结果可能未知".into()),
+        result = operation => result,
+    }
+}
+
+async fn redis_console_client_with<F, Fut>(
+    state: &BackendState, key: &str, connect: F,
+) -> Result<(Arc<tokio::sync::Mutex<redis::aio::MultiplexedConnection>>, Arc<RedisConsoleSession>), String>
+where F: FnOnce() -> Fut, Fut: std::future::Future<Output = Result<redis::aio::MultiplexedConnection, String>> {
+    // Reserve the lifecycle before awaiting the socket, so close can cancel
+    // connections still being established as well as running commands.
+    let session = state.redis_console_sessions.lock()
+        .map_err(|error| state_error("读取 Redis 控制台状态失败", error))?
+        .entry(key.to_string()).or_default().clone();
+    let client = run_redis_console_operation(&session, async {
+        let _connecting = session.connecting.lock().await;
+        if let Some(client) = state.redis_console_connections.lock()
+            .map_err(|error| state_error("读取 Redis 控制台状态失败", error))?.get(key).cloned() {
+            return Ok(client);
+        }
+        let client = Arc::new(tokio::sync::Mutex::new(connect().await?));
+        // Release uses the same lock order. An old connect cannot reinsert
+        // its socket after close, disconnect or a new session for this key.
+        let sessions = state.redis_console_sessions.lock()
+            .map_err(|error| state_error("保存 Redis 控制台状态失败", error))?;
+        if !sessions.get(key).is_some_and(|current| Arc::ptr_eq(current, &session)) || *session.closed.borrow() {
+            return Err("Redis 控制台已关闭".into());
+        }
+        state.redis_console_connections.lock()
+            .map_err(|error| state_error("保存 Redis 控制台状态失败", error))?
+            .insert(key.to_string(), client.clone());
+        Ok(client)
+    }).await?;
+    Ok((client, session))
+}
+
+fn release_redis_console_session(state: &BackendState, key: &str) -> Result<bool, String> {
+    let mut sessions = state.redis_console_sessions.lock()
+        .map_err(|error| state_error("清理 Redis 控制台状态失败", error))?;
+    let session = sessions.remove(key);
+    if let Some(session) = &session { session.close(); }
+    let client = state.redis_console_connections.lock()
+        .map_err(|error| state_error("清理 Redis 控制台连接失败", error))?.remove(key);
+    // Never await the client mutex or send DISCARD behind a blocking command.
+    // Cancelling the operation drops its last socket handle; redis-rs then
+    // aborts the canonical multiplexed driver, discarding MULTI/WATCH state.
+    Ok(session.is_some() || client.is_some())
+}
+
+fn release_redis_connection_consoles(state: &BackendState, connection_id: &str) -> Result<(), String> {
+    let prefix = format!("{connection_id}\u{1f}");
+    let mut sessions = state.redis_console_sessions.lock()
+        .map_err(|error| state_error("清理 Redis 控制台状态失败", error))?;
+    sessions.retain(|key, session| {
+        if key.starts_with(&prefix) { session.close(); false } else { true }
+    });
+    state.redis_console_connections.lock()
+        .map_err(|error| state_error("清理 Redis 控制台连接失败", error))?
+        .retain(|key, _| !key.starts_with(&prefix));
+    Ok(())
+}
+
+#[command]
+fn release_redis_console(state: State<'_, BackendState>, connection_id: String, console_id: String) -> Result<bool, String> {
+    if console_id.trim().is_empty() { return Err("Redis 控制台缺少会话标识".into()); }
+    release_redis_console_session(&state, &redis_console_key(&connection_id, &console_id))
 }
 
 #[command]
@@ -871,11 +983,7 @@ async fn save_connection(
         .lock()
         .map_err(|error| state_error("更新连接状态失败", error))?
         .retain(|key, _| key != &profile.id && !key.starts_with(&format!("{}\u{1f}", profile.id)));
-    state
-        .redis_console_connections
-        .lock()
-        .map_err(|e| state_error("清理 Redis 控制台状态失败", e))?
-        .retain(|key, _| !key.starts_with(&format!("{}\u{1f}", profile.id)));
+    release_redis_connection_consoles(&state, &profile.id)?;
     state
         .mysql_transactions
         .lock()
@@ -965,11 +1073,7 @@ async fn delete_connection(
         .retain(|key, _| {
             key != &connection_id && !key.starts_with(&format!("{connection_id}\u{1f}"))
         });
-    state
-        .redis_console_connections
-        .lock()
-        .map_err(|error| state_error("清理 Redis 控制台状态失败", error))?
-        .retain(|key, _| !key.starts_with(&format!("{connection_id}\u{1f}")));
+    release_redis_connection_consoles(&state, &connection_id)?;
     state
         .mysql_transactions
         .lock()
@@ -1077,11 +1181,7 @@ async fn connect_connection(
             .retain(|key, _| {
                 key != &connection_id && !key.starts_with(&format!("{connection_id}\u{1f}"))
             });
-        state
-            .redis_console_connections
-            .lock()
-            .map_err(|error| state_error("清理 Redis 控制台状态失败", error))?
-            .retain(|key, _| !key.starts_with(&format!("{connection_id}\u{1f}")));
+        release_redis_connection_consoles(&state, &connection_id)?;
         state
             .redis_connections
             .lock()
@@ -1141,11 +1241,7 @@ async fn disconnect_clients(state: &BackendState, connection_id: &str) -> Result
         connection_id,
         "清理 Redis 连接状态失败",
     )?;
-    remove_connection_entries(
-        &state.redis_console_connections,
-        connection_id,
-        "清理 Redis 控制台状态失败",
-    )?;
+    release_redis_connection_consoles(state, connection_id)?;
     remove_connection_entries(&state.transactions, connection_id, "清理事务状态失败")?;
     // A pool cannot finish disconnecting while an explicit transaction holds
     // one of its connections. Release those sessions before closing any pool.
@@ -1321,6 +1417,19 @@ async fn list_redis_databases(
 }
 
 #[command]
+async fn get_redis_ttl(
+    app: AppHandle,
+    state: State<'_, BackendState>,
+    connection_id: String,
+    database: Option<i64>,
+    key: String,
+) -> Result<i64, String> {
+    let client = redis_client_for(&app, &state, &connection_id, database).await?;
+    let mut client = client.lock().await;
+    redis_adapter::get_ttl(&mut client, &key).await
+}
+
+#[command]
 async fn get_redis_value(
     app: AppHandle,
     state: State<'_, BackendState>,
@@ -1355,25 +1464,24 @@ async fn execute_redis_command(
                 .map_err(|_| "Redis database 必须是非负整数".to_string())
         })
         .transpose()?;
-    let client = if request.console {
-        redis_console_client_for(
+    if request.console {
+        let (client, session) = redis_console_client_for(
             &app,
             &state,
             &request.connection_id,
             request.console_id.as_deref().unwrap_or_default(),
             database,
         )
-        .await?
-    } else {
-        redis_client_for(&app, &state, &request.connection_id, database).await?
-    };
-    let mut client = client.lock().await;
-    if request.console {
-        redis_adapter::console_with_reconnect(&mut client, &request.sql,
-            || reconnect_redis(&app, &state, &request.connection_id, database)).await
-    } else {
-        redis_adapter::execute_command(&mut client, &request.sql).await
+        .await?;
+        return run_redis_console_operation(&session, async {
+            let mut client = client.lock().await;
+            redis_adapter::console_with_reconnect(&mut client, &request.sql,
+                || reconnect_redis(&app, &state, &request.connection_id, database)).await
+        }).await;
     }
+    let client = redis_client_for(&app, &state, &request.connection_id, database).await?;
+    let mut client = client.lock().await;
+    redis_adapter::execute_command(&mut client, &request.sql).await
 }
 
 #[command]
@@ -1670,6 +1778,7 @@ async fn begin_transaction(
         return Ok(true);
     }
     let key = transaction_key(&connection_id, database.as_deref(), &profile.database);
+    let _operation = postgres_operation_guard(&state, &key).await?;
     if state
         .transactions
         .lock()
@@ -1711,6 +1820,7 @@ async fn commit_transaction(
         }
     }
     let key = transaction_key(&connection_id, database.as_deref(), &profile.database);
+    let _operation = postgres_operation_guard(&state, &key).await?;
     let client = state
         .transactions
         .lock()
@@ -1719,19 +1829,9 @@ async fn commit_transaction(
         .ok_or_else(|| "[TX_MISSING] 当前没有未提交事务".to_string())?;
     let commit_result = {
         let guard = client.lock().await;
-        guard.batch_execute("COMMIT").await
+        query::finish_transaction(&guard, true, QUERY_TIMEOUT).await
     };
-    if let Err(error) = commit_result {
-        if error.is_closed() || client.lock().await.is_closed() || error.code().is_some_and(|code| code.code().starts_with("08") || matches!(code.code(), "57P01" | "57P02" | "57P03")) {
-            return Err(format!("[TX_MISSING] [TX_OUTCOME_UNKNOWN] 提交事务时连接断开；结果未知，请检查数据库：{error}"));
-        }
-        state
-            .transactions
-            .lock()
-            .map_err(|lock_error| state_error("恢复事务状态失败", lock_error))?
-            .insert(key, client);
-        return Err(postgres_error("提交事务失败", &error));
-    }
+    commit_result?;
     Ok(true)
 }
 
@@ -1758,22 +1858,41 @@ async fn rollback_transaction(
         return Ok(true);
     }
     let key = transaction_key(&connection_id, database.as_deref(), &profile.database);
+    let _operation = postgres_operation_guard(&state, &key).await?;
     let client = state
         .transactions
         .lock()
         .map_err(|error| state_error("读取事务状态失败", error))?
         .remove(&key)
         .ok_or_else(|| "[TX_MISSING] 当前没有未提交事务".to_string())?;
-    client
-        .lock()
-        .await
-        .batch_execute("ROLLBACK")
-        .await
-        .map_err(|error| postgres_error("回滚事务失败", &error))?;
+    query::finish_transaction(&*client.lock().await, false, QUERY_TIMEOUT).await?;
     Ok(true)
 }
 
-#[command]
+#[derive(Debug, Serialize)]
+#[serde(untagged)]
+enum MutationError {
+    Message(String),
+    Script(transaction_script::ScriptError),
+}
+
+impl From<String> for MutationError {
+    fn from(message: String) -> Self { Self::Message(message) }
+}
+
+impl From<&str> for MutationError {
+    fn from(message: &str) -> Self { Self::Message(message.to_string()) }
+}
+
+impl MutationError {
+    fn message(&self) -> &str {
+        match self {
+            Self::Message(message) => message,
+            Self::Script(error) => &error.message,
+        }
+    }
+}
+
 async fn execute_mutation_with_client(
     state: &BackendState,
     client: &Client,
@@ -1781,9 +1900,13 @@ async fn execute_mutation_with_client(
     query_id: &str,
     started: Instant,
     transaction_already_open: bool,
-) -> Result<QueryResponse, String> {
-    let token = client.cancel_token();
-    let cancelled = Arc::new(AtomicBool::new(false));
+    transaction_script: bool,
+) -> Result<QueryResponse, MutationError> {
+    let active = ActiveQuery {
+        token: client.cancel_token(),
+        cancelled: Arc::new(AtomicBool::new(false)),
+        live: Arc::new(tokio::sync::Mutex::new(true)),
+    };
     {
         let mut queries = state
             .queries
@@ -1792,25 +1915,25 @@ async fn execute_mutation_with_client(
         if queries.contains_key(query_id) {
             return Err("相同 queryId 的查询仍在执行".into());
         }
-        queries.insert(
-            query_id.to_string(),
-            ActiveQuery {
-                token,
-                cancelled: cancelled.clone(),
-            },
-        );
+        queries.insert(query_id.to_string(), active.clone());
     }
-    let result = query::execute_write(
-        client,
-        sql,
-        &cancelled,
-        query_id,
-        started,
-        transaction_already_open,
-    )
-    .await;
+    let result = if transaction_script {
+        query::execute_transaction_script(client, sql, &active, query_id, started).await.map_err(MutationError::Script)
+    } else {
+        query::execute_write(client, sql, &active.cancelled, query_id, started, transaction_already_open).await.map_err(MutationError::Message)
+    };
+    // Wait for any in-flight CancelRequest before this transaction can be
+    // reused. A cancel handler holding a stale query ID must not affect the
+    // next statement on the same PostgreSQL session.
+    *active.live.lock().await = false;
     if let Ok(mut queries) = state.queries.lock() {
         queries.remove(query_id);
+    }
+    // PostgreSQL does not acknowledge CancelRequest delivery. If cancellation
+    // raced a successful response, end this managed transaction instead of
+    // allowing a delayed packet to cancel its next user statement.
+    if transaction_already_open && active.cancelled.load(Ordering::Acquire) && result.is_ok() {
+        return Err("查询已取消".into());
     }
     result
 }
@@ -1820,12 +1943,15 @@ async fn execute_mutation(
     app: AppHandle,
     state: State<'_, BackendState>,
     request: QueryRequest,
-) -> Result<QueryResponse, String> {
+) -> Result<QueryResponse, MutationError> {
     if request.read_only {
         return Err("当前查询已锁定为只读，不能执行写入 SQL".into());
     }
     if request.sql.trim().is_empty() {
         return Err("SQL 不能为空".into());
+    }
+    if request.transaction_script && request.single_statement {
+        return Err("单条 SQL 操作不能执行事务脚本".into());
     }
     let query_id = query_id(request.query_id);
     let (profile, _) = find_profile(&app, &state, &request.connection_id)?;
@@ -1843,11 +1969,14 @@ async fn execute_mutation(
             .get(&key)
             .cloned();
         if let Some(transaction) = transaction {
+            if request.outside_transaction || request.single_statement || request.transaction_script {
+                return Err("请先提交或回滚目标数据库的事务".into());
+            }
             let result = {
                 let mut client = transaction.lock().await;
                 // Reject parse/implicit-commit hazards without closing a valid
                 // transaction. Use this connection's real SQL quoting mode.
-                mysql::validate_write(&mut client, &request.sql, true).await?;
+                mysql::validate_write_mode(&mut client, &request.sql, true, request.expected_mysql_no_backslash_escapes).await?;
                 mysql::execute_in_transaction(&mut client, &request.sql, &query_id, Instant::now())
                     .await
             };
@@ -1862,7 +1991,7 @@ async fn execute_mutation(
                     .map_err(|_| ())
                     .map(|mut transactions| transactions.remove(&key));
             }
-            return result.map_err(|error| format!("[TX_ROLLED_BACK] MySQL 事务已回滚：{error}"));
+            return result.map_err(|error| MutationError::Message(format!("[TX_ROLLED_BACK] MySQL 事务已回滚：{error}")));
         }
         let pool = mysql_pool_for_database(
             &app,
@@ -1871,13 +2000,20 @@ async fn execute_mutation(
             request.database.as_deref(),
         )
         .await?;
-        return mysql::execute_write(&pool, &request.sql, &query_id, Instant::now()).await;
+        if request.transaction_script {
+            return mysql::execute_transaction_script(&pool, &request.sql, &query_id, Instant::now()).await.map_err(MutationError::Script);
+        }
+        return mysql::execute_write_with_mode(&pool, &request.sql, &query_id, Instant::now(), request.expected_mysql_no_backslash_escapes, request.single_statement).await.map_err(MutationError::Message);
+    }
+    if request.single_statement && query::sql_statements(&request.sql).len() != 1 {
+        return Err("此操作只允许执行一条 SQL".into());
     }
     let key = transaction_key(
         &request.connection_id,
         request.database.as_deref(),
         &profile.database,
     );
+    let _operation = postgres_operation_guard(&state, &key).await?;
     let transaction = state
         .transactions
         .lock()
@@ -1886,23 +2022,41 @@ async fn execute_mutation(
         .cloned();
     let started = Instant::now();
     if let Some(transaction) = transaction {
+        if request.outside_transaction || request.single_statement || request.transaction_script {
+            return Err("请先提交或回滚目标数据库的事务".into());
+        }
         let result = async {
             let client = transaction.lock().await;
             query_context::apply(&client, request.schema.as_deref()).await?;
-            execute_mutation_with_client(&state, &client, &request.sql, &query_id, started, true)
+            execute_mutation_with_client(&state, &client, &request.sql, &query_id, started, true, false)
                 .await
         }
         .await;
-        if result.is_err() {
-            let _ = transaction.lock().await.batch_execute("ROLLBACK").await;
+        if let Err(error) = result {
+            // A timeout path already performed bounded cancel/cleanup and
+            // classified its outcome. Do not issue a second cancellation or
+            // turn an uncertain outcome into an unconditional rollback claim.
+            let cleanup = if error.message().contains("[TX_ROLLED_BACK]") || error.message().contains("[TX_MISSING]") {
+                None
+            } else {
+                Some(query::cancel_and_rollback(&*transaction.lock().await).await)
+            };
             let _ = state
                 .transactions
                 .lock()
                 .map_err(|_| ())
                 .map(|mut transactions| transactions.remove(&key));
+            return match cleanup {
+                None => Err(error),
+                Some(Ok(())) => Err(format!("[TX_ROLLED_BACK] PostgreSQL 事务已回滚：{}", error.message()).into()),
+                Some(Err(cleanup)) => Err(format!("[TX_MISSING] [TX_OUTCOME_UNKNOWN] {}；{cleanup}；事务结果未知，请核对数据库", error.message()).into()),
+            };
         }
         result
     } else {
+        // Ordinary requests release the gate before opening an isolated
+        // session. A transaction script keeps it until the script finishes.
+        let _script_guard = request.transaction_script.then_some(_operation);
         let client = acquire_query_client(
             &app,
             &state,
@@ -1911,7 +2065,7 @@ async fn execute_mutation(
         )
         .await?;
         query_context::apply(&client, request.schema.as_deref()).await?;
-        execute_mutation_with_client(&state, &client, &request.sql, &query_id, started, false).await
+        execute_mutation_with_client(&state, &client, &request.sql, &query_id, started, false, request.transaction_script).await
     }
 }
 
@@ -1947,6 +2101,7 @@ async fn execute_query(
     let started = Instant::now();
     let token = client.cancel_token();
     let cancelled = Arc::new(AtomicBool::new(false));
+    let live = Arc::new(tokio::sync::Mutex::new(true));
     {
         let mut queries = state
             .queries
@@ -1960,12 +2115,14 @@ async fn execute_query(
             ActiveQuery {
                 token,
                 cancelled: cancelled.clone(),
+                live: live.clone(),
             },
         );
     }
 
     let result =
         query::execute_read_only(&mut client, &request.sql, &cancelled, &query_id, started).await;
+    *live.lock().await = false;
     if let Ok(mut queries) = state.queries.lock() {
         queries.remove(&query_id);
     }
@@ -1984,10 +2141,16 @@ async fn cancel_query(state: State<'_, BackendState>, query_id: String) -> Resul
     let Some(active) = active else {
         return Ok(false);
     };
+    cancel_postgres_query(&active).await
+}
+
+async fn cancel_postgres_query(active: &ActiveQuery) -> Result<bool, String> {
+    let live = active.live.lock().await;
+    if !*live { return Ok(false); }
     active.cancelled.store(true, Ordering::Release);
-    timeout(QUERY_TIMEOUT, active.token.cancel_query(NoTls))
+    timeout(CONNECTION_CLEANUP_TIMEOUT, active.token.cancel_query(NoTls))
         .await
-        .map_err(|_| timeout_error("发送查询取消请求"))?
+        .map_err(|_| "发送查询取消请求超时（2 秒）".to_string())?
         .map_err(|error| postgres_error("发送查询取消请求失败", &error))?;
     Ok(true)
 }
@@ -2011,7 +2174,9 @@ pub fn run() {
             list_redis_databases,
             list_redis_keys,
             get_redis_value,
+            get_redis_ttl,
             execute_redis_command,
+            release_redis_console,
             delete_redis_key,
             rename_redis_key,
             create_redis_key,
@@ -2036,7 +2201,7 @@ pub fn run() {
             execute_query
         ])
         .run(tauri::generate_context!())
-        .expect("error while running DB Studio");
+        .expect("error while running Keybay");
 }
 
 fn main() {
@@ -2047,10 +2212,37 @@ fn main() {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn postgres_operations_serialize_per_database_and_release_unused_gates() {
+        let state = BackendState::default();
+        let first = postgres_operation_guard(&state, "connection/db1").await.unwrap();
+        assert!(timeout(Duration::from_millis(20), postgres_operation_guard(&state, "connection/db1")).await.is_err());
+        let other = postgres_operation_guard(&state, "connection/db2").await.unwrap();
+        drop(first);
+        let next = postgres_operation_guard(&state, "connection/db1").await.unwrap();
+        drop(other);
+        drop(next);
+        let _last = postgres_operation_guard(&state, "connection/db3").await.unwrap();
+        assert_eq!(state.postgres_operation_gates.lock().unwrap().len(), 1);
+    }
+
     #[test]
     fn generates_or_preserves_query_ids() {
         assert_eq!(query_id(Some(" q-1 ".into())), "q-1");
         assert!(query_id(None).starts_with("query-"));
+    }
+
+    #[test]
+    fn generated_mysql_requests_keep_false_mode_expectations_distinct_from_absent() {
+        let request: QueryRequest = serde_json::from_value(serde_json::json!({
+            "connectionId": "fixture", "sql": "CREATE TABLE example (id int)",
+            "expectedMysqlNoBackslashEscapes": false,
+        })).unwrap();
+        assert_eq!(request.expected_mysql_no_backslash_escapes, Some(false));
+        let ordinary: QueryRequest = serde_json::from_value(serde_json::json!({
+            "connectionId": "fixture", "sql": "SELECT 1",
+        })).unwrap();
+        assert_eq!(ordinary.expected_mysql_no_backslash_escapes, None);
     }
 
     #[test]
@@ -2076,3 +2268,5 @@ mod tests {
 mod integration_tests;
 #[cfg(test)]
 mod mysql_audit_tests;
+#[cfg(test)]
+mod redis_console_tests;

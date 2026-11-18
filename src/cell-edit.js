@@ -27,6 +27,7 @@ export function getCellEditCapability(tab, { column, columnIndex, rowIndex } = {
   if (busyFlags.some((flag) => tab[flag])) return deny('请等待当前操作完成后再编辑');
   const result = tab.result;
   if (result?.schemaChanged) return deny('表结构已改变，请刷新数据后再编辑');
+  if (result?.transactionOutcomeUnknown) return deny(`${result.writeOutcomeUnknown ? '写入' : '事务'}结果未知，请刷新并核对数据库后再编辑`);
   if (result?.transactionRolledBack) return deny('事务已回滚，请刷新结果后再编辑');
   if (!result?.executed) return deny('请先加载数据后再编辑');
   if (result.connectionId && result.connectionId !== tab.connectionId) return deny('结果所属连接已改变，请重新加载数据');
@@ -40,6 +41,7 @@ export function getCellEditCapability(tab, { column, columnIndex, rowIndex } = {
       !Array.isArray(row) || row.length !== columns.length || row[columnIndex] === undefined) return deny('无法确定此单元格对应的字段');
 
   if (driver === 'redis') {
+    if (result.redisValueTruncated) return deny('当前值仅为截断预览，不能编辑；请分段读取完整数据');
     const editableColumn = tab.redisType === 'zset' ? 'score' : 'value';
     if (typeof tab.redisKey !== 'string' || name !== editableColumn || !['string', 'hash', 'list', 'zset'].includes(tab.redisType)) {
       return deny(tab.redisType === 'stream' ? '消息内容不可修改，可通过消息操作追加或删除' : tab.redisType === 'set' ? '集合成员可通过成员操作添加或移除' : '可编辑字符串、哈希值、列表值和有序集合分数；标识列不可修改');

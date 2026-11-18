@@ -2,7 +2,7 @@ import { createServer } from "node:http";
 import { createReadStream, existsSync, mkdirSync, statSync, writeFileSync } from "node:fs";
 import { extname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { chromium } from "./playwright-import.mjs";
+import { chromium, revealObject } from "./playwright-import.mjs";
 import { createWorkspaceFixture } from "./fixtures/workspace-fixture.mjs";
 
 // Fixture data verifies visual states, not database runtime behavior.
@@ -34,7 +34,7 @@ const failures = [];
 const measurements = [];
 page.on("pageerror", (error) => failures.push(error.message));
 const expect = (ok, message) => { if (!ok) throw new Error(message); };
-const themeOptions = ["dark", "light", "ocean", "forest", "contrast"];
+const themeOptions = ["dark", "light"];
 async function selectTheme(theme) {
   await page.locator("#themeButton").click();
   await page.locator(`[data-theme-option='${theme}']`).click();
@@ -175,7 +175,7 @@ try {
           const schema = `${db} .tree-schema[data-schema='public']`;
           await page.locator(schema).waitFor();
           if (await page.locator(schema).getAttribute("open") === null) await page.locator(`${schema} > summary`).click();
-          await page.locator(`${schema} .tree-object`).first().waitFor();
+          await revealObject(page.locator(`${schema} .tree-object`).first());
           await measure(`${schema} > summary > span:nth-child(2)`, `${driver} schema text`);
           await page.locator(`${schema} > summary`).hover();
           await measure(`${schema} > summary > span:nth-child(2)`, `${driver} schema hover text`);
@@ -195,7 +195,7 @@ try {
     }
 
     try {
-      for (const id of ["themeButton", "resetLayout", "modeBadge"]) {
+      for (const id of ["themeButton", "resetLayout"]) {
         await measure(`#${id}`, `${id} text`);
         await page.locator(`#${id}`).hover();
         await measure(`#${id}`, `${id} hover text`);
@@ -210,7 +210,6 @@ try {
       }
       await page.locator("#themeButton").click();
       await measure(".theme-option strong", "theme menu text");
-      await measure(".theme-option small", "theme menu description");
       await page.locator("#themeButton").click();
       await page.locator("[data-connection-id='conn-dev']").click();
       await page.locator(".tree-database[data-database='app']").waitFor();
@@ -273,7 +272,7 @@ try {
   }
   writeFileSync(resolve(evidence, "report.json"), JSON.stringify({ fixtureOnly: true, measurements, failures }, null, 2));
   if (failures.length) { console.error(failures.join("\n")); process.exitCode = 1; }
-  else console.log(`PASS: ${measurements.length} rendered color and contrast checks across five themes and three drivers.`);
+  else console.log(`PASS: ${measurements.length} rendered color and contrast checks across light and dark themes and three drivers.`);
 } finally {
   await context.close();
   await browser.close();

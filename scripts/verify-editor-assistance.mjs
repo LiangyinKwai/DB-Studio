@@ -56,7 +56,7 @@ try {
     // CodeMirror deliberately ignores acceptance keys just after opening.
     await page.waitForTimeout(100);
   }
-  for (const theme of ["dark", "light", "ocean", "forest", "contrast"]) {
+  for (const theme of ["dark", "light"]) {
     await page.locator("#themeButton").click();
     await page.locator(`[data-theme-option='${theme}']`).click();
     await suggest("SELECT * FROM orders WHERE st");
@@ -164,7 +164,7 @@ try {
   expect((await editor.innerText()).endsWith("i.sku"), "MySQL field completion inserted an invalid identifier");
   expect(!failures.length, failures.join("\n"));
   writeFileSync(resolve(evidence, "report.json"), JSON.stringify({ measurements, failures }, null, 2));
-  console.log("PASS: schema priority and qualified alternatives, SQL relation fields, MySQL database isolation, metadata, Tab/Enter acceptance and editor assistance in five themes.");
+  console.log("PASS: schema priority and qualified alternatives, SQL relation fields, MySQL database isolation, metadata, Tab/Enter acceptance and editor assistance in light and dark themes.");
 } finally {
   await context.close();
   await browser.close();

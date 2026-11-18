@@ -1,16 +1,23 @@
 // Preserve native SHOW CREATE clauses instead of reconstructing a MySQL
 // column from PostgreSQL's type/null/default display fields.
-function tokens(text, noBackslash = false) {
+function tokens(text, noBackslash = false, columnAttributes = false) {
   const result = []; let depth = 0;
   for (let index = 0; index < text.length;) {
     if (/\s/.test(text[index])) { index++; continue; }
     if (text[index] === '#' || (text.slice(index, index + 2) === '--' && /\s/.test(text[index + 2] || ' '))) { index = text.indexOf('\n', index); if (index < 0) break; continue; }
-    if (text.slice(index, index + 2) === '/*') { const end = text.indexOf('*/', index + 2); if (end < 0) break; index = end + 2; continue; }
+    if (text.slice(index, index + 2) === '/*') {
+      const end = text.indexOf('*/', index + 2);
+      if (end < 0) break;
+      const visibility = columnAttributes && /^\/\*!\d+\s+(INVISIBLE|VISIBLE)\s*\*\/$/i.exec(text.slice(index, end + 2));
+      if (visibility) result.push({ start: index, end: end + 2, raw: visibility[1], depth });
+      index = end + 2;
+      continue;
+    }
     const start = index, ch = text[index];
     if (["'", '"', '`'].includes(ch)) {
       index++;
       while (index < text.length) {
-        if (!noBackslash && text[index] === '\\') { index += 2; continue; }
+        if (!noBackslash && ch !== '`' && text[index] === '\\') { index += 2; continue; }
         if (text[index] === ch) { if (text[index + 1] === ch) { index += 2; continue; } index++; break; }
         index++;
       }
@@ -54,6 +61,21 @@ export function mysqlDdlTargets(sql, database) {
   return found;
 }
 
+export function mysqlViewDefinition(definition, qualifiedName, sqlMode) {
+  if (!definition) throw new Error('当前账号无法读取视图定义');
+  const list = tokens(definition, mysqlNoBackslashEscapes(sqlMode));
+  const view = list.findIndex(token => !token.quoted && token.raw.toUpperCase() === 'VIEW');
+  const name = list[view + 1];
+  if (list[0]?.raw.toUpperCase() !== 'CREATE' || view < 1 || !name) {
+    throw new Error('无法识别 MySQL 原生视图定义');
+  }
+  const end = list[view + 2]?.raw === '.' ? list[view + 3]?.end : name.end;
+  const as = list.find(token => token.start >= end && !token.depth && !token.quoted && token.raw.toUpperCase() === 'AS');
+  if (!as) throw new Error('无法识别 MySQL 原生视图查询');
+  const header = `ALTER${definition.slice(list[0].end, name.start)}${qualifiedName}${definition.slice(end, as.end)}`;
+  return { header, query: definition.slice(as.end).trim() };
+}
+
 function attributeKind(list, index) {
   const current = list[index], previous = list[index - 1];
   if (current.depth || current.quoted) return null;
@@ -77,7 +99,8 @@ export function mysqlDefaultClause(value, dataType = '') {
 
 export function mysqlColumns(details) {
   if (!details.mysql || !details.definition) return null;
-  const noBackslash = details.mysql.sqlMode?.split(',').includes('NO_BACKSLASH_ESCAPES');
+  if (typeof details.mysql.sqlMode !== 'string') throw new Error('缺少 MySQL SQL_MODE，无法精确读取原生定义，请刷新表结构后重试');
+  const noBackslash = mysqlNoBackslashEscapes(details.mysql.sqlMode);
   const list = tokens(details.definition, noBackslash);
   const open = list.findIndex(token => token.raw === '(' && token.depth === 0);
   if (open < 0) return null;
@@ -88,13 +111,13 @@ export function mysqlColumns(details) {
   }
   const columns = new Map();
   for (const part of parts) {
-    const pieces = tokens(part, noBackslash);
+    const pieces = tokens(part, noBackslash, true);
     if (pieces[0]?.quoted !== '`') continue;
     const name = pieces[0].raw.slice(1, -1).replaceAll('``', '`');
     const starts = pieces.map((token, index) => ({ token, kind: attributeKind(pieces, index) })).filter(item => item.kind);
     const attrs = starts.map((item, index) => ({ kind: item.kind, raw: part.slice(item.token.start, starts[index + 1]?.token.start ?? part.length).trim() }));
     const type = part.slice(pieces[0].end, starts[0]?.token.start ?? part.length).trim();
-    columns.set(name, { type, attrs, defaultValue: attrs.find(attr => attr.kind === 'default')?.raw.replace(/^DEFAULT\s+/i, '') || '' });
+    columns.set(name, { definition: part.slice(pieces[0].end).trim(), type, attrs, defaultValue: attrs.find(attr => attr.kind === 'default')?.raw.replace(/^DEFAULT\s+/i, '') || '' });
   }
   return columns;
 }
@@ -108,10 +131,31 @@ export function mysqlColumnChange(old, row, native, sqlMode, validateType, valid
   if (changed('nullable')) attrs.push({ kind: 'nullable', raw: row.nullable ? 'NULL' : 'NOT NULL' });
   if (changed('defaultValue') && row.defaultValue.trim()) attrs.push({ kind: 'default', raw: mysqlDefaultClause(validateDefault(row.defaultValue), type).trim() });
   if (changed('comment')) {
-    let comment = String(row.comment || '').replaceAll("'", "''");
-    if (comment.includes('\0')) throw new Error('备注不能包含空字符');
-    if (!sqlMode?.split(',').includes('NO_BACKSLASH_ESCAPES')) comment = comment.replaceAll('\\', '\\\\');
-    attrs.push({ kind: 'comment', raw: `COMMENT '${comment}'` });
+    attrs.push({ kind: 'comment', raw: `COMMENT ${mysqlCommentLiteral(row.comment ?? '', sqlMode)}` });
   }
   return `${type} ${attrs.map(attr => attr.raw).join(' ')}`.trim();
+}
+
+export function mysqlNoBackslashEscapes(sqlMode) {
+  if (typeof sqlMode !== 'string') throw new Error('无法确认 MySQL SQL_MODE，请重新打开建表或结构编辑窗口后重试');
+  return sqlMode.split(',').some(mode => mode.trim().toUpperCase() === 'NO_BACKSLASH_ESCAPES');
+}
+
+// COMMENT accepts a quoted text token, not a hex literal or CONVERT expression.
+// MySQL stores column comments in its system (utf8mb3) character set; it can
+// replace supplementary characters or truncate >1024 characters with only a
+// warning even when the CREATE otherwise succeeds. Refuse lossy input first.
+export function mysqlCommentLiteral(value, sqlMode) {
+  let text = String(value);
+  if (text.includes('\0')) throw new Error('MySQL 备注不能包含空字符');
+  if (/[\uD800-\uDFFF\u{10000}-\u{10FFFF}]/u.test(text)) throw new Error('MySQL 字段备注无法原样保存 emoji 等补充 Unicode 字符或无效字符，请移除后重试');
+  // Supplementary/unpaired-surrogate input was rejected above, so UTF-16
+  // length now equals the Unicode code-point count without a large allocation.
+  if (text.length > 1024) throw new Error('MySQL 字段备注最多 1024 个字符，超出会被服务器截断，请缩短后重试');
+  if (text.includes('\\') && !mysqlNoBackslashEscapes(sqlMode)) text = text.replaceAll('\\', '\\\\');
+  return `'${text.replaceAll("'", "''")}'`;
+}
+
+export function mysqlSqlModeExpectation(sql, sqlMode) {
+  return sql.includes('\\') ? { expectedMysqlNoBackslashEscapes: mysqlNoBackslashEscapes(sqlMode) } : {};
 }

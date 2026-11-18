@@ -176,7 +176,7 @@ try {
     assert.ok(layout.resultTop >= layout.commandBottom, "result appears beside command");
   });
   await until(async () => !(await page.locator("#toast").getAttribute("class")).includes("visible"), "toast settled");
-  for (const theme of ["light", "dark", "ocean", "forest", "contrast"]) {
+  for (const theme of ["light", "dark"]) {
     await check(`${theme} at desktop and minimum window sizes`, async () => {
       await page.locator("#themeButton").click();
       await page.locator(`[data-theme-option='${theme}']`).click();

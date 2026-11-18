@@ -3,7 +3,7 @@ import { createServer } from 'node:http';
 import { createReadStream, existsSync, mkdirSync, statSync } from 'node:fs';
 import { extname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { chromium } from './playwright-import.mjs';
+import { chromium, revealObject } from './playwright-import.mjs';
 import { createWorkspaceFixture } from './fixtures/workspace-fixture.mjs';
 
 const root = resolve(fileURLToPath(new URL('..', import.meta.url)));
@@ -66,6 +66,7 @@ try {
   await page.locator('[data-connection-id="conn-dev"]').click();
   await page.locator('.tree-database[data-database="app"] > summary [data-tree-toggle]').click();
   await page.locator('.tree-schema[data-schema="public"] > summary [data-tree-toggle]').click();
+  await revealObject(page.locator('[data-object-id="public.orders"] .object-main'));
   await page.locator('[data-object-id="public.orders"] .object-main').dblclick();
   await label('第 1 页');
   await page.locator('#resultGrid .db-grid-cell').first().waitFor();
@@ -104,6 +105,27 @@ try {
   const clipboard = await page.evaluate(() => navigator.clipboard.readText());
   assert.ok(clipboard.includes('value-12'));
   assert.ok(!clipboard.includes('value-13'));
+  for (const [triggerId, menuId] of [['resultMore', 'resultMoreMenu'], ['dataImportButton', 'dataImportMenu']]) {
+    const trigger = page.locator(`#${triggerId}`), menu = page.locator(`#${menuId}`);
+    await trigger.click();
+    assert.equal(await trigger.getAttribute('aria-expanded'), 'true');
+    assert.equal(await menu.evaluate(node => node.contains(document.activeElement)), false, 'mouse opening must not focus a menu item');
+    const first = menu.locator('button:not(:disabled)').first();
+    assert.equal(await first.evaluate(node => getComputedStyle(node).outlineStyle), 'none');
+    await page.keyboard.press('ArrowDown');
+    assert.equal(await first.evaluate(node => node === document.activeElement), true, 'keyboard navigation should focus the first item');
+    await page.keyboard.press('Escape');
+    assert.equal(await trigger.evaluate(node => node === document.activeElement), true, 'Escape should restore trigger focus');
+    await trigger.click();
+    await trigger.evaluate(node => node.blur()); // macOS WebViews may leave buttons unfocused after a mouse click.
+    await page.keyboard.press('ArrowDown');
+    assert.equal(await first.evaluate(node => node === document.activeElement), true, 'keyboard must reach a mouse-opened menu even when the trigger did not take focus');
+    await page.keyboard.press('Escape');
+    await trigger.focus();
+    await page.keyboard.press('Enter');
+    assert.equal(await first.evaluate(node => node === document.activeElement), true, 'keyboard opening should focus the first item');
+    await page.keyboard.press('Escape');
+  }
   await page.locator('#resultMore').focus();
   await page.keyboard.press('ArrowDown');
   assert.equal(await page.locator('#resultMore').getAttribute('aria-expanded'), 'true');
@@ -117,15 +139,28 @@ try {
   await page.locator('#tableToolbarTitle').click();
   assert.ok(await page.locator('#resultMoreMenu').isHidden());
   await page.locator('#resultFilter').fill('');
+  const gridBounds = () => page.locator('#resultGrid').boundingBox();
+  const unselectedBounds = await gridBounds();
   await page.locator('[data-select-row="0"]').check();
   await page.locator('#resultSelection').waitFor();
+  assert.equal(await page.locator('#selectionCount').innerText(), '已选 1/500 行');
+  assert.deepEqual(await gridBounds(), unselectedBounds);
+  await page.locator('[data-select-row="1"]').check();
+  assert.equal(await page.locator('#selectionCount').innerText(), '已选 2/500 行');
+  assert.ok(await page.locator('#editRow').isDisabled());
+  assert.deepEqual(await gridBounds(), unselectedBounds);
+  await page.locator('[data-select-row="1"]').uncheck();
+  await page.locator('[data-select-row="0"]').uncheck();
+  assert.ok(await page.locator('#resultSelection').isHidden());
+  assert.deepEqual(await gridBounds(), unselectedBounds);
+  await page.locator('[data-select-row="0"]').check();
   await page.locator('#editRow').click();
   await page.locator('#mutationModal').waitFor();
   await page.locator('#cancelMutation').click();
   await page.locator('#deleteRows').click();
   await page.locator('#mutationModal').waitFor();
   await page.locator('#cancelMutation').click();
-  for (const theme of ['light', 'dark', 'ocean', 'forest', 'contrast']) {
+  for (const theme of ['light', 'dark']) {
     await page.locator('#themeButton').click();
     await page.locator(`[data-theme-option="${theme}"]`).click();
     for (const width of [1440, 1060]) {
@@ -137,8 +172,9 @@ try {
   }
   await page.locator('[data-select-row="0"]').uncheck();
   assert.ok(await page.locator('#resultSelection').isHidden());
+  const dataTabId = await page.locator('.query-tab.active').getAttribute('data-tab-id');
   await page.locator('#structureTab').click();
-  await page.locator('#structurePanel').waitFor();
+  await page.locator('#structurePanel').getByRole('tab', { name: '定义' }).click();
   assert.ok(await page.locator('#pageControls').isHidden());
   await page.evaluate(() => {
     window.__structureHeading = document.querySelector('#structurePanel h2');
@@ -175,13 +211,13 @@ try {
   await page.waitForFunction(() => !window.__structureHeading.isConnected);
   assert.equal(fixture.callsFor('execute_query').length, queriesBeforeRefresh);
   assert.equal(await page.locator('#structurePanel').evaluate(panel => panel.scrollTop), 420);
-  await page.locator('#resultTab').click();
+  await page.locator(`[data-tab-id="${dataTabId}"] .tab-select`).click();
   await label('第 1 页');
   await page.locator('#newRow').click();
   await page.locator('#mutationModal').waitFor();
   await page.locator('#cancelMutation').click();
   assert.deepEqual(errors, []);
-  console.log('PASS: toolbar/footer fit five themes at 1440/1060px; paging/jump/failure retention, filtered copy/export, keyboard/outside dismissal, contextual edit/delete, insert, structure/data navigation, structure refresh DOM reuse, failure retention, changed metadata and scroll preservation.');
+  console.log('PASS: toolbar/footer fit light and dark themes at 1440/1060px; paging/jump/failure retention, filtered copy/export, keyboard/outside dismissal, contextual edit/delete, insert, structure/data navigation, structure refresh DOM reuse, failure retention, changed metadata and scroll preservation.');
 } finally {
   await browser.close();
   await new Promise(done => server.close(done));

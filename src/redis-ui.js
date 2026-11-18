@@ -17,7 +17,7 @@ export function initRedisDialog(dialog, { canClose = () => true, onClose = () =>
 export function redisValueForCopy(payload) {
   if (payload?.keyType === 'none') throw new Error('Key 已过期或被删除，请刷新');
   // Never label a bounded preview as the entire value.
-  if (payload?.partial) throw new Error('当前 Key 仅加载了部分内容，请在数据页导出预览或通过控制台读取完整值');
+  if (payload?.partial || payload?.truncated) throw new Error('当前 Key 仅加载了部分内容，请在数据页导出预览或分段读取完整值');
   return typeof payload.raw === 'string' ? payload.raw : JSON.stringify(payload.raw, null, 2);
 }
 

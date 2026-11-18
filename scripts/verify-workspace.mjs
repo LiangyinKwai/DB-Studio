@@ -2,7 +2,7 @@ import { createServer } from "node:http";
 import { createReadStream, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { extname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { chromium } from "./playwright-import.mjs";
+import { chromium, revealObject, setTabReadOnly } from "./playwright-import.mjs";
 import { createWorkspaceFixture } from "./fixtures/workspace-fixture.mjs";
 
 const root = resolve(fileURLToPath(new URL("..", import.meta.url)));
@@ -104,7 +104,7 @@ await check("connection and object browser icons follow the database driver", as
 
 await check("theme picker exposes readable preset themes without a color palette", async () => {
   await page.locator("#themeButton").click();
-  expect(await page.locator("#themeMenu [data-theme-option]").count() === 5, "theme picker should expose five presets");
+  expect(await page.locator("#themeMenu [data-theme-option]").count() === 3, "theme picker should expose light, dark and system");
   expect(await page.locator("#themeMenu input[type='color']").count() === 0, "theme picker still exposes custom color controls");
   await page.locator("#themeMenu [data-theme-option='light']").click();
   expect(await page.locator("body").getAttribute("data-theme") === "light", "light theme did not apply");
@@ -312,7 +312,6 @@ await check("write mode confirms mutations and supports transaction rollback", a
   expect(await page.locator(".tab-close").count() === 1, "single query tab is missing its close button");
   await ensureConnection("conn-dev");
   await expandDatabase("app");
-  await waitFor(() => page.locator("#modeBadge").isEnabled(), "query mode toggle");
   const editor = page.locator("#sqlEditor .cm-content");
   await editor.click(); await page.keyboard.press("Meta+A"); await page.keyboard.type("UPDATE public.orders SET status = 'PAID'");
   const beforeMutation = calls("execute_mutation").length;
@@ -326,7 +325,7 @@ await check("write mode confirms mutations and supports transaction rollback", a
   const beforeRollback = calls("rollback_transaction").length;
   await page.locator("#rollbackTransaction").click();
   await waitFor(() => calls("rollback_transaction").length > beforeRollback, "rollback transaction invoke");
-  if (await page.locator("#modeBadge").getAttribute("aria-pressed") === "false") await page.locator("#modeBadge").click();
+  await setTabReadOnly(page, true);
 });
 
 await check("query tabs scroll horizontally while the add button stays fixed", async () => {
@@ -376,6 +375,7 @@ await check("browse page 1 has 500 rows, next sends OFFSET 500, and last page di
   const categorySummary = publicSchema.locator(".category-summary").first();
   if (await categorySummary.count() && await categorySummary.getAttribute("aria-expanded") !== "true") await categorySummary.locator("> [data-tree-toggle]").click();
   await waitFor(() => page.locator("[data-object-id='public.orders']").count().then((count) => count === 1), "orders object");
+  await revealObject(page.locator("[data-object-id='public.orders'] .object-main"));
   await page.locator("[data-object-id='public.orders'] .object-main").dblclick();
   expect(await page.locator("#tableToolbar").isVisible(), "table toolbar did not replace the SQL toolbar");
   expect(await page.locator("#queryToolbar").isVisible().then((visible) => !visible), "SQL toolbar remained visible in table view");
@@ -393,9 +393,11 @@ await check("PostgreSQL cells and primary key values edit only in write mode", a
   // first page so the fixture's first row gives us a stable id/status pair.
   if (await page.locator("#previousPage").isEnabled()) await page.locator("#previousPage").click();
   await waitFor(() => page.locator("#resultCount").innerText().then((value) => value.trim() === "500"), "first page before cell edit");
-  await waitFor(() => page.locator("#editRow").isVisible(), "PostgreSQL primary-key metadata");
-  if (!(await page.locator("#modeBadge").innerText()).includes("可写")) await page.locator("#modeBadge").click();
-  await waitFor(() => page.locator("#modeBadge").innerText().then((value) => value.includes("可写")), "PostgreSQL write mode");
+  await setTabReadOnly(page, false);
+  await waitFor(() => page.locator(".query-tab.active .tab-readonly").count().then(count => count === 0), "PostgreSQL write mode");
+  // Edit-row appears only after selecting a row; delete is visible whenever
+  // writable primary-key metadata is ready (and disabled until selection).
+  await waitFor(() => page.locator("#deleteRows").isVisible(), "PostgreSQL primary-key metadata");
 
   const closeCell = async () => {
     if (await page.locator("#cellModal").evaluate((node) => node.open)) await page.locator("#closeCell").click();
@@ -417,7 +419,7 @@ await check("PostgreSQL cells and primary key values edit only in write mode", a
     expect(/"status"\s*=\s*E?'PAID'/i.test(request?.sql || ""), `cell edit did not send the changed status: ${request?.sql || "<missing>"}`);
     expect(/"id"\s+IS\s+NOT\s+DISTINCT\s+FROM\s+(?:E?'1'|1)(?:\s|;|$)/i.test(request?.sql || ""), `cell edit did not retain the primary-key predicate: ${request?.sql || "<missing>"}`);
     await waitFor(() => page.locator("#cellModal").isVisible().then((visible) => !visible), "PostgreSQL cell modal close");
-    await waitFor(() => page.locator("#modeBadge").innerText().then((value) => value.includes("可写")), "PostgreSQL write mode restore");
+    await waitFor(() => page.locator(".query-tab.active .tab-readonly").count().then(count => count === 0), "PostgreSQL write mode restore");
 
     const primaryKeyCell = page.locator("#resultGrid .db-grid-row[data-row-index='0'] [data-column-index='0']");
     await inspectCell(primaryKeyCell);
@@ -426,15 +428,15 @@ await check("PostgreSQL cells and primary key values edit only in write mode", a
     expect(await page.locator("#saveCell").isVisible(), "primary-key value has no save action");
     await closeCell();
 
-    await page.locator("#modeBadge").click();
-    await waitFor(() => page.locator("#modeBadge").innerText().then((value) => value.includes("只读")), "PostgreSQL read-only mode");
+    await setTabReadOnly(page, true);
+    await waitFor(() => page.locator(".query-tab.active .tab-readonly").count().then(count => count === 1), "PostgreSQL read-only mode");
     await inspectCell(statusCell);
     await waitFor(() => page.locator("#cellModal").isVisible(), "PostgreSQL read-only cell modal");
     expect(!(await page.locator("#cellValue").isEditable()), "PostgreSQL cell remained editable in read-only mode");
     expect(!(await page.locator("#saveCell").isVisible()), "read-only PostgreSQL cell exposed a save action");
   } finally {
     await closeCell();
-    if ((await page.locator("#modeBadge").innerText()).includes("只读")) await page.locator("#modeBadge").click();
+    await setTabReadOnly(page, false);
   }
 });
 
@@ -754,6 +756,7 @@ await check("structure detail and PostgreSQL syntax highlighting are visible", a
   if (await structureSchema.getAttribute("open") === null) await structureSchema.locator(" > summary > [data-tree-toggle]").click();
   if (await structureSchema.locator(".category-summary").count() && await structureSchema.locator(".category-summary").first().getAttribute("aria-expanded") !== "true") await structureSchema.locator(".category-summary").first().locator("> [data-tree-toggle]").click();
   await waitFor(() => page.locator("[data-object-id='public.orders']").count().then((count) => count === 1), "orders structure object");
+  await revealObject(page.locator("[data-object-id='public.orders'] .object-main"));
   await page.locator("[data-object-id='public.orders'] .object-main").click({ button: "right" });
   await page.locator('#objectContextMenu [data-context-action="open-structure"]').click();
   await waitFor(() => page.locator("#structurePanel").innerText().then((value) => /public\.orders|列/.test(value)), "structure details");
@@ -784,8 +787,8 @@ await check("Redis keyspace browsing, value editing, and key management stay dri
   await waitFor(() => page.locator("#tableToolbarTitle").innerText().then((value) => value.trim() === "users:1"), "Redis value tab");
   expect(calls("get_redis_value").length >= 1, "Redis value was not loaded");
   expect(await page.locator("#editorHint").innerText() === "Redis 命令 · 只读锁定后仅允许安全读取命令", "Redis editor hint did not switch");
-  if (!(await page.locator("#modeBadge").innerText()).includes("可写")) await page.locator("#modeBadge").click();
-  await waitFor(() => page.locator("#modeBadge").innerText().then((value) => value.includes("可写")), "Redis write mode");
+  await setTabReadOnly(page, false);
+  await waitFor(() => page.locator(".query-tab.active .tab-readonly").count().then(count => count === 0), "Redis write mode");
   await inspectCell(page.locator("#resultGrid .db-grid-cell").nth(1));
   await waitFor(() => page.locator("#cellModal").isVisible(), "Redis cell inspector");
   expect(await page.locator("#saveCell").isVisible(), "Redis hash value was not editable in write mode");

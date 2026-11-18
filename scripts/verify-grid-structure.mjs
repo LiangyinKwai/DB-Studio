@@ -3,7 +3,7 @@ import { createReadStream, existsSync, mkdirSync, statSync } from 'node:fs';
 import { extname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import assert from 'node:assert/strict';
-import { chromium } from './playwright-import.mjs';
+import { chromium, revealObject, setTabReadOnly } from './playwright-import.mjs';
 import { createWorkspaceFixture } from './fixtures/workspace-fixture.mjs';
 const root = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const dist = resolve(root, 'dist');
@@ -143,7 +143,7 @@ try {
   await page.locator('[data-filter-column="2"]').click(); await page.keyboard.press('Escape');
   assert.equal(await page.locator('.db-grid-filter-panel').count(), 0);
   assert.equal(await page.locator('[data-filter-column="2"]').evaluate((node) => document.activeElement === node), true);
-  for (const theme of ['dark','ocean','forest','contrast','light']) {
+  for (const theme of ['dark','light']) {
     const option = page.locator(`[data-theme-option='${theme}']`); if (!await option.count()) continue;
     await page.locator('#themeButton').click(); await option.click();
     await page.locator('[data-filter-column="2"]').click();
@@ -173,7 +173,7 @@ try {
   console.log('PASS funnel: themed condition dropdown, pointer/keyboard/focus/dismissal, compact bounds, multi-column/text/sort, NULL, empty, precision, selection, export and tabs.');
   await page.locator('[data-remove-filter="all"]').click();
   await page.locator('#objectSearch').fill('orders');
-  const object = page.locator('[data-object-id="public.orders"]').first(); await object.waitFor();
+  const object = page.locator('[data-object-id="public.orders"]').first(); await revealObject(object);
   await object.locator('.object-main').dblclick();
   await wait(async () => (await page.locator('#resultCount').innerText()).trim() === '500');
   await filter(0, 'equal', '3');
@@ -215,8 +215,8 @@ try {
   await editor.locator('[data-field-row="1"][data-field="defaultValue"]').fill("'ready'");
   await editor.getByRole('button', { name: '＋ 添加字段', exact: true }).click();
   await editor.locator('[data-field-row="3"][data-field="name"]').fill('note');
-  assert.match(await editor.locator('pre').innerText(), /ADD COLUMN "note" text/);
-  for (const theme of ['dark','ocean','forest','contrast','light']) {
+  assert.match(await editor.locator('.structure-sql-preview pre').innerText(), /ADD COLUMN "note" text/);
+  for (const theme of ['dark','light']) {
     await page.evaluate((theme) => { document.body.dataset.theme = theme; }, theme);
     await contrast(['.structure-editor-target', '.structure-editor-dialog .form-note', '.structure-editor-table input[type=text]:not(:disabled)', '.structure-editor-table .changed [data-column-status]', '.structure-sql-preview pre']);
     await page.screenshot({ path: resolve(evidence, `structure-editor-${theme}.png`) });
@@ -250,9 +250,9 @@ try {
     await page.locator(`[data-tab-id='${structureTabId}'] .tab-select`).click();
   }
   await page.locator('#refreshTableData').click(); await page.locator('[data-edit-structure]').waitFor();
-  await page.locator('#modeBadge').click(); await page.locator('[data-edit-structure]').click();
+  await setTabReadOnly(page, true); await page.locator('[data-edit-structure]').click();
   assert.equal(await editor.count(), 0); assert.match(await page.locator('#toast').innerText(), /只读/);
-  await page.locator('#modeBadge').click(); await page.locator('[data-edit-structure]').click(); await editor.waitFor();
+  await setTabReadOnly(page, false); await page.locator('[data-edit-structure]').click(); await editor.waitFor();
   await page.setViewportSize({ width: 720, height: 600 });
   await page.screenshot({ path: resolve(evidence, 'structure-editor-compact.png') });
   assert.ok(await editor.evaluate((node) => node.getBoundingClientRect().right <= window.innerWidth));
@@ -263,14 +263,15 @@ try {
   await page.locator('[data-connection-id="mysql-local"]').click();
   await page.locator('.mysql-database[data-database="app"] > summary [data-tree-toggle]').click();
   await page.locator('#objectSearch').fill('orders');
+  await revealObject(page.locator('[data-object-id="app.orders"]').first());
   await page.locator('[data-object-id="app.orders"]').first().click({ button: 'right' });
   await page.locator('[data-context-action="edit-structure"]').click(); await editor.waitFor();
   assert.ok(await editor.locator('[data-field-row="1"][data-field="dataType"]').isDisabled());
   await editor.locator('[data-field-row="1"][data-field="name"]').fill('state');
   await editor.getByRole('button', { name: '＋ 添加字段', exact: true }).click();
   await editor.locator('[data-field-row="4"][data-field="name"]').fill('remark');
-  assert.match(await editor.locator('pre').innerText(), /RENAME COLUMN `status` TO `state`,/);
-  assert.match(await editor.locator('pre').innerText(), /ADD COLUMN `remark` varchar\(255\)/);
+  assert.match(await editor.locator('.structure-sql-preview pre').innerText(), /RENAME COLUMN `status` TO `state`,/);
+  assert.match(await editor.locator('.structure-sql-preview pre').innerText(), /ADD COLUMN `remark` varchar\(255\)/);
   await editor.getByRole('button', { name: '预览并应用', exact: true }).click(); await confirm();
   await editor.waitFor({ state: 'detached' });
   assert.equal(mutations.at(-1).connectionId, 'mysql-local');

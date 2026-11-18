@@ -2,7 +2,7 @@ import { createServer } from "node:http";
 import { createReadStream, existsSync, mkdirSync, statSync } from "node:fs";
 import { extname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { chromium } from "./playwright-import.mjs";
+import { chromium, setTabReadOnly } from "./playwright-import.mjs";
 import { createWorkspaceFixture } from "./fixtures/workspace-fixture.mjs";
 
 const root = resolve(fileURLToPath(new URL("..", import.meta.url)));
@@ -146,12 +146,7 @@ const waitFor = async (predicate, label, timeout = 5000) => {
   while (Date.now() - started < timeout) { if (await predicate()) return; await wait(40); }
   throw new Error(`timeout waiting for ${label}`);
 };
-const ensureRedisMode = async (page, mode) => {
-  const badge = page.locator("#modeBadge");
-  const isWrite = (await badge.innerText()).includes("可写");
-  if ((mode === "write") !== isWrite) await badge.click();
-  await waitFor(() => badge.innerText().then((value) => value.includes(mode === "write" ? "可写" : "只读")), `Redis ${mode} mode`);
-};
+const ensureRedisMode = (page, mode) => setTabReadOnly(page, mode === "read");
 
 if (!existsSync(join(dist, "index.html"))) throw new Error("dist missing; run npm run build:frontend first");
 const { server, port } = await serve(dist);
@@ -255,7 +250,7 @@ await check("Redis type picker supports keyboard selection, dismiss and reset", 
   await page.locator("#cancelRedisCreate").click();
   const screenshots = join(root, "output/playwright/redis-type-picker");
   mkdirSync(screenshots, { recursive: true });
-  for (const theme of ["dark", "light", "ocean", "forest", "contrast"]) {
+  for (const theme of ["dark", "light"]) {
     await page.locator("#themeButton").click();
     await page.locator(`[data-theme-option='${theme}']`).click();
     await page.setViewportSize({ width: 1060, height: 680 });
@@ -343,6 +338,8 @@ await check("Redis queries inherit DB 1 from consoles and keys and reopen histor
   expect(await page.locator("#queryTargetContext").innerText() === "DB 1", "console DB not inherited");
   await fillQuery();
   await run();
+  const historyToggle = page.locator("#toggleHistory");
+  if (await historyToggle.getAttribute("aria-expanded") === "false") await historyToggle.click();
   await page.locator("#recentQueries .recent-query").filter({ hasText: 'GET "otherdb:key"' }).first().click();
   expect(await page.locator("#queryTargetContext").innerText() === "DB 1", "history DB not restored");
   await run();
@@ -434,7 +431,7 @@ await check("read-only Redis menu cannot delete a key", async () => {
   await page.locator("[data-redis-key='cache:home'] .object-main").click();
   await waitFor(() => page.locator(".db-grid-cell").count().then((count) => count > 0), "remote key value");
   await ensureRedisMode(page, "read");
-  await waitFor(() => page.locator("#modeBadge").innerText().then((value) => value.includes("只读")), "Redis read-only mode");
+  await waitFor(() => page.locator(".query-tab.active .tab-readonly").isVisible(), "Redis read-only mode");
   await page.locator("[data-redis-key='cache:home']").click({ button: "right" });
   await waitFor(() => page.locator("#redisContextMenu").isVisible(), "read-only Redis context menu");
   const before = calls("delete_redis_key").length;

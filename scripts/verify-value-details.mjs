@@ -3,7 +3,7 @@ import { createServer } from 'node:http';
 import { createReadStream, existsSync, mkdirSync, statSync } from 'node:fs';
 import { extname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { chromium } from './playwright-import.mjs';
+import { chromium, revealObject, setTabReadOnly } from './playwright-import.mjs';
 import { createWorkspaceFixture } from './fixtures/workspace-fixture.mjs';
 
 const root = resolve(fileURLToPath(new URL('..', import.meta.url))), dist = resolve(root, 'dist');
@@ -24,6 +24,7 @@ const invoke = async (command, args) => {
   if (command === 'list_redis_databases') return [{ index: 0, keyCount: 1 }, { index: 15, keyCount: 1 }];
   if (command === 'list_redis_keys') return { cursor: 0, keys: [longKey], keyTypes: { [longKey]: args.database === 15 ? 'string' : 'hash' } };
   if (command === 'save_redis_cell') return true;
+  if (command === 'get_redis_ttl') return 120;
   if (command === 'get_redis_value') return { key: longKey, keyType: 'string', ttl: 120, columns: ['value'], rows: [[redisJavaLong]], raw: redisJavaLong };
   return fixture.invoke(command, args);
 };
@@ -52,6 +53,7 @@ try {
   await page.goto(`http://127.0.0.1:${server.address().port}`, { waitUntil: 'networkidle' });
   await page.locator('[data-connection-id="conn-dev"]').click();
   await page.locator('.tree-database[data-database="app"] > summary [data-tree-toggle]').click(); await page.locator('.tree-schema[data-schema="public"] > summary [data-tree-toggle]').click();
+  await revealObject(page.locator('[data-object-id="public.orders"] .object-main'));
   await page.locator('[data-object-id="public.orders"] .object-main').dblclick(); await page.locator('#resultGrid [data-grid-cell]').first().waitFor();
   await page.locator('#resultGrid [data-position="0"][data-column-index="2"]').dblclick();
   await page.locator('#cellModal').waitFor({ state: 'visible' });
@@ -61,6 +63,41 @@ try {
   assert.ok(await page.locator('#cellValue').isHidden(), 'double-click should show JSON details, not start editing');
   assert.equal(await page.locator('#cellJsonPretty').getAttribute('aria-pressed'), 'true');
   assert.ok(await page.locator('#cellJsonPreview .cm-editor').isVisible());
+  // Opening a read-only preview must not focus or outline the editor or X.
+  const reader = page.locator('#cellJsonPreview');
+  const readerContent = reader.locator('.cm-content');
+  await page.waitForFunction(() => document.activeElement === document.querySelector('#cellModal'));
+  const originalTheme = await page.evaluate(() => document.body.dataset.theme);
+  await page.evaluate(() => { document.body.dataset.theme = 'dark'; });
+  assert.equal(await reader.evaluate(node => getComputedStyle(node).outlineStyle), 'none');
+  assert.equal(await page.locator('#closeCell').evaluate(node => node === document.activeElement), false);
+  assert.equal(await page.locator('#closeCell').evaluate(node => getComputedStyle(node).outlineStyle), 'none');
+  await page.screenshot({ path: resolve(evidence, 'reader-initial-dark.png') });
+  // Find remains available before the reader has been focused.
+  await page.keyboard.press(process.platform === 'darwin' ? 'Meta+f' : 'Control+f');
+  assert.equal(await page.locator('#cellFind').getAttribute('aria-pressed'), 'true');
+  await page.keyboard.press('Escape');
+  assert.equal(await page.locator('#cellFind').getAttribute('aria-pressed'), 'false');
+  for (const theme of ['dark', 'light']) {
+    await page.evaluate(value => { document.body.dataset.theme = value; }, theme);
+    await readerContent.click();
+    assert.equal(await reader.evaluate(node => getComputedStyle(node).outlineStyle), 'none', `${theme}: mouse focus should not draw a ring`);
+    await page.locator('#editCellJson').focus();
+    await page.keyboard.press('Tab');
+    assert.equal(await readerContent.evaluate(node => node === document.activeElement), true, 'Tab should focus the reader');
+    const focusStyles = await reader.evaluate(node => {
+      const editor = node.querySelector('.cm-editor');
+      const content = node.querySelector('.cm-content');
+      const gutter = node.querySelector('.cm-gutters');
+      const frame = node.getBoundingClientRect(), gutterBox = gutter.getBoundingClientRect();
+      return { ring: getComputedStyle(node).outlineStyle, width: parseFloat(getComputedStyle(node).outlineWidth), offset: parseFloat(getComputedStyle(node).outlineOffset), contentOutline: getComputedStyle(content).outlineStyle, editorOutline: getComputedStyle(editor).outlineStyle, gutterInside: gutterBox.left >= frame.left && gutterBox.right < frame.right };
+    });
+    assert.deepEqual(focusStyles, { ring: 'solid', width: 2, offset: 1, contentOutline: 'none', editorOutline: 'none', gutterInside: true }, `${theme}: reader focus ring`);
+    await page.screenshot({ path: resolve(evidence, `reader-focus-${theme}.png`) });
+    await page.locator('#cellJsonPretty').focus();
+    assert.equal(await reader.evaluate(node => getComputedStyle(node).outlineStyle), 'none');
+  }
+  await page.evaluate(value => { if (value === undefined) delete document.body.dataset.theme; else document.body.dataset.theme = value; }, originalTheme);
   assert.ok(await page.locator('#saveCell').isHidden(), 'unchanged JSON preview should not offer save');
   await page.locator('#cellNull').check(); assert.ok(await page.locator('#saveCell').isVisible(), 'changing to NULL must offer save');
   await page.locator('#cellNull').uncheck(); assert.ok(await page.locator('#saveCell').isHidden(), 'restoring original value should hide save');
@@ -124,7 +161,7 @@ try {
   assert.ok(copies[1].includes('9007199254740993')); assert.ok(copies[1].includes('1.234567890123456789'));
   await page.locator('#cellJsonRaw').click(); await page.locator('#copyCell').click(); await until(() => copies.length === 3); assert.equal(copies[2], payload);
   await page.locator('#cellJsonPretty').click();
-  for (const theme of ['dark', 'light', 'ocean', 'forest', 'contrast']) {
+  for (const theme of ['dark', 'light']) {
     await page.evaluate(theme => { document.body.dataset.theme = theme; }, theme);
     await page.screenshot({ path: resolve(evidence, `json-${theme}.png`) });
   }
@@ -177,7 +214,7 @@ try {
   assert.match(await page.locator('#cellJsonPreview').innerText(), /text/);
   assert.equal(writes.length, 2, 'restoring must not write');
   await page.locator('#closeCell').click();
-  await page.locator('#modeBadge').click(); await inspect(2); assert.ok(await page.locator('#editCellJson').isHidden()); assert.ok(await page.locator('#saveCell').isHidden()); await page.locator('#closeCell').click();
+  await setTabReadOnly(page, true); await inspect(2); assert.ok(await page.locator('#editCellJson').isHidden()); assert.ok(await page.locator('#saveCell').isHidden()); await page.locator('#closeCell').click();
   await inspect(2, 1); await page.locator('#copyCell').click(); await until(() => copies.length === 5); assert.equal(copies[4], 'NULL'); await page.locator('#closeCell').click();
   await page.locator('[data-connection-id="redis-local"]').click(); await page.locator('[data-redis-db="15"] > summary [data-tree-toggle]').click();
   const keyRow = page.locator('[data-redis-db="15"].redis-database .redis-key-object'); await keyRow.waitFor();
@@ -258,6 +295,7 @@ try {
   assert.equal(emptyWrite.value, '');
   assert.equal(emptyWrite.database, 15);
   await page.setViewportSize({ width: 1440, height: 900 }); await page.locator('#tableToolbarTitle').click(); await details.waitFor({ state: 'visible' });
+  await until(() => details.locator('[data-key-ttl]').innerText().then(text => text.includes('TTL 120')));
   assert.match(await details.locator('.key-context').innerText(), /TTL 120/);
   await details.locator('.cm-line').first().click({ button: 'right' });
   assert.equal(await details.locator('.app-context-menu').getByRole('menuitem', { name: '粘贴', exact: true }).count(), 0);
@@ -265,5 +303,5 @@ try {
   await until(() => copies.length === 7); assert.equal(copies[6], longKey);
   await page.keyboard.press('Escape');
   assert.deepEqual(errors, []);
-  console.log('PASS: JSON highlighted/folded/searched/pretty/compact/raw without precision loss, full copy, draft and NULL handling, long-text read/edit/search/expanded modes, close confirmation, readonly support, five themes and long Redis key cache-only details from tree/menu/title with exact copy and DB scope.');
+  console.log('PASS: JSON highlighted/folded/searched/pretty/compact/raw without precision loss, full copy, draft and NULL handling, long-text read/edit/search/expanded modes, close confirmation, readonly support, light and dark themes and long Redis key details with TTL-only reads, exact copy and DB scope.');
 } finally { await browser.close(); await new Promise(done => server.close(done)); }

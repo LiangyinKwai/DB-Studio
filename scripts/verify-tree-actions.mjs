@@ -2,7 +2,7 @@ import { createServer } from "node:http";
 import { createReadStream, existsSync, mkdirSync, statSync } from "node:fs";
 import { extname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { chromium } from "./playwright-import.mjs";
+import { chromium, revealObject } from "./playwright-import.mjs";
 import { createWorkspaceFixture } from "./fixtures/workspace-fixture.mjs";
 
 // UI fixtures only: no queries are sent to a user's database.
@@ -31,8 +31,8 @@ await context.addInitScript(() => {
 let failCommand = "";
 let delayedCatalog = null;
 await context.exposeFunction("__FIXTURE_INVOKE__", async (command, args) => {
-  const result = await fixture.invoke(command, args);
-  if (command === 'get_object_details') return { ...result, tableDdl: { columnDefinitions: ['"id" integer NOT NULL', '"status" text'], beforeStatements: [], afterStatements: [], constraintIndexes: [], createPrefix: 'CREATE TABLE', createSuffix: '', unsupportedReason: null } };
+  const result = await fixture.invoke(command === 'get_object_ddl_details' ? 'get_object_details' : command, args);
+  if (command === 'get_object_details' || command === 'get_object_ddl_details') return { ...result, tableDdl: { columnDefinitions: ['"id" integer NOT NULL', '"status" text'], beforeStatements: ["SELECT pg_catalog.set_config('search_path', E'pg_catalog', false);"], afterStatements: [], constraintIndexes: [], createPrefix: 'CREATE TABLE', createSuffix: '', unsupportedReason: null } };
   if (command === failCommand) throw new Error("fixture refresh failure");
   if (command === "get_schema_objects" && delayedCatalog) return delayedCatalog;
   return result;
@@ -63,11 +63,11 @@ const openMenu = async (locator) => {
 async function expand(database, schema) {
   const db = page.locator(`.tree-database[data-database='${database}']`);
   if (!await db.evaluate((node) => node.open)) await db.locator(":scope > summary [data-tree-toggle]").click();
-  if (await db.evaluate(node => node.classList.contains('mysql-database'))) { await db.locator('.tree-object').first().waitFor(); return db.locator('.mysql-database-objects'); }
+  if (await db.evaluate(node => node.classList.contains('mysql-database'))) { await revealObject(db.locator('.tree-category[data-kind=table] .tree-object').first()); return db.locator('.mysql-database-objects'); }
   const sc = db.locator(`.tree-schema[data-schema='${schema}']`);
   await sc.waitFor();
   if (!await sc.evaluate((node) => node.open)) await sc.locator(":scope > summary [data-tree-toggle]").click();
-  await sc.locator(".tree-object").first().waitFor({ state: "attached" });
+  await revealObject(sc.locator(".tree-category[data-kind=table] .tree-object").first());
   return sc;
 }
 try {
@@ -89,9 +89,10 @@ try {
   expect(fixture.callsFor('execute_mutation').at(-1).args.request.sql === 'DROP SCHEMA "public" RESTRICT;', 'schema deletion should be scoped and non-cascading');
 
   expect(await page.locator(".query-tab").count() === 0, "initial tabs present");
-  await table.locator(".object-main").click();
+  await openMenu(table);
+  await action("open-structure").click();
   await page.locator(".structure-title").waitFor();
-  expect(await page.locator("#structureTab").isEnabled(), "loaded structure tab is disabled");
+  expect(await page.locator("#structurePanel").getByRole("tab", { name: "字段", selected: true }).isVisible(), "fields tab is missing from structure");
   await selected(table);
   expect(fixture.callsFor("get_object_details").at(-1).args.database === "app", "structure tab lost database");
 
@@ -181,7 +182,7 @@ try {
   await toast("对象列表已刷新");
   expect(await category.getAttribute("aria-expanded") === "false", "refresh lost category collapse state");
   await category.locator('[data-tree-toggle]').click();
-  await sc.locator(".tree-category[data-kind='procedure'] > .category-summary [data-tree-toggle]").click();
+  await sc.locator(".tree-category[data-kind='routine'] > .category-summary [data-tree-toggle]").click();
   await openMenu(sc.locator("[data-object-id='public.refresh_proc']"));
   expect(await action("open-data").isHidden() && await action("rename-table").isHidden() && await action("new-query").isHidden(), "procedure exposes invalid table actions");
   await page.keyboard.press("Escape");

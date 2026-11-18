@@ -146,10 +146,13 @@ test("confirmation resets long details, focuses cancel and recovers from a modal
 
 test("responsive pane collapse returns a focused separator to its restore button", (t) => {
   const { document } = environment(t);
-  const ids = ["workspaceBody", "editorResult", "connectionsPane", "objectsPane", "connectionsRail", "objectsRail", "editorPane", "connectionsSplitter", "objectsSplitter", "editorSplitter", "toggleConnections", "toggleObjects", "resetLayout"];
+  const ids = ["workspaceBody", "editorResult", "connectionsPane", "objectsPane", "connectionsRail", "objectsRail", "editorPane",
+    "connectionsSplitter", "objectsSplitter", "editorSplitter", "toggleConnections", "toggleObjects", "resetLayout",
+    "sidebarSplit", "historySplitter", "toggleHistory", "historySearchBox", "recentQueries", "clearHistory"];
   const elements = Object.fromEntries(ids.map((id) => [id, new Element()]));
   elements.workspaceBody.clientWidth = 1200;
   elements.editorResult.clientHeight = 600;
+  elements.sidebarSplit.clientHeight = 640;
   document.getElementById = (id) => elements[id];
   document.querySelectorAll = () => [];
   const frames = [];

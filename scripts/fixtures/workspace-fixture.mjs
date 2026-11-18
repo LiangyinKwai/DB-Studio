@@ -42,6 +42,11 @@ export function createWorkspaceFixture() {
       { id: "reporting.daily_orders", schema: "reporting", name: "daily_orders", kind: "view", qualifiedName: "reporting.daily_orders", columns: [{ name: "day" }, { name: "order_count" }] },
     ],
   };
+  const routineDetails = (args) => ({
+    id: args.objectId, schema: "public", name: "refresh_orders", qualifiedName: "public.refresh_orders", kind: args.kind,
+    columns: [], indexes: [], constraints: [], signature: "refresh_orders()", parameters: [],
+    definition: "CREATE OR REPLACE PROCEDURE public.refresh_orders()\n LANGUAGE plpgsql\nAS $procedure$\nBEGIN\n  REFRESH MATERIALIZED VIEW public.daily_orders;\nEND;\n$procedure$\n",
+  });
   const callsFor = (command) => calls.filter((entry) => entry.command === command);
   const record = (command, args) => {
     const entry = { command, args, at: Date.now() };
@@ -105,6 +110,8 @@ export function createWorkspaceFixture() {
       case "delete_connection": return true;
       case "connect_connection": requireStringConnection(args, command); return true;
       case "disconnect_connection": requireStringConnection(args, command); return true;
+      case "release_redis_console": requireStringConnection(args, command); return true;
+      case "get_redis_ttl": requireStringConnection(args, command); return -1;
       case "list_databases": {
         const connectionId = requireStringConnection(args, command);
         const profile = profiles.find((item) => item.id === connectionId) || profiles[0];
@@ -114,6 +121,7 @@ export function createWorkspaceFixture() {
         ];
       }
       case "mysql_character_settings": requireStringConnection(args, command); return {
+        sqlMode: '',
         defaults: { charset: 'utf8mb4', collation: 'utf8mb4_0900_ai_ci' },
         choices: [ { charset: 'utf8mb4', collation: 'utf8mb4_0900_ai_ci', isDefault: true }, { charset: 'utf8mb4', collation: 'utf8mb4_bin', isDefault: false }, { charset: 'latin1', collation: 'latin1_swedish_ci', isDefault: true } ],
         tableCharset: 'utf8mb4', tableCollation: 'utf8mb4_bin', columns: [{ name: 'title', charset: 'utf8mb4', collation: 'utf8mb4_bin' }],
@@ -135,9 +143,14 @@ export function createWorkspaceFixture() {
         requireStringConnection(args, command);
         return args?.schemaName ? (objectsBySchema[args.schemaName] || []) : tableObjects;
       }
-      case "get_object_details": requireStringConnection(args, command); return {
-        kind: "table", qualifiedName: "public.orders", columns: [{ name: "id", dataType: "integer", nullable: false, primaryKey: true }, { name: "status", dataType: "text", nullable: false }], indexes: [], constraints: [], definition: "CREATE TABLE public.orders (...);",
-      };
+      case "get_object_details": requireStringConnection(args, command);
+        if (args?.kind === "procedure" || args?.kind === "function") return routineDetails(args);
+        return {
+          kind: "table", qualifiedName: "public.orders", columns: [{ name: "id", dataType: "integer", nullable: false, primaryKey: true }, { name: "status", dataType: "text", nullable: false }], indexes: [], constraints: [], definition: "CREATE TABLE public.orders (...);",
+        };
+      case "get_object_ddl_details": requireStringConnection(args, command);
+        if (args?.kind === "procedure" || args?.kind === "function") return routineDetails(args);
+        throw new Error(`fixture has no DDL details for ${args?.kind}`);
       case "begin_transaction": requireStringConnection(args, command); return true;
       case "commit_transaction": requireStringConnection(args, command); return true;
       case "rollback_transaction": requireStringConnection(args, command); return true;

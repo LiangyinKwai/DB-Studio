@@ -9,6 +9,13 @@ use tokio::time::{timeout, timeout_at, Instant};
 
 const REDIS_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_ITEMS: usize = 500;
+const MAX_COMMAND_ROWS: usize = 1000;
+const MAX_STRING_PREVIEW_BYTES: usize = 512 * 1024;
+// raw and rows are both serialized for existing consumers. Budget raw before
+// conversion, leaving room for its row copy and response/key metadata.
+const MAX_JSON_VALUE_BYTES: usize = 3 * 1024 * 1024 + 1024;
+const MAX_JSON_NODES: usize = 10_000;
+const MAX_JSON_DEPTH: usize = 64;
 const DEFAULT_DATABASE_COUNT: usize = 16;
 const MAX_LISTED_DATABASES: usize = 256;
 
@@ -40,6 +47,8 @@ pub struct RedisValueResponse {
     pub raw: JsonValue,
     pub total_count: Option<u64>,
     pub partial: bool,
+    pub truncated: bool,
+    pub truncated_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -50,6 +59,8 @@ pub struct RedisCommandResponse {
     pub row_count: usize,
     pub elapsed_ms: f64,
     pub raw: JsonValue,
+    pub truncated: bool,
+    pub truncated_reason: Option<String>,
 }
 
 #[derive(Debug)]
@@ -370,6 +381,187 @@ pub fn value_to_json(value: &Value) -> JsonValue {
     }
 }
 
+struct JsonBudget {
+    remaining: usize,
+    nodes: usize,
+    truncated: bool,
+}
+
+impl JsonBudget {
+    fn new() -> Self {
+        Self { remaining: MAX_JSON_VALUE_BYTES, nodes: MAX_JSON_NODES, truncated: false }
+    }
+
+    fn take(&mut self, bytes: usize) -> bool {
+        if bytes > self.remaining {
+            self.truncated = true;
+            return false;
+        }
+        self.remaining -= bytes;
+        true
+    }
+
+    fn text(&mut self, value: &str) -> Option<JsonValue> {
+        if !self.take(2) { return None; }
+        // Six bytes per UTF-8 byte also covers JSON's worst case, \u00xx.
+        let mut end = value.len().min(self.remaining / 6);
+        while !value.is_char_boundary(end) { end -= 1; }
+        self.truncated |= end < value.len();
+        self.remaining -= end * 6;
+        Some(JsonValue::String(value[..end].into()))
+    }
+
+    fn bulk(&mut self, value: &[u8]) -> Option<JsonValue> {
+        // Inspect only a bounded prefix; do not first clone/hex-encode the full
+        // bulk string. A partial UTF-8 character at the boundary is omitted.
+        let end = value.len().min(self.remaining.saturating_sub(2) / 6);
+        match std::str::from_utf8(&value[..end]) {
+            Ok(text) => { self.truncated |= end < value.len(); self.text(text) },
+            Err(error) if error.error_len().is_none() && end < value.len() => {
+                self.truncated = true;
+                self.text(std::str::from_utf8(&value[..error.valid_up_to()]).unwrap())
+            }
+            Err(_) => {
+                let count = value.len().min(self.remaining.saturating_sub(4) / 2);
+                self.truncated |= count < value.len();
+                if !self.take(4 + count * 2) { return None; }
+                Some(JsonValue::String(format!("0x{}", hex::encode(&value[..count]))))
+            }
+        }
+    }
+
+    fn map_entries(&mut self, values: &[(Value, Value)], depth: usize, top_limit: usize) -> Option<Vec<(JsonValue, JsonValue)>> {
+        if !self.take(2) { return None; }
+        let mut entries = Vec::new();
+        let limit = if depth == 0 { top_limit } else { values.len() };
+        for (key, item) in values.iter().take(limit) {
+            // Reserve pair-array punctuation too: colliding JSON object keys
+            // fall back to typed pairs rather than silently losing an entry.
+            if !self.take(4) { break; }
+            let Some(key) = self.convert(key, depth + 1, top_limit) else { break; };
+            if !key.is_string() && !self.take(map_key_text(&key).len().saturating_mul(6) + 2) { break; }
+            let Some(item) = self.convert(item, depth + 1, top_limit) else { break; };
+            entries.push((key, item));
+        }
+        Some(entries)
+    }
+
+    fn convert(&mut self, value: &Value, depth: usize, top_limit: usize) -> Option<JsonValue> {
+        if depth > MAX_JSON_DEPTH || self.nodes == 0 {
+            self.truncated = true;
+            return None;
+        }
+        self.nodes -= 1;
+        match value {
+            Value::BulkString(value) => self.bulk(value),
+            Value::SimpleString(value) | Value::VerbatimString { text: value, .. } => self.text(value),
+            Value::Array(values) | Value::Set(values) => {
+                if !self.take(2) { return None; }
+                let mut result = Vec::new();
+                let limit = if depth == 0 { top_limit } else { values.len() };
+                for item in values.iter().take(limit) {
+                    if !self.take(1) { break; }
+                    let Some(item) = self.convert(item, depth + 1, top_limit) else { break; };
+                    result.push(item);
+                }
+                Some(JsonValue::Array(result))
+            }
+            Value::Map(values) => self.map_entries(values, depth, top_limit).map(map_json),
+            Value::Attribute { data, attributes } => {
+                if !self.take(32) { return None; }
+                let data = self.convert(data, depth + 1, top_limit)?;
+                let mut pairs = Vec::new();
+                for (key, item) in attributes {
+                    if !self.take(4) { break; }
+                    let Some(key) = self.convert(key, depth + 1, top_limit) else { break; };
+                    let Some(item) = self.convert(item, depth + 1, top_limit) else { break; };
+                    pairs.push(vec![key, item]);
+                }
+                Some(serde_json::json!({ "data": data, "attributes": pairs }))
+            }
+            Value::Push { kind, data } => {
+                if !self.take(32) { return None; }
+                let kind = self.text(&kind.to_string())?;
+                let mut items = Vec::new();
+                for item in data {
+                    if !self.take(1) { break; }
+                    let Some(item) = self.convert(item, depth + 1, top_limit) else { break; };
+                    items.push(item);
+                }
+                Some(serde_json::json!({ "kind": kind, "data": items }))
+            }
+            // num-bigint is disabled in this adapter: RESP3 big numbers are
+            // digit buffers, and must be bounded before formatting too.
+            Value::BigNumber(value) => self.bulk(value),
+            Value::ServerError(error) => {
+                let JsonValue::String(mut text) = self.text(error.code())? else { unreachable!() };
+                if let Some(detail) = error.details() {
+                    if self.take(2) {
+                        text.push_str(": ");
+                        if let Some(JsonValue::String(detail)) = self.text(detail) { text.push_str(&detail); }
+                    }
+                }
+                Some(JsonValue::String(text))
+            }
+            _ => {
+                let scalar = value_to_json(value);
+                let bytes = serde_json::to_vec(&scalar).unwrap_or_default().len();
+                self.take(bytes).then_some(scalar)
+            }
+        }
+    }
+}
+
+fn bounded_json(value: &Value, top_limit: usize) -> (JsonValue, bool) {
+    let mut budget = JsonBudget::new();
+    let value = budget.convert(value, 0, top_limit).unwrap_or(JsonValue::Null);
+    (value, budget.truncated)
+}
+
+fn map_key_text(key: &JsonValue) -> String {
+    match key {
+        JsonValue::String(key) => key.clone(),
+        JsonValue::Null => "NULL".into(),
+        key => serde_json::to_string(key).unwrap_or_default(),
+    }
+}
+
+fn map_json(entries: Vec<(JsonValue, JsonValue)>) -> JsonValue {
+    let mut keys = std::collections::HashSet::new();
+    if entries.iter().any(|(key, _)| !keys.insert(map_key_text(key))) {
+        return JsonValue::Array(entries.into_iter().map(|(key, item)| JsonValue::Array(vec![key, item])).collect());
+    }
+    JsonValue::Object(entries.into_iter().map(|(key, item)| (map_key_text(&key), item)).collect())
+}
+
+fn bounded_command_json(value: &Value, top_limit: usize) -> (JsonValue, Option<Vec<Vec<JsonValue>>>, bool) {
+    if let Value::Map(values) = value {
+        let mut budget = JsonBudget::new();
+        budget.nodes -= 1; // Count the outer map as convert() does.
+        let entries = budget.map_entries(values, 0, top_limit).unwrap_or_default();
+        let raw = map_json(entries.clone());
+        let rows = entries.into_iter().map(|(key, item)| vec![JsonValue::String(map_key_text(&key)), item]).collect();
+        (raw, Some(rows), budget.truncated)
+    } else {
+        let (raw, truncated) = bounded_json(value, top_limit);
+        (raw, None, truncated)
+    }
+}
+
+fn string_preview(mut bytes: Vec<u8>) -> (Value, bool) {
+    let truncated = bytes.len() > MAX_STRING_PREVIEW_BYTES;
+    bytes.truncate(MAX_STRING_PREVIEW_BYTES);
+    if truncated {
+        if let Err(error) = std::str::from_utf8(&bytes) {
+            // GETRANGE's byte boundary may split a valid UTF-8 character. Only
+            // discard an incomplete suffix; invalid bytes elsewhere remain
+            // binary and retain the established hexadecimal representation.
+            if error.error_len().is_none() { bytes.truncate(error.valid_up_to()); }
+        }
+    }
+    (Value::BulkString(bytes), truncated)
+}
+
 async fn command_value(
     connection: &mut MultiplexedConnection,
     command: &str,
@@ -384,21 +576,32 @@ async fn command_value(
     .map_err(|error| redis_error(&format!("Redis {command} 失败"), error))
 }
 
+pub async fn get_ttl(connection: &mut MultiplexedConnection, key: &str) -> Result<i64, String> {
+    timeout(REDIS_TIMEOUT, redis::cmd("TTL").arg(key).query_async(connection))
+        .await
+        .map_err(|_| "读取 Redis TTL 超时（10 秒）".to_string())?
+        .map_err(|error| redis_error("读取 Redis TTL 失败", error))
+}
+
 pub async fn get_value(
     connection: &mut MultiplexedConnection,
     key: &str,
 ) -> Result<RedisValueResponse, String> {
+    if key.len() > 128 * 1024 { return Err("Key 名称超过 128 KiB，无法在预览中展示，请使用控制台操作".into()); }
     let key_type = value_text(&command_value(connection, "TYPE", key).await?);
-    let ttl: i64 = timeout(
-        REDIS_TIMEOUT,
-        redis::cmd("TTL").arg(key).query_async(connection),
-    )
-    .await
-    .map_err(|_| "读取 Redis TTL 超时".to_string())?
-    .map_err(|error| redis_error("读取 Redis TTL 失败", error))?;
+    let ttl = get_ttl(connection, key).await?;
     let mut scan_incomplete = false;
+    let mut value_truncated = false;
     let value = timeout(REDIS_TIMEOUT, async { Ok::<Value, String>(match key_type.as_str() {
-        "string" => command_value(connection, "GET", key).await?,
+        "string" => {
+            // One extra byte distinguishes an exact boundary from a partial
+            // preview, without GET/STRLEN races or receiving the whole value.
+            let bytes: Vec<u8> = redis::cmd("GETRANGE").arg(key).arg(0).arg(MAX_STRING_PREVIEW_BYTES)
+                .query_async(connection).await.map_err(|error| redis_error("读取 Redis string 失败", error))?;
+            let (value, truncated) = string_preview(bytes);
+            value_truncated = truncated;
+            value
+        }
         // HGETALL/SMEMBERS can materialize an unbounded key.  HSCAN/SSCAN
         // keeps the inspector responsive while still showing a useful first
         // page; the command editor remains available for deliberate full
@@ -461,60 +664,61 @@ pub async fn get_value(
             .map_err(|error| redis_error("读取 Redis stream 失败", error))?,
         _ => Value::Nil,
     }) }).await.map_err(|_| "读取 Redis 值超时（10 秒）".to_string())??;
-    let raw = value_to_json(&value);
-    let (columns, mut rows): (Vec<String>, Vec<Vec<JsonValue>>) = match (key_type.as_str(), &value) {
+    let (raw, budget_truncated) = bounded_json(&value, MAX_ITEMS * 2);
+    value_truncated |= budget_truncated;
+    let (columns, mut rows): (Vec<String>, Vec<Vec<JsonValue>>) = match (key_type.as_str(), &raw) {
         ("none", _) => (vec!["value".into()], vec![]),
-        ("stream", Value::Array(entries)) => (
+        ("stream", JsonValue::Array(entries)) => (
             vec!["id".into(), "fields".into()],
             entries.iter().filter_map(|entry| match entry {
-                Value::Array(pair) if pair.len() == 2 => Some(vec![value_to_json(&pair[0]), value_to_json(&pair[1])]),
+                JsonValue::Array(pair) if pair.len() == 2 => Some(pair.clone()),
                 _ => None,
             }).collect(),
         ),
-        ("hash", Value::Array(values)) => (
+        ("hash", JsonValue::Array(values)) => (
             vec!["field".into(), "value".into()],
             values
                 .chunks(2)
                 .filter_map(|pair| {
                     pair.first().map(|field| {
                         vec![
-                            value_to_json(field),
-                            value_to_json(pair.get(1).unwrap_or(&Value::Nil)),
+                            field.clone(),
+                            pair.get(1).cloned().unwrap_or(JsonValue::Null),
                         ]
                     })
                 })
                 .collect(),
         ),
-        ("zset", Value::Array(values)) => (
+        ("zset", JsonValue::Array(values)) => (
             vec!["member".into(), "score".into()],
             values
                 .chunks(2)
                 .filter_map(|pair| {
                     pair.first().map(|member| {
                         vec![
-                            value_to_json(member),
-                            value_to_json(pair.get(1).unwrap_or(&Value::Nil)),
+                            member.clone(),
+                            pair.get(1).cloned().unwrap_or(JsonValue::Null),
                         ]
                     })
                 })
                 .collect(),
         ),
-        ("list", Value::Array(values)) => (
+        ("list", JsonValue::Array(values)) => (
             vec!["index".into(), "value".into()],
             values
                 .iter()
                 .enumerate()
-                .map(|(index, value)| vec![JsonValue::from(index), value_to_json(value)])
+                .map(|(index, value)| vec![JsonValue::from(index), value.clone()])
                 .collect(),
         ),
-        ("set", Value::Array(values)) => (vec!["member".into()], values.iter().map(|value| vec![value_to_json(value)]).collect()),
+        ("set", JsonValue::Array(values)) => (vec!["member".into()], values.iter().map(|value| vec![value.clone()]).collect()),
         _ => (vec!["value".into()], vec![vec![raw.clone()]]),
     };
     let count_command = match key_type.as_str() { "hash" => Some("HLEN"), "list" => Some("LLEN"), "set" => Some("SCARD"), "zset" => Some("ZCARD"), "stream" => Some("XLEN"), _ => None };
     let total_count = if let Some(command) = count_command {
         timeout(REDIS_TIMEOUT, redis::cmd(command).arg(key).query_async::<u64>(connection)).await.ok().and_then(Result::ok)
     } else { Some(if key_type == "none" { 0 } else { 1 }) };
-    let partial = scan_incomplete || rows.len() > MAX_ITEMS || total_count.is_some_and(|count| count > rows.len() as u64);
+    let partial = value_truncated || scan_incomplete || rows.len() > MAX_ITEMS || total_count.is_some_and(|count| count > rows.len() as u64);
     rows.truncate(MAX_ITEMS);
     Ok(RedisValueResponse {
         key: key.into(),
@@ -525,6 +729,8 @@ pub async fn get_value(
         raw,
         total_count,
         partial,
+        truncated: value_truncated,
+        truncated_reason: value_truncated.then(|| "result_size".into()),
     })
 }
 
@@ -785,37 +991,127 @@ async fn execute_command_impl(
         .await
         .map_err(|_| RedisReadError { message: "Redis 命令超时（10 秒）".into(), disconnected: true })?
         .map_err(|error| read_error("Redis 命令失败", error))?;
-    let raw = value_to_json(&value);
-    let (columns, rows) = match &value {
-        Value::Array(values) | Value::Set(values) => (
+    let row_limited = match &value {
+        Value::Array(values) | Value::Set(values) => values.len() > MAX_COMMAND_ROWS,
+        Value::Map(values) => values.len() > MAX_COMMAND_ROWS,
+        _ => false,
+    };
+    // redis-rs receives a complete RESP frame before returning Value. This
+    // bounds conversion/serialization/IPC, not that initial receive buffer;
+    // never replay or replace a console command to obtain a smaller reply.
+    let (raw, map_rows, size_limited) = bounded_command_json(&value, MAX_COMMAND_ROWS);
+    let (columns, rows) = if let Some(rows) = map_rows {
+        (vec!["key".into(), "value".into()], rows)
+    } else { match &raw {
+        JsonValue::Array(values) => (
             vec!["index".into(), "result".into()],
             values
                 .iter()
                 .enumerate()
-                .map(|(index, item)| vec![JsonValue::from(index), value_to_json(item)])
-                .collect(),
-        ),
-        Value::Map(values) => (
-            vec!["key".into(), "value".into()],
-            values
-                .iter()
-                .map(|(key, item)| vec![JsonValue::String(value_text(key)), value_to_json(item)])
+                .map(|(index, item)| vec![JsonValue::from(index), item.clone()])
                 .collect(),
         ),
         _ => (vec!["result".into()], vec![vec![raw.clone()]]),
-    };
+    } };
     Ok(RedisCommandResponse {
         row_count: rows.len(),
         columns,
         rows,
         elapsed_ms: started.elapsed().as_secs_f64() * 1000.0,
         raw,
+        truncated: size_limited || row_limited,
+        truncated_reason: if size_limited { Some("result_size".into()) } else if row_limited { Some("row_limit".into()) } else { None },
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bounded_maps_preserve_row_order_and_colliding_keys_without_changing_normal_raw() {
+        let map = Value::Map(vec![(Value::BulkString(b"z".to_vec()), Value::Int(1)), (Value::BulkString(b"a".to_vec()), Value::Int(2))]);
+        let (raw, rows, truncated) = bounded_command_json(&map, MAX_COMMAND_ROWS);
+        assert!(!truncated);
+        assert_eq!(raw, serde_json::json!({ "z": 1, "a": 2 }));
+        assert_eq!(rows.unwrap(), vec![vec![serde_json::json!("z"), serde_json::json!(1)], vec![serde_json::json!("a"), serde_json::json!(2)]]);
+
+        let map = Value::Map(vec![(Value::Int(1), Value::SimpleString("number".into())), (Value::BulkString(b"1".to_vec()), Value::SimpleString("text".into()))]);
+        let (raw, rows, truncated) = bounded_command_json(&map, MAX_COMMAND_ROWS);
+        assert!(!truncated, "representable pairs are complete, not a truncated object");
+        assert_eq!(raw, serde_json::json!([[1, "number"], ["1", "text"]]));
+        assert_eq!(rows.unwrap().len(), 2);
+        let (nested, truncated) = bounded_json(&Value::Array(vec![map]), MAX_COMMAND_ROWS);
+        assert!(!truncated);
+        assert_eq!(nested, serde_json::json!([[[1, "number"], ["1", "text"]]]));
+
+        let large = Value::Map((0..2000).map(|index| (Value::Int(index), Value::BulkString(vec![0; 4096]))).collect());
+        let (raw, rows, truncated) = bounded_command_json(&large, MAX_COMMAND_ROWS);
+        assert!(truncated);
+        let rows = rows.unwrap();
+        assert!(rows.len() <= MAX_COMMAND_ROWS);
+        assert!(serde_json::to_vec(&raw).unwrap().len() <= MAX_JSON_VALUE_BYTES);
+        assert!(serde_json::to_vec(&serde_json::json!({ "raw": raw, "rows": rows })).unwrap().len() < 8 * 1024 * 1024);
+    }
+
+    #[test]
+    fn string_preview_keeps_utf8_boundaries_and_binary_detection() {
+        let original = "界".repeat(180_000);
+        let (value, truncated) = string_preview(original.as_bytes()[..MAX_STRING_PREVIEW_BYTES + 1].to_vec());
+        assert!(truncated);
+        let (json, _) = bounded_json(&value, MAX_ITEMS);
+        let text = json.as_str().unwrap();
+        assert!(!text.starts_with("0x"));
+        assert!(original.starts_with(text));
+        assert_eq!(text.len(), MAX_STRING_PREVIEW_BYTES - 2);
+
+        let (value, truncated) = string_preview(vec![0xff; MAX_STRING_PREVIEW_BYTES + 1]);
+        assert!(truncated);
+        assert!(bounded_json(&value, MAX_ITEMS).0.as_str().unwrap().starts_with("0xffff"));
+        let (value, truncated) = string_preview(vec![0xe7, 0x95]);
+        assert!(!truncated, "an actually incomplete stored value is binary, not a cut text preview");
+        assert_eq!(bounded_json(&value, MAX_ITEMS).0, serde_json::json!("0xe795"));
+    }
+
+    #[test]
+    fn response_json_budget_bounds_strings_binary_and_escaped_text() {
+        for bytes in [vec![b'x'; 4 * 1024 * 1024], vec![0; 4 * 1024 * 1024], vec![0xff; 4 * 1024 * 1024]] {
+            let (json, truncated) = bounded_json(&Value::BulkString(bytes), MAX_COMMAND_ROWS);
+            assert!(truncated);
+            assert!(serde_json::to_vec(&json).unwrap().len() <= MAX_JSON_VALUE_BYTES);
+            assert!(json.as_str().is_some_and(|text| !text.is_empty()));
+        }
+        let text = "世界😀".repeat(100_000);
+        let (json, truncated) = bounded_json(&Value::BulkString(text.as_bytes().to_vec()), MAX_COMMAND_ROWS);
+        assert!(truncated);
+        assert!(text.starts_with(json.as_str().unwrap()));
+        let small = Value::BulkString(vec![0xff, 0, 0x80]);
+        let (json, truncated) = bounded_json(&small, MAX_COMMAND_ROWS);
+        assert!(!truncated);
+        assert_eq!(json, value_to_json(&small));
+    }
+
+    #[test]
+    fn response_json_budget_caps_nested_work_and_separates_row_limits() {
+        let flat = Value::Array((0..MAX_COMMAND_ROWS + 1).map(|n| Value::Int(n as i64)).collect());
+        let (json, truncated) = bounded_json(&flat, MAX_COMMAND_ROWS);
+        assert!(!truncated, "top-level item limits are reported separately from size limits");
+        assert_eq!(json.as_array().unwrap().len(), MAX_COMMAND_ROWS);
+
+        let nested = Value::Array(vec![Value::Array(vec![Value::Nil; MAX_JSON_NODES + 1])]);
+        let (json, truncated) = bounded_json(&nested, MAX_COMMAND_ROWS);
+        assert!(truncated);
+        assert!(json[0].as_array().unwrap().len() < MAX_JSON_NODES);
+        let mut deep = Value::Int(1);
+        for _ in 0..MAX_JSON_DEPTH + 2 { deep = Value::Array(vec![deep]); }
+        let (_, truncated) = bounded_json(&deep, MAX_COMMAND_ROWS);
+        assert!(truncated);
+
+        let map = Value::Map(vec![(Value::BulkString(vec![b'k'; 1024 * 1024]), Value::Int(1))]);
+        let (json, truncated) = bounded_json(&map, MAX_COMMAND_ROWS);
+        assert!(truncated);
+        assert!(serde_json::to_vec(&json).unwrap().len() <= MAX_JSON_VALUE_BYTES);
+    }
 
     #[test]
     fn command_tokenizer_preserves_quoted_arguments() {

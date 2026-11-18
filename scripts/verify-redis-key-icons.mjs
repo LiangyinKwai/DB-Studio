@@ -70,7 +70,7 @@ try {
   assert.ok(await page.locator('#structureTab').isHidden()); assert.ok(await page.locator('#messageTab').isVisible());
   assert.equal(await page.locator('.query-tab.active .redis-key-icon--string').count(), 1);
   assert.match(await page.locator('#resultMeta').innerText(), /String.*TTL 120 秒/);
-  for (const theme of ['dark', 'light', 'ocean', 'forest', 'contrast']) {
+  for (const theme of ['dark', 'light']) {
     await page.locator('#themeButton').click(); await page.locator(`[data-theme-option="${theme}"]`).click();
     await page.setViewportSize({ width: 1060, height: 900 });
     await page.evaluate(() => new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done))));
@@ -108,5 +108,5 @@ try {
   await page.locator('[data-object-id="public.orders"] .object-main').dblclick();
   await page.locator('#resultGrid [data-grid-cell]').first().waitFor(); assert.ok(await page.locator('#structureTab').isVisible());
   assert.deepEqual(errors, []);
-  console.log('PASS: six type icons and unknown/missing/module fallback; authoritative types rather than key prefixes; no value-fetch fanout; DB scoping, quick-open type filter, tab icons, Redis-only structure removal, TTL context, type changes, pagination dedupe, ACL fallback and five themes.');
+  console.log('PASS: six type icons and unknown/missing/module fallback; authoritative types rather than key prefixes; no value-fetch fanout; DB scoping, quick-open type filter, tab icons, Redis-only structure removal, TTL context, type changes, pagination dedupe, ACL fallback and light and dark themes.');
 } finally { await browser.close(); await new Promise(done => server.close(done)); }

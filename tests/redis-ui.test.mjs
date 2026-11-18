@@ -6,6 +6,7 @@ test('copy Redis values preserves exact string content and refuses partial or mi
   for (const raw of ['', '  中文\r\n🙂 ', '{"id":9007199254740993}']) assert.equal(redisValueForCopy({ keyType: 'string', raw }), raw);
   assert.equal(redisValueForCopy({ keyType: 'hash', raw: ['field', 'value'] }), '[\n  "field",\n  "value"\n]');
   assert.throws(() => redisValueForCopy({ keyType: 'list', partial: true, raw: ['subset'] }), /部分内容/);
+  assert.throws(() => redisValueForCopy({ keyType: 'string', truncated: true, raw: 'prefix' }), /部分内容/);
   assert.throws(() => redisValueForCopy({ keyType: 'none', raw: null }), /过期/);
 });
 test('Redis dialog target and TTL distinguish permanent, expired and unread metadata', () => {
