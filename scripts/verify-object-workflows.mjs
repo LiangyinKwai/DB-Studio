@@ -196,6 +196,8 @@ async function verifyScriptExecution(connectionId, database, fail = false) {
   assert.equal(transactionScripts.at(-1).connectionId, connectionId);
   assert.equal(transactionScripts.at(-1).database, database);
   assert.equal(transactionScripts.at(-1).sql, sql.trim());
+  assert.equal(await page.locator('#runQuery').getAttribute('aria-busy'), 'true');
+  assert.ok(await page.locator('#runQuery .run-spinner').isVisible());
   finishScript();
   await transactionState('自动提交');
   if (fail) {
@@ -208,7 +210,7 @@ async function verifyScriptExecution(connectionId, database, fail = false) {
     assert.equal(await page.locator('#runLabel').innerText(), prefix ? '执行选中' : '执行');
     assert.equal(await sqlEditor.innerText(), source);
   } else {
-    await page.locator('#toast').getByText('事务脚本已提交', { exact: true }).waitFor();
+    await page.waitForFunction(() => document.querySelector('#messagePanel').textContent.includes('事务脚本已提交'));
     assert.equal(await page.locator('#resultGrid .db-grid-cell').first().innerText(), 'updated');
   }
 }
@@ -368,13 +370,28 @@ try {
   assert.equal(await page.locator(`${pgDb} > .database-children > .tree-category[data-kind="query"]`).count(), 0);
   const pgQueries = page.locator(`${schema} > .tree-category[data-kind="query"]`);
   assert.deepEqual(await page.locator(`${schema} > .tree-category`).evaluateAll(groups => groups.map(group => group.dataset.kind)), ['table', 'view', 'materialized_view', 'routine', 'query', 'sequence']);
+  const schemaGroup = kind => page.locator(`${schema} > .tree-category[data-kind="${kind}"] [data-tree-category-create]`);
+  await schemaGroup('materialized_view').click();
+  assert.match(await sqlEditor.innerText(), /^CREATE MATERIALIZED VIEW "public"/);
+  await page.locator('.query-tab.active .tab-close').click();
+  await schemaGroup('routine').click();
+  await page.locator('#objectContextMenu [data-context-action="create-function"]').click();
+  assert.match(await sqlEditor.innerText(), /^CREATE FUNCTION "public"/);
+  await page.locator('.query-tab.active .tab-close').click();
   assert.equal(await pgQueries.locator('.count').innerText(), '0');
   await pgQueries.getByRole('button', { name: '展开 查询', exact: true }).click();
   await pgQueries.getByRole('button', { name: '新建查询', exact: true }).click();
   await page.locator('.query-tab.active').getByText('查询 · public', { exact: true }).waitFor();
+  assert.equal(await pgQueries.locator('.count').innerText(), '0');
+  await sqlEditor.fill('SELECT 1;');
+  await page.locator('#runQuery').click();
+  await page.waitForFunction(() => !document.querySelector('#runQuery').disabled && document.querySelector('#messagePanel').textContent.includes('执行成功'));
+  assert.equal(await pgQueries.locator('.count').innerText(), '0');
+  await pgQueries.getByRole('button', { name: '保存当前 SQL 到查询', exact: true }).click();
+  await pgQueries.getByRole('button', { name: '刷新查询', exact: true }).click();
   assert.equal(await pgQueries.locator('.count').innerText(), '1');
   const pgDraft = pgQueries.getByRole('button', { name: '查询 · public', exact: true });
-  const pgDraftId = await pgDraft.getAttribute('data-tree-query-tab');
+  const pgDraftId = await page.locator('.query-tab.active').getAttribute('data-tab-id');
   assert.match(await page.locator('#editorHint').innerText(), /app \/ public/);
   await transactionState('自动提交');
   await setTabReadOnly(page, true);
@@ -396,7 +413,7 @@ try {
   await category(analytics, 'view').click();
   assert.equal(await page.locator(`${analytics} > .tree-category[data-kind="sequence"]`).count(), 0);
   assert.equal(await page.locator(`${analytics} > .tree-category[data-kind="query"] .count`).innerText(), '0');
-  await page.locator(`${analytics} [data-tree-create-view]`).click();
+  await page.locator(`${analytics} .tree-category[data-kind="view"] [data-tree-category-create]`).click();
   await form.getByRole('textbox', { name: '视图名称' }).waitFor();
   assert.match(await form.locator('.dialog-header p').innerText(), /analytics$/);
   await form.getByRole('button', { name: '取消' }).click();
@@ -446,6 +463,12 @@ try {
   await pgDraft.click();
   assert.equal(await page.locator('.query-tab.active').getAttribute('data-tab-id'), pgDraftId);
   await page.locator('.query-tab.active [data-close-tab]').click();
+  assert.equal(await pgQueries.locator('.count').innerText(), '1');
+  await pgDraft.click();
+  assert.equal(await sqlEditor.innerText(), 'SELECT 1;');
+  await pgQueries.getByRole('button', { name: '删除已保存查询' }).click();
+  await confirm();
+  await pgDraft.waitFor({ state: 'detached' });
   assert.equal(await pgQueries.locator('.count').innerText(), '0');
 
   await page.locator('[data-connection-id="mysql-objects"]').click();
@@ -479,7 +502,7 @@ try {
   await mysqlQueries.getByRole('button', { name: '展开 查询', exact: true }).click();
   await mysqlQueries.getByRole('button', { name: '新建查询', exact: true }).click();
   await page.locator('.query-tab.active').getByText('查询 · warehouse', { exact: true }).waitFor();
-  assert.equal(await mysqlQueries.locator('.count').innerText(), '1');
+  assert.equal(await mysqlQueries.locator('.count').innerText(), '0');
   await executeTransaction('START TRANSACTION', 'begin', '事务中 · 未提交', mysql.id, 'warehouse');
   await executeTransaction('ROLLBACK;', 'rollback', '自动提交', mysql.id, 'warehouse');
   await verifyScriptExecution(mysql.id, 'warehouse', true);

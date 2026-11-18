@@ -222,8 +222,7 @@ body .primary-btn:not(:disabled):hover {
   background-image: var(--primary-hover-gradient);
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.26), 0 2px 5px rgba(0, 0, 0, 0.26);
 }
-body .danger-btn, body .danger-btn:not(:disabled):hover,
-body .toast[data-type="error"] {
+body .danger-btn, body .danger-btn:not(:disabled):hover {
   color: var(--error);
   background-color: var(--error-bg);
   border: 1px solid color-mix(in srgb, var(--error) 30%, transparent);
@@ -314,7 +313,6 @@ body .database-dialog .secondary-btn:hover { color: var(--app-text); background:
 body .database-dialog .primary-btn { color: var(--on-accent); background: var(--accent); }
 body .dialog-feedback { color: var(--success); }
 body .dialog-feedback.error, body .result-context.error { color: var(--error); }
-body .toast { color: var(--app-text); background: var(--hover-bg); border-color: var(--app-border); }
 
 body .structure-section, body .structure-comment, body .structure-table th { color: var(--app-muted); }
 body .structure-table th { background: var(--app-panel); border-color: var(--app-border); }
@@ -630,6 +628,8 @@ body .structure-editor-dialog { width: min(1120px, calc(100vw - 32px)); padding:
 body .structure-editor-form { min-width: 0; }
 body .structure-editor-dialog .dialog-header { margin-bottom: 4px; }
 body .structure-editor-target { color: var(--accent-muted); overflow-wrap: anywhere; margin: 0 0 12px; font-size: 12px; }
+body .structure-table-comment { display: grid; gap: 5px; margin-bottom: 10px; font-size: 12px; color: var(--app-muted); }
+body .structure-table-comment textarea { width: 100%; min-height: 48px; max-height: 180px; padding: 7px 9px; resize: vertical; font: inherit; color: var(--app-text); background: var(--input-bg); border: 1px solid var(--app-border); border-radius: 6px; }
 body .structure-editor-toolbar { display: flex; align-items: center; gap: 16px; margin: 16px 0 10px; }
 body .structure-editor-scroll { max-height: 38vh; overflow: auto; border: 1px solid var(--app-border); border-radius: 6px; }
 body .structure-editor-table { margin: 0; min-width: 890px; width: 100%; table-layout: fixed; }

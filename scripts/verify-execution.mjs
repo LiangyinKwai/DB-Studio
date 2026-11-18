@@ -50,7 +50,7 @@ COMMENT ON COLUMN upsell.upsell_cart_modules.enable_celebration IS
 const modal = page.locator("#confirmActionModal");
 const editor = page.locator("#sqlEditor .cm-content");
 const accept = page.locator("#confirmActionAccept");
-const waitForDone = () => page.locator("#toast").getByText("查询完成", { exact: true }).waitFor();
+const waitForDone = () => page.waitForFunction(() => !document.querySelector("#runQuery").disabled && document.querySelector("#messagePanel").textContent.includes("执行成功"));
 try {
   await page.goto(`http://127.0.0.1:${server.address().port}`, { waitUntil: "networkidle" });
   await page.locator("[data-connection-id='conn-dev']").click();

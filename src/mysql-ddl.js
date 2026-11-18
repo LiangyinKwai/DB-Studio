@@ -142,16 +142,17 @@ export function mysqlNoBackslashEscapes(sqlMode) {
 }
 
 // COMMENT accepts a quoted text token, not a hex literal or CONVERT expression.
-// MySQL stores column comments in its system (utf8mb3) character set; it can
-// replace supplementary characters or truncate >1024 characters with only a
-// warning even when the CREATE otherwise succeeds. Refuse lossy input first.
-export function mysqlCommentLiteral(value, sqlMode) {
+// MySQL stores comments in its system (utf8mb3) character set and can warn
+// about replacement or truncation without failing the DDL.
+export function mysqlCommentLiteral(value, sqlMode, { table = false } = {}) {
   let text = String(value);
+  const label = table ? '表注释' : '字段备注';
+  const limit = table ? 2048 : 1024;
   if (text.includes('\0')) throw new Error('MySQL 备注不能包含空字符');
-  if (/[\uD800-\uDFFF\u{10000}-\u{10FFFF}]/u.test(text)) throw new Error('MySQL 字段备注无法原样保存 emoji 等补充 Unicode 字符或无效字符，请移除后重试');
+  if (/[\uD800-\uDFFF\u{10000}-\u{10FFFF}]/u.test(text)) throw new Error(`MySQL ${label}无法原样保存 emoji 等补充 Unicode 字符或无效字符，请移除后重试`);
   // Supplementary/unpaired-surrogate input was rejected above, so UTF-16
   // length now equals the Unicode code-point count without a large allocation.
-  if (text.length > 1024) throw new Error('MySQL 字段备注最多 1024 个字符，超出会被服务器截断，请缩短后重试');
+  if (text.length > limit) throw new Error(`MySQL ${label}最多 ${limit} 个字符，超出会被服务器截断，请缩短后重试`);
   if (text.includes('\\') && !mysqlNoBackslashEscapes(sqlMode)) text = text.replaceAll('\\', '\\\\');
   return `'${text.replaceAll("'", "''")}'`;
 }

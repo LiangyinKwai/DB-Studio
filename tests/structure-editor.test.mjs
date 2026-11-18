@@ -120,3 +120,19 @@ test('MySQL new tables inherit database defaults or explicitly choose a matching
   assert.match(explicit, /ENGINE=InnoDB DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;$/);
   assert.throws(() => buildCreateTablePlan({ schema: 'app', name: 'posts', charset: 'latin1', collation: 'utf8mb4_bin' }, rows, 'mysql'), /不匹配/);
 });
+
+test('table comments can be set and cleared independently of columns', () => {
+  const table = { schema: 'app', name: 'orders', kind: 'table', comment: 'old', columns: [{ name: 'id', dataType: 'int', nullable: true }] };
+  const rows = createStructureDraft(table);
+  const pg = buildStructurePlan(table, rows, 'postgres', "订单 O'Reilly");
+  assert.equal(pg.sql, "COMMENT ON TABLE \"app\".\"orders\" IS E'订单 O''Reilly';");
+  assert.equal(pg.tableCommentChanged, true);
+  assert.equal(buildStructurePlan(table, rows, 'postgres', '').sql, 'COMMENT ON TABLE "app"."orders" IS NULL;');
+  assert.notEqual(structureFingerprint(table), structureFingerprint({ ...table, comment: 'new' }));
+  const mysql = { ...table, mysql: { sqlMode: 'NO_BACKSLASH_ESCAPES' } };
+  const cleared = buildStructurePlan(mysql, rows, 'mysql', '');
+  assert.equal(cleared.sql, "ALTER TABLE `app`.`orders`\n  COMMENT = '';");
+  assert.match(buildCreateTablePlan(mysql, rows, 'mysql').sql, /COMMENT='old';$/);
+  assert.match(buildCreateTablePlan(table, rows, 'postgres').sql, /COMMENT ON TABLE "app"\."orders" IS E'old';$/);
+  assert.throws(() => buildCreateTablePlan({ ...mysql, comment: '字'.repeat(2049) }, rows, 'mysql'), /2048/);
+});

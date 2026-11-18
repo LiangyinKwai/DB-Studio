@@ -1,6 +1,6 @@
 [package]
 name = "db-studio"
-version = "0.1.5"
+version = "0.1.6"
 description = "Keybay desktop database client"
 authors = ["Keybay"]
 edition = "2021"

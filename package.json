@@ -2,7 +2,7 @@
   "name": "db-studio",
   "type": "module",
   "private": true,
-  "version": "0.1.5",
+  "version": "0.1.6",
   "description": "A high-performance desktop database manager prototype",
   "devDependencies": {
     "@tauri-apps/cli": "^2.0.0",

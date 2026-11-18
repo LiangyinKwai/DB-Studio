@@ -38,7 +38,7 @@ try {
     try {
       await page.goto(`http://127.0.0.1:${server.address().port}`); await page.waitForFunction(() => window.harnessReady);
       await page.evaluate(driver => window.openDesigner(driver), driver);
-      const dialog = page.locator('.create-table-dialog'), rows = dialog.locator('tbody > tr'); await dialog.waitFor();
+      const dialog = page.locator('.create-table-dialog'), rows = dialog.locator('.structure-editor-table tbody > tr'); await dialog.waitFor();
       const field = (index, key) => rows.nth(index).locator(`[data-field="${key}"]`);
       const add = async (name, type) => {
         await dialog.getByRole('button', { name: '＋ 添加字段', exact: true }).click(); const index = await rows.count() - 1;
@@ -125,7 +125,9 @@ try {
       await textarea.press('Escape');
       await dialog.getByRole('button', { name: '保存…', exact: true }).click();
       await dialog.getByLabel('表名', { exact: true }).fill('inline_layout_test');
+      await dialog.getByLabel('表注释', { exact: true }).fill('主表说明');
       const sql = await dialog.locator('.structure-sql-preview pre').textContent();
+      assert.ok(sql.includes(driver === 'mysql' ? "COMMENT='主表说明'" : "IS E'主表说明'"));
       assert.ok(sql.includes("O''Reilly")); assert.ok(sql.includes('\r\n第二行'), 'DDL must retain literal CRLF');
       assert.ok(sql.includes('\r第三行\n'), 'DDL must retain separate CR and LF');
       assert.ok(!sql.includes(' ⏎ '), 'the collapsed preview must never become the DDL source');
@@ -150,7 +152,7 @@ try {
     try {
       await page.goto(`http://127.0.0.1:${server.address().port}`); await page.waitForFunction(() => window.harnessReady);
       await page.evaluate(value => window.openExisting(value), { driver, details });
-      const parent = page.locator('.structure-editor-dialog'), row = parent.locator('tbody > tr').nth(1);
+      const parent = page.locator('.structure-editor-dialog'), row = parent.locator('.structure-editor-table tbody > tr').nth(1);
       const input = row.locator('[data-field="comment"]'), expand = row.locator('.column-comment-expand');
       assert.equal(await input.getAttribute('title'), original);
       assert.equal(await input.getAttribute('readonly'), '');
@@ -172,14 +174,14 @@ try {
       if (driver === 'mysql') {
         assert.match(sql, /CHARACTER SET utf8mb4 COLLATE utf8mb4_bin/); assert.match(sql, /DEFAULT 'draft'/);
         for (const index of [2, 3]) {
-          await parent.locator('tbody > tr').nth(index).locator('.column-comment-expand').click();
+          await parent.locator('.structure-editor-table tbody > tr').nth(index).locator('.column-comment-expand').click();
           await text.fill(`special ${index}`); await text.press('Escape');
         }
         sql = await parent.locator('.structure-sql-preview pre').textContent();
         assert.match(sql, /ON UPDATE CURRENT_TIMESTAMP\(6\)/); assert.match(sql, /GENERATED ALWAYS AS .* STORED INVISIBLE/);
       }
       await parent.getByRole('button', { name: '＋ 添加字段', exact: true }).click();
-      await parent.locator('tbody > tr').last().getByRole('button', { name: '删除', exact: true }).click();
+      await parent.locator('.structure-editor-table tbody > tr').last().getByRole('button', { name: '删除', exact: true }).click();
       assert.equal(await input.getAttribute('title'), edited);
       await row.getByRole('button', { name: '删除', exact: true }).click();
       assert.equal(await expand.isDisabled(), true); assert.equal(await input.isDisabled(), true);

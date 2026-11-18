@@ -564,11 +564,12 @@ function redisTabDatabase(tab = activeTab()) {
 }
 function showToast(message, type = "info", duration = type === "error" ? 7000 : Math.min(5000, 2200 + String(message).length * 60)) {
   refs.toast.textContent = message;
+  refs.toast.title = message;
   refs.toast.dataset.type = type;
   refs.toast.classList.add("visible");
   clearTimeout(showToast.timer);
   showToast.timer = setTimeout(
-    () => refs.toast.classList.remove("visible"),
+    () => { refs.toast.classList.remove("visible"); refs.toast.title = ""; },
     duration,
   );
 }
@@ -921,8 +922,12 @@ function updateCursor(editorState = state.editor?.state) {
   const lineCount = editorState.doc.lineAt(Math.max(from, to - 1)).number - editorState.doc.lineAt(from).number + 1;
   refs.cursorPosition.textContent = `Ln ${line.number}, Col ${head - line.from + 1}` +
     (selection ? ` · 已选 ${selection.length} 字符${lineCount > 1 ? ` / ${lineCount} 行` : ""}` : "");
-  refs.runLabel.textContent = selection.trim() ? "执行选中" : "执行";
+  updateRunButton(activeExecutionTab(), Boolean(selection.trim()));
   refs.runQuery.title = selection.trim() ? "仅执行选中的 SQL（⌘ Enter）" : "执行编辑器中的全部 SQL（⌘ Enter）";
+}
+function updateRunButton(tab, selected = Boolean(state.editor?.state.sliceDoc(state.editor.state.selection.main.from, state.editor.state.selection.main.to).trim())) {
+  refs.runQuery.setAttribute("aria-busy", String(Boolean(tab?.running)));
+  refs.runLabel.textContent = tab?.running ? "执行中…" : selected ? "执行选中" : "执行";
 }
 function schedulePersistTabs() {
   clearTimeout(state.persistTimer);
@@ -1437,48 +1442,71 @@ function sqlObjectRow(object, database, query) {
   const title = isRoutine(object.kind) ? `${object.qualifiedName} · ${kindLabels[object.kind]}` : object.qualifiedName;
   return `<div class="tree-object" data-object-id="${escapeHtml(object.id)}" data-database="${escapeHtml(database)}" data-schema="${escapeHtml(object.schema)}" data-name="${escapeHtml(object.name)}" data-kind="${escapeHtml(object.kind)}"><span class="object-kind-icon" data-catalog-icon="${escapeHtml(object.kind)}">${kindIcons[object.kind] || "•"}</span><button class="object-main" title="${escapeHtml(title)}">${escapeHtml(label)}</button>${objectDataAction(object)}</div>`;
 }
+const savedTreeQueryKey = "db-studio.saved-tree-queries.v1";
+function readSavedTreeQueries() {
+  try {
+    const entries = JSON.parse(localStorage.getItem(savedTreeQueryKey) || "[]");
+    return Array.isArray(entries) ? entries.filter(entry => entry && ["id", "title", "sql", "connectionId", "database", "schema"].every(key => typeof entry[key] === "string")) : [];
+  } catch { return []; }
+}
+let savedTreeQueries = readSavedTreeQueries();
+function writeSavedTreeQueries(entries) {
+  try { localStorage.setItem(savedTreeQueryKey, JSON.stringify(entries)); }
+  catch (error) { showToast(`保存查询列表失败：${errorText(error)}`, "error"); return false; }
+  savedTreeQueries = entries;
+  syncTreeQueries();
+  return true;
+}
+function saveTreeQuery(target, heading) {
+  const tab = activeTab();
+  const schema = tab && (tabSchema(tab) || queryTargetData(tab)?.context?.defaultSchema);
+  if (!tab || tab.browse || tab.structureOnly || tab.console || !tab.sql.trim() ||
+      tab.connectionId !== target.connectionId || tabDatabase(tab) !== target.database ||
+      (target.driver !== "mysql" && schema !== target.schema)) {
+    showToast("请先在此数据库和 Schema 中打开要保存的 SQL 查询", "error");
+    return;
+  }
+  const scope = { connectionId: target.connectionId, database: target.database, schema: target.schema };
+  const current = savedTreeQueries.find(entry => entry.connectionId === scope.connectionId && entry.database === scope.database &&
+    entry.schema === scope.schema && (entry.id === tab.savedTreeQueryId || entry.sql === tab.sql));
+  const id = current?.id || makeId("saved-query");
+  if (writeSavedTreeQueries([{ ...scope, id, title: tab.title, sql: tab.sql }, ...savedTreeQueries.filter(entry => entry.id !== id)])) {
+    tab.savedTreeQueryId = id;
+    toggleTreeRow(heading, true);
+    showToast("SQL 已保存到查询");
+  }
+}
 function queryCategory(database, schema) {
   const key = JSON.stringify([database, schema, "query"]);
-  const rows = `<div class="query-tree-drafts"></div>
-    <div class="tree-object"><span class="object-kind-icon">${svgIcon('<path d="M6 12h12m-6-6v12"/>')}</span><button class="object-main" type="button" data-new-tree-query>新建查询</button></div>`;
-  return treeCategory("query", 0, state.expandedCategories.has(key), rows);
+  return treeCategory("query", 0, state.expandedCategories.has(key), '<div class="query-tree-drafts"></div>');
 }
 
 const renderedTreeQueries = new WeakMap();
 function syncTreeQueries() {
-  const groups = refs.objectTree.querySelectorAll('.tree-category[data-kind="query"]');
-  if (!groups.length) return;
-  const drafts = new Map();
-  const mysql = refs.objectTree.dataset.driver === 'mysql';
-  for (const tab of state.tabs) {
-    if (tab.connectionId !== state.activeConnectionId || tab.browse || tab.structureOnly || tab.console || tab.redisKey != null) continue;
-    const database = tabDatabase(tab);
-    const schema = mysql ? database : tabSchema(tab) ?? queryTargetData(tab)?.context?.defaultSchema;
-    if (!schema) continue;
-    const key = schemaKey(database, schema);
-    if (!drafts.has(key)) drafts.set(key, []);
-    drafts.get(key).push(tab);
-  }
-  for (const group of groups) {
+  for (const group of refs.objectTree.querySelectorAll('.tree-category[data-kind="query"]')) {
     const heading = group.querySelector('.category-summary');
     const target = treeTargetFromNode(heading);
-    const tabs = drafts.get(schemaKey(target.database, target.schema)) || [];
+    const entries = savedTreeQueries.filter(entry => entry.connectionId === target.connectionId && entry.database === target.database && entry.schema === target.schema);
     const count = heading.querySelector('.count');
-    if (count.textContent !== String(tabs.length)) count.textContent = String(tabs.length);
+    if (count.textContent !== String(entries.length)) count.textContent = String(entries.length);
     const list = group.querySelector('.query-tree-drafts');
-    const rows = tabs.map(tab => `<div class="tree-object"><span class="object-kind-icon" data-catalog-icon="query">${kindIcons.query}</span><button class="object-main" type="button" data-tree-query-tab="${escapeHtml(tab.id)}" title="${escapeHtml(tab.title)}"${tab.id === state.activeTabId && !state.redisConsole ? ' aria-current="true"' : ''}>${escapeHtml(tab.title)}</button></div>`).join('');
-    if (renderedTreeQueries.get(list) !== rows) {
-      const focusedId = list.contains(document.activeElement) ? document.activeElement.dataset.treeQueryTab : null;
-      list.innerHTML = rows;
-      renderedTreeQueries.set(list, rows);
-      if (focusedId) (list.querySelector(`[data-tree-query-tab="${CSS.escape(focusedId)}"]`) || group.querySelector('[data-new-tree-query]')).focus({ preventScroll: true });
-    }
+    const rows = entries.map(entry => `<div class="tree-object"><span class="object-kind-icon" data-catalog-icon="query">${kindIcons.query}</span><button class="object-main" type="button" data-tree-saved-query="${escapeHtml(entry.id)}" title="${escapeHtml(entry.title)}">${escapeHtml(entry.title)}</button><button type="button" class="icon-btn tree-category-action" data-tree-remove-query="${escapeHtml(entry.id)}" title="删除已保存查询" aria-label="删除已保存查询">×</button></div>`).join('') || '<div class="tree-status">没有已保存的查询</div>';
+    if (renderedTreeQueries.get(list) === rows) continue;
+    list.innerHTML = rows;
+    renderedTreeQueries.set(list, rows);
   }
 }
 
+const creatableTreeKinds = { table: "新建表", partitioned_table: "新建表", view: "新建视图", materialized_view: "新建物化视图", routine: "新建函数或存储过程", query: "新建查询" };
 function treeCategory(kind, count, expanded, contents) {
   const label = kindLabels[kind] || kind;
-  return `<div class="tree-category${expanded ? "" : " collapsed"}" data-kind="${escapeHtml(kind)}"><div class="category-summary" tabindex="0" aria-expanded="${expanded}">${treeToggle(label, expanded)}<span class="category-kind-icon" data-catalog-icon="${escapeHtml(kind)}">${kindIcons[kind] || "•"}</span><span class="tree-label">${escapeHtml(label)}</span><span class="count">${count}</span></div><div class="category-items">${contents}</div></div>`;
+  const create = creatableTreeKinds[kind];
+  const actions = [
+    kind === "query" ? `<button type="button" class="icon-btn tree-category-action" data-tree-query-save title="保存当前 SQL 到查询" aria-label="保存当前 SQL 到查询">${svgIcon('<path d="M4 4h13l3 3v13H4zM8 4v6h8V4M8 20v-6h8v6"/>')}</button>` : "",
+    create ? `<button type="button" class="icon-btn tree-category-action" data-tree-category-create title="${create}" aria-label="${create}">${svgIcon('<path d="M12 5v14M5 12h14"/>')}</button>` : "",
+    `<button type="button" class="icon-btn tree-category-action" data-tree-category-refresh title="刷新${escapeHtml(label)}" aria-label="刷新${escapeHtml(label)}">${refreshIcon}</button>`,
+  ].join("");
+  return `<div class="tree-category${expanded ? "" : " collapsed"}" data-kind="${escapeHtml(kind)}"><div class="category-summary" tabindex="0" aria-expanded="${expanded}">${treeToggle(label, expanded)}<span class="category-kind-icon" data-catalog-icon="${escapeHtml(kind)}">${kindIcons[kind] || "•"}</span><span class="tree-label">${escapeHtml(label)}</span>${actions}<span class="count">${count}</span></div><div class="category-items">${contents}</div></div>`;
 }
 function sqlObjectCategories(database, schema, objects, query, driver, filter = query) {
   const groups = orderedObjectGroups(objects.filter(object => objectMatchesSearch(object, filter)), { driver, searching: Boolean(query) });
@@ -1491,9 +1519,7 @@ function sqlObjectCategories(database, schema, objects, query, driver, filter = 
     const key = JSON.stringify([database, schema, kind]);
     const expanded = Boolean(query) || state.expandedCategories.has(key);
     const rows = items.map(object => sqlObjectRow(object, database, filter)).join("");
-    const empty = kind === "view"
-      ? '<div class="tree-status">没有可见视图<br/><button type="button" data-tree-create-view>新建视图…</button></div>'
-      : `<div class="tree-status">没有可见${escapeHtml(kindLabels[kind] || kind)}</div>`;
+    const empty = `<div class="tree-status">没有可见${escapeHtml(kindLabels[kind] || kind)}</div>`;
     return treeCategory(kind, items.length, expanded, rows || empty);
   }).join("");
 }
@@ -2262,6 +2288,7 @@ function openSavedQuery(entry) {
   state.editor?.focus();
   const missing = connectionId && !state.profiles.some(profile => profile.id === connectionId);
   showToast(missing ? "SQL 已打开，原连接不可用；可复制 SQL 到新建查询中继续。" : "已在新标签打开查询");
+  return tab;
 }
 function tabGlyph(tab) {
   if (tab.redisKey != null) return `<span class="tab-glyph redis-tab-glyph">${redisKeyIcon(tab.redisType)}</span>`;
@@ -2289,6 +2316,7 @@ function renderTabs() {
     target.focus({ preventScroll: true });
   }
   const tab = activeExecutionTab();
+  updateRunButton(tab);
   renderQueryTarget(tab);
   const activeDriver = state.profiles.find((profile) => profile.id === tab?.connectionId)?.driver;
   if (tab && activeDriver !== "redis") {
@@ -3136,7 +3164,9 @@ function prepareObjectContextMenu(target) {
     actions.add("create-view");
     if (driver === "postgres") actions.add("drop-schema");
   } else if (target?.type === "category") {
-    if (target.kind !== "query") actions.add("refresh-schema");
+    actions.add("refresh-schema");
+    if (target.kind === "routine") { actions.add("create-function"); actions.add("create-procedure"); }
+    if (target.kind === "materialized_view") actions.add("create-materialized-view");
     actions.add("new-database-query");
     if (["table", "partitioned_table"].includes(target.kind)) actions.add("create-table");
     if (target.kind === "view") actions.add("create-view");
@@ -3849,7 +3879,8 @@ async function editTableStructure(tab) {
       tab.confirming = true;
       renderTabs();
       try {
-        if (!await confirmAction(`执行位置：${queryTargetDescription(target)} / ${object.name}\n\n共 ${plan.changed} 项字段变更。${plan.dropped ? `将删除 ${plan.dropped} 列及其数据。` : ""}${driverForConnection(connectionId) === "mysql" ? "MySQL DDL 会直接提交。" : "PostgreSQL 将在一个事务中应用，失败会回滚。"}`, {
+        const changes = [plan.changed ? `${plan.changed} 项字段变更` : "", plan.tableCommentChanged ? "修改表注释" : ""].filter(Boolean).join("，");
+        if (!await confirmAction(`执行位置：${queryTargetDescription(target)} / ${object.name}\n\n${changes}。${plan.dropped ? `将删除 ${plan.dropped} 列及其数据。` : ""}${driverForConnection(connectionId) === "mysql" ? "MySQL DDL 会直接提交。" : "PostgreSQL 将在一个事务中应用，失败会回滚。"}`, {
           title: "确认修改表结构", detail: plan.sql, acceptLabel: "应用结构修改",
         })) return false;
         guard();
@@ -3913,6 +3944,30 @@ async function editTableStructure(tab) {
 function openDatabaseContextQuery(target) {
   if (!target?.database || !target.connectionId) return;
   addTab("", target.connectionId, null, { database: target.database, schema: target.schema || null, title: `查询 · ${target.schema || target.database}` });
+}
+
+function refreshTreeCategory(target) {
+  if (target.kind !== "query") return refreshTreeObject(target);
+  savedTreeQueries = readSavedTreeQueries();
+  syncTreeQueries();
+  showToast("已刷新查询列表");
+}
+
+function createFromTreeCategory(target, kind) {
+  if (["table", "partitioned_table"].includes(kind)) return openContextObjectDialog(target, "create-table");
+  if (kind === "view") return editView(target);
+  if (kind === "query") return openDatabaseContextQuery(target);
+  const mysql = target.driver === "mysql";
+  const qualified = `${contextIdentifier(target.schema, target.driver)}.${contextIdentifier("new_" + kind, target.driver)}`;
+  const templates = {
+    materialized_view: `CREATE MATERIALIZED VIEW ${qualified} AS\nSELECT 1 AS value;`,
+    function: mysql ? `CREATE FUNCTION ${qualified}() RETURNS INTEGER DETERMINISTIC RETURN 1;`
+      : `CREATE FUNCTION ${qualified}() RETURNS integer LANGUAGE sql AS $$\n  SELECT 1;\n$$;`,
+    procedure: mysql ? `CREATE PROCEDURE ${qualified}() SELECT 1;`
+      : `CREATE PROCEDURE ${qualified}() LANGUAGE sql AS $$\n  SELECT 1;\n$$;`,
+  };
+  const sql = templates[kind];
+  if (sql) addTab(sql, target.connectionId, null, { database: target.database, schema: target.schema, title: `新建${kindLabels[kind]}` });
 }
 
 async function refreshDatabaseContext(target) {
@@ -4330,10 +4385,7 @@ async function runRedisCommand(tab, sqlText, connectionId, drafts = []) {
     }
     if (!consoleEntry?.commandTruncated) recordHistory(sqlText, tab);
     tab.outputTab = "result";
-    if (isActive()) {
-      renderOutput();
-      showToast("Redis 命令完成");
-    }
+    if (isActive()) renderOutput();
   } catch (error) {
     if (tab.closed) return;
     const cancelled = tab.cancelRequested || isQueryCancellation(error);
@@ -4600,7 +4652,7 @@ async function runQuery({ preserveResult = false, pagingRequest = null, preserve
     if (!preserveOutputMode || (tab.outputTab || 'result') === 'result') tab.outputTab = "result";
     if (isActive()) {
       renderOutput();
-      if (!tab.paging) showToast(catalogRefreshFailed ? "SQL 已执行，目录刷新失败，请手动刷新；不要重复执行" : scriptOutcome || "查询完成", catalogRefreshFailed ? "error" : "info");
+      if (catalogRefreshFailed) showToast("SQL 已执行，目录刷新失败，请手动刷新", "error");
     }
     return true;
   } catch (error) {
@@ -6196,14 +6248,38 @@ function bindEvents() {
     }
   });
   refs.objectTree.addEventListener("click", async (event) => {
-    const query = event.target.closest('[data-new-tree-query]');
-    if (query) return openDatabaseContextQuery(treeTargetFromNode(query.closest('.tree-category').querySelector('.category-summary')));
-    const draft = event.target.closest('[data-tree-query-tab]');
-    if (draft) return activateTab(draft.dataset.treeQueryTab);
-    const createView = event.target.closest('[data-tree-create-view]');
-    if (createView) {
-      const group = createView.closest('.tree-category');
-      return editView(treeTargetFromNode(group.querySelector('.category-summary')));
+    const heading = event.target.closest(".category-summary");
+    const categoryAction = event.target.closest("[data-tree-category-create], [data-tree-category-refresh], [data-tree-query-save]");
+    if (categoryAction && heading) {
+      const target = treeTargetFromNode(heading);
+      if (categoryAction.hasAttribute("data-tree-query-save")) return saveTreeQuery(target, heading);
+      if (categoryAction.hasAttribute("data-tree-category-refresh")) return refreshTreeCategory(target);
+      if (target.kind === "routine") {
+        event.stopPropagation();
+        state.contextTreeTarget = target;
+        prepareObjectContextMenu(target);
+        const { left, bottom } = categoryAction.getBoundingClientRect();
+        showContextMenu(refs.objectContextMenu, left, bottom);
+        refs.objectContextMenu.querySelector('[data-context-action="create-function"]').focus({ preventScroll: true });
+        return;
+      }
+      return createFromTreeCategory(target, target.kind);
+    }
+    const saved = event.target.closest("[data-tree-saved-query], [data-tree-remove-query]");
+    if (saved) {
+      const entry = savedTreeQueries.find(item => item.id === (saved.dataset.treeSavedQuery || saved.dataset.treeRemoveQuery));
+      if (!entry) return;
+      if (saved.hasAttribute("data-tree-remove-query")) {
+        if (await confirmAction(`删除已保存的查询「${entry.title}」？`, { title: "删除查询", acceptLabel: "删除查询" })) {
+          writeSavedTreeQueries(savedTreeQueries.filter(item => item.id !== entry.id));
+        }
+        return;
+      }
+      const tab = state.tabs.find(item => item.savedTreeQueryId === entry.id);
+      if (tab) return activateTab(tab.id);
+      const opened = openSavedQuery(entry);
+      if (opened) opened.savedTreeQueryId = entry.id;
+      return;
     }
     const keyInfo = event.target.closest('[data-redis-key-info]');
     if (keyInfo) { const row = keyInfo.closest('[data-redis-key]'); showRedisKeyDetails(row.dataset.redisKey, row.dataset.redisDb); return; }
@@ -6345,7 +6421,11 @@ function bindEvents() {
     if (action === "refresh-database") return refreshDatabaseContext(target);
     if (action === "refresh-databases") return refreshDatabaseList(target);
     if (action === "refresh-redis") return refreshRedisContext();
+    if (action === "refresh-schema" && target.type === "category") return refreshTreeCategory(target);
     if (action === "refresh-schema" || action === "refresh-object") return refreshTreeObject(target);
+    if (action === "create-function") return createFromTreeCategory(target, "function");
+    if (action === "create-procedure") return createFromTreeCategory(target, "procedure");
+    if (action === "create-materialized-view") return createFromTreeCategory(target, "materialized_view");
     if (action === "edit-structure") return openTableStructureEditor(target);
     if (action === "create-view" || action === "edit-view") return editView(target);
     if (action === "refresh-matview") return refreshMaterializedView(target);

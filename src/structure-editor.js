@@ -148,7 +148,7 @@ function mysqlColumnPositions(columns, rows, quote) {
   return positions;
 }
 
-export function buildStructurePlan(details, rows, driver = 'postgres') {
+export function buildStructurePlan(details, rows, driver = 'postgres', tableComment = details.comment ?? '') {
   const mysql = driver === 'mysql';
   if (!['postgres', 'mysql'].includes(driver) || !['table', 'partitioned_table'].includes(details.kind)) throw new Error('此对象暂不支持可视化编辑');
   const q = (name) => identifier(String(name ?? ''), mysql);
@@ -209,11 +209,16 @@ export function buildStructurePlan(details, rows, driver = 'postgres') {
     }
     if (!mysql && (!old || !same(row, old, 'comment')) && (old || row.comment)) statements.push(`COMMENT ON COLUMN ${table}.${q(row.name)} IS ${row.comment ? literal(row.comment, false) : 'NULL'};`);
   }
+  const tableCommentChanged = tableComment !== (details.comment ?? '');
+  if (tableCommentChanged) {
+    if (mysql) alter(`COMMENT = ${mysqlCommentLiteral(tableComment, details.mysql?.sqlMode, { table: true })}`);
+    else statements.push(`COMMENT ON TABLE ${table} IS ${tableComment ? literal(tableComment, false) : 'NULL'};`);
+  }
   const sql = mysql && clauses.length ? `ALTER TABLE ${table}\n  ${clauses.join(',\n  ')};` : statements.join('\n');
-  return { sql, changed, dropped, positionedColumns: new Set(positions.keys()), ...(mysql ? mysqlSqlModeExpectation(sql, details.mysql?.sqlMode) : {}) };
+  return { sql, changed, dropped, tableCommentChanged, positionedColumns: new Set(positions.keys()), ...(mysql ? mysqlSqlModeExpectation(sql, details.mysql?.sqlMode) : {}) };
 }
 
-export function buildCreateTablePlan({ schema, name, charset, collation, mysql: mysqlMetadata }, rows, driver = 'postgres') {
+export function buildCreateTablePlan({ schema, name, charset, collation, comment, mysql: mysqlMetadata }, rows, driver = 'postgres') {
   if (!['postgres', 'mysql'].includes(driver)) throw new Error('此驱动暂不支持可视化建表');
   const mysql = driver === 'mysql';
   if (!name?.trim()) throw new Error('请输入表名');
@@ -246,7 +251,9 @@ export function buildCreateTablePlan({ schema, name, charset, collation, mysql: 
     return `  ${column} ${type}${generated}${row.nullable ? '' : ' NOT NULL'}${def}${mysql && row.comment ? ` COMMENT ${literal(row.comment, true, mysqlMetadata?.sqlMode)}` : ''}`;
   });
   if (primary.length) definitions.push(`  PRIMARY KEY (${primary.map(row => q(row.name)).join(', ')})`);
-  const statements = [`CREATE TABLE ${table} (\n${definitions.join(',\n')}\n)${mysql ? ` ENGINE=InnoDB${mysqlCharacterClause(charset, collation)}` : ''};`];
+  const tableOptions = mysql ? ` ENGINE=InnoDB${mysqlCharacterClause(charset, collation)}${comment ? ` COMMENT=${mysqlCommentLiteral(comment, mysqlMetadata?.sqlMode, { table: true })}` : ''}` : '';
+  const statements = [`CREATE TABLE ${table} (\n${definitions.join(',\n')}\n)${tableOptions};`];
+  if (!mysql && comment) statements.push(`COMMENT ON TABLE ${table} IS ${literal(comment, false)};`);
   if (!mysql) for (const row of columns) {
     if (row.comment) statements.push(`COMMENT ON COLUMN ${table}.${q(row.name)} IS ${literal(row.comment, false)};`);
   }
@@ -256,7 +263,7 @@ export function buildCreateTablePlan({ schema, name, charset, collation, mysql: 
 
 // Compare the catalog attributes that can influence an edit before applying it.
 export function structureFingerprint(details) {
-  return JSON.stringify({ id: details.id, schema: details.schema, name: details.name, kind: details.kind,
+  return JSON.stringify({ id: details.id, schema: details.schema, name: details.name, kind: details.kind, comment: details.comment ?? '',
     mysql: details.mysql ? { ...details.mysql, definition: details.definition?.replace(/\sAUTO_INCREMENT=\d+(?=\s|$)/gi, '') } : null,
     columns: (details.columns || []).map((column) => Object.fromEntries([...editableKeys, 'primaryKey', 'identity', 'generated'].map((key) => [key, column[key] ?? null]))),
     indexes: details.indexes || [], constraints: details.constraints || [] });
@@ -272,6 +279,8 @@ export function openStructureEditor({ details, driver, targetLabel, onApply, onC
   const newCreateRow = values => ({ defaultMode: 'none', defaultInput: '', defaultError: '', typeParameterError: '', typeParameterDraft: null, defaultDraft: null, ...values });
   const rows = create ? [newCreateRow({ name: 'id', dataType: 'bigint', nullable: false, primaryKey: true, identity: true, defaultValue: '', comment: '' })] : createStructureDraft(details);
   const initialRows = JSON.stringify(rows);
+  const originalTableComment = details.comment ?? '';
+  let tableComment = originalTableComment;
   const canReorder = !create && driver === 'mysql' && Boolean(details.mysql && details.definition);
   const fields = create ? ['name', 'dataType', 'primaryKey', 'identity', 'nullable', 'defaultValue', 'comment'] : editableKeys;
   const fieldLabels = { name: '名称', dataType: '类型', nullable: '可空', defaultValue: '默认值', comment: '备注', primaryKey: '主键', identity: '自增' };
@@ -309,15 +318,22 @@ export function openStructureEditor({ details, driver, targetLabel, onApply, onC
   const nameLabel = node('label', '', '表名');
   const nameInput = node('input'); nameInput.type = 'text'; nameInput.autocomplete = 'off'; nameInput.placeholder = '例如：orders'; nameInput.setAttribute('aria-label', '表名');
   nameLabel.append(nameInput);
+  const tableCommentField = node('label', 'structure-table-comment', '表注释');
+  const tableCommentInput = node('textarea');
+  tableCommentInput.rows = 2;
+  tableCommentInput.placeholder = '说明这张表的用途';
+  tableCommentInput.value = tableComment;
+  tableCommentField.append(tableCommentInput);
   const characterPicker = create && driver === 'mysql' && mysqlCharacterSettings ? createMysqlCharacterPicker(mysqlCharacterSettings, '继承数据库默认值') : null;
   if (characterPicker) { naming.append(nameLabel, characterPicker.element); } else naming.append(nameLabel);
+  if (create) naming.append(tableCommentField);
   naming.append(node('p', 'form-note', '确认表名和下方 SQL 后创建；返回编辑可继续调整字段。'));
   footer.append(cancel, submit);
   form.append(header, target);
   if (create) form.append(note, toolbar, scroller);
   else {
     const fieldsPanel = node('div');
-    fieldsPanel.append(note, toolbar, scroller);
+    fieldsPanel.append(tableCommentField, note, toolbar, scroller);
     mountStructureTabs(form, [
       { id: 'fields', label: '字段', content: fieldsPanel },
       ...structureMetadataTabs(details, driver),
@@ -463,7 +479,7 @@ export function openStructureEditor({ details, driver, targetLabel, onApply, onC
         const invalid = rows.find(row => row.defaultError || row.typeParameterError);
         if (invalid) throw new Error(`${invalid.name || '新字段'}：${invalid.typeParameterError || invalid.defaultError}`);
       }
-      plan = create ? buildCreateTablePlan({ ...details, name: namingTable ? nameInput.value : '<保存时填写表名>', ...(characterPicker?.value() || {}) }, rows, driver) : buildStructurePlan(details, rows, driver);
+      plan = create ? buildCreateTablePlan({ ...details, comment: tableComment, name: namingTable ? nameInput.value : '<保存时填写表名>', ...(characterPicker?.value() || {}) }, rows, driver) : buildStructurePlan(details, rows, driver, tableComment);
       setSelectableText(preview, plan.sql || '尚未修改结构');
       count.textContent = `${rows.filter((row) => !row.removed).length} 个字段 · ${plan.changed} 项变更${plan.dropped ? ` · 删除 ${plan.dropped} 列` : ''}`;
       submit.disabled = busy || !plan.sql;
@@ -495,6 +511,7 @@ export function openStructureEditor({ details, driver, targetLabel, onApply, onC
   };
   characterPicker?.element.addEventListener('change', () => update());
   nameInput.addEventListener('input', () => { feedback.textContent = ''; update(); });
+  tableCommentInput.addEventListener('input', () => { tableComment = tableCommentInput.value; feedback.textContent = ''; update(); });
   const renderRows = () => {
     closeTypeMenu();
     createControls.clear();
@@ -723,7 +740,8 @@ export function openStructureEditor({ details, driver, targetLabel, onApply, onC
   const dismiss = async () => {
     if (busy) return;
     if (namingTable) { setNaming(false); return; }
-    if ((create ? JSON.stringify(rows) !== initialRows : plan?.sql || rows.some(changedColumn)) && !await confirmDiscard()) return;
+    const changed = create ? JSON.stringify(rows) !== initialRows : plan?.sql || rows.some(changedColumn);
+    if ((changed || tableComment !== originalTableComment) && !await confirmDiscard()) return;
     dialog.close();
   };
   dialog.addEventListener('pointerdown', event => {
@@ -748,7 +766,7 @@ export function openStructureEditor({ details, driver, targetLabel, onApply, onC
     event.preventDefault(); if (busy || !plan?.sql) return;
     if (create && !namingTable) { setNaming(true); return; }
     busy = true;
-    const fields = [...dialog.querySelectorAll('input, select, button')].map((element) => [element, element.disabled]);
+    const fields = [...dialog.querySelectorAll('input, textarea, select, button')].map((element) => [element, element.disabled]);
     for (const [element] of fields) element.disabled = true;
     feedback.classList.remove('error'); feedback.textContent = '正在准备提交…';
     try {

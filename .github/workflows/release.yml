@@ -46,7 +46,7 @@ jobs:
         env:
           DMGBUILD: ${{ runner.temp }}/dmg-venv/bin/dmgbuild
         run: |
-          npm run tauri -- build --bundles app
+          npm run tauri -- build --bundles app -- --locked
           npm run build:dmg
       - name: Verify installer and application signature
         run: |

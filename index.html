@@ -184,7 +184,7 @@
               <button id="refreshQueryTarget" class="icon-btn" type="button" title="刷新 Schema 列表" aria-label="刷新 Schema 列表"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.34 5.66M20 4v7h-7"/></svg></button>
             </div>
             <button class="primary-btn" id="runQuery">
-              <svg class="ui-icon run-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M7.5 5.5v13l10.5-6.5-10.5-6.5Z" fill="currentColor" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/></svg><span id="runLabel">执行</span
+              <svg class="ui-icon run-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M7.5 5.5v13l10.5-6.5-10.5-6.5Z" fill="currentColor" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/></svg><span class="run-spinner" aria-hidden="true"></span><span id="runLabel">执行</span
               ><kbd>⌘ ↵</kbd></button
             ><button class="icon-btn" id="stopQuery" aria-label="停止执行" disabled title="停止执行">
               <svg class="ui-icon stop-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="6.5" y="6.5" width="11" height="11" rx="2" fill="currentColor" stroke="none"/></svg></button
@@ -315,7 +315,7 @@
       <footer class="statusbar">
         <span class="status-dot" id="statusDot"></span
         ><span id="connectionMode" role="status" aria-live="polite" aria-atomic="true">未连接</span><span id="serverInfo"></span
-        ><span class="toolbar-spacer"></span><button class="workspace-attention quiet-btn" id="workspaceAttention" type="button" hidden title="查看未保存修改与未提交事务">待处理修改</button
+        ><span class="toolbar-spacer"></span><span class="toast" id="toast" role="status" aria-live="polite" aria-atomic="true"></span><button class="workspace-attention quiet-btn" id="workspaceAttention" type="button" hidden title="查看未保存修改与未提交事务">待处理修改</button
         ><span class="preview-label" id="previewLabel" hidden>浏览器预览</span><button class="quiet-btn" id="showShortcuts" type="button" title="键盘快捷键">快捷键 <kbd>?</kbd></button><button class="quiet-btn" id="resetLayout" type="button" title="恢复默认面板宽度和展开状态">重置布局</button
         ><span id="workspaceStats">PostgreSQL</span
         ><button class="quiet-btn" id="disconnectConnection" disabled>
@@ -476,6 +476,9 @@
       <button type="button" data-context-action="open-data"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 5h7l2 3h9v12H3z"/></svg><span data-context-label>打开表数据</span></button>
       <button type="button" data-context-action="open-structure"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="4" width="16" height="16" rx="1"/><path d="M4 10h16M10 10v10"/></svg><span data-context-label>查看表结构</span></button>
       <button type="button" data-context-action="create-view"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 5h13v14H3zM3 9h13m3 0v8m-4-4h8"/></svg><span data-context-label>新建视图…</span></button>
+      <button type="button" data-context-action="create-materialized-view"><span data-context-label>新建物化视图…</span></button>
+      <button type="button" data-context-action="create-function"><span data-context-label>新建函数…</span></button>
+      <button type="button" data-context-action="create-procedure"><span data-context-label>新建存储过程…</span></button>
       <button type="button" data-context-action="edit-view"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m14 5 5 5M5 14l10-10a2 2 0 0 1 3 0l2 2a2 2 0 0 1 0 3L10 19l-6 1z"/></svg><span data-context-label>编辑视图定义…</span></button>
       <button type="button" data-context-action="refresh-matview"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.34 5.66M20 4v7h-7"/></svg><span data-context-label>刷新物化视图…</span></button>
       <button type="button" data-context-action="edit-routine"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m14 5 5 5M5 14l10-10a2 2 0 0 1 3 0l2 2a2 2 0 0 1 0 3L10 19l-6 1z"/></svg><span data-context-label>编辑定义…</span></button>
@@ -635,7 +638,6 @@
       <dl class="shortcut-list"><div><dt>快速操作 / 切换标签与连接</dt><dd><kbd>⌘ P</kbd></dd></div><div><dt>新建查询</dt><dd><kbd>⌘ T</kbd></dd></div><div><dt>执行 SQL / 所选语句</dt><dd><kbd>⌘ ↵</kbd></dd></div><div><dt>快速打开表 / Redis Key</dt><dd><kbd>⌘ K</kbd></dd></div><div><dt>搜索并定位结果列</dt><dd><kbd>⌘ J</kbd></dd></div><div><dt>筛选左侧对象树</dt><dd><kbd>⌘ ⇧ K</kbd></dd></div><div><dt>保存表修改 / SQL 文件</dt><dd><kbd>⌘ S</kbd></dd></div><div><dt>搜索编辑器内容</dt><dd><kbd>⌘ F</kbd></dd></div><div><dt>在标签之间移动</dt><dd><kbd>←</kbd> <kbd>→</kbd></dd></div><div><dt>编辑选中单元格</dt><dd><kbd>Enter</kbd> <kbd>F2</kbd></dd></div><div><dt>单元格操作 / 查看详情</dt><dd><kbd>Shift F10</kbd></dd></div></dl>
       <p class="form-note">方向键切换需先聚焦查询标签。Windows / Linux 使用 Ctrl 代替 ⌘。</p>
     </dialog>
-    <div class="toast" id="toast" role="status" aria-live="polite" aria-atomic="true"></div>
     <div class="context-menu result-more-menu" id="resultMoreMenu" role="menu" aria-label="导出与复制" hidden>
       <button type="button" role="menuitem" data-export-format="sql">导出 SQL</button>
       <button id="exportResults" type="button" role="menuitem" data-export-format="csv" disabled>导出 CSV</button>

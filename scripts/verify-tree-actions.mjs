@@ -76,6 +76,12 @@ try {
   await selected(page.locator(".tree-root"));
   const sc = await expand("app", "public");
   const table = sc.locator("[data-object-id='public.orders']");
+  const tableCategory = sc.locator('.tree-category[data-kind="table"]');
+  const depth = await tableCategory.evaluate(node => {
+    const x = item => item.getBoundingClientRect().x;
+    return x(node.querySelector('.tree-object .object-kind-icon')) - x(node.querySelector('.category-kind-icon'));
+  });
+  expect(depth >= 10, "table items should be indented beyond the category icon");
   await openMenu(sc.locator(':scope > summary'));
   const visibleActions = await menu.locator('button:visible').evaluateAll(nodes => nodes.map(node => node.dataset.contextAction));
   expect(visibleActions.at(-1) === 'drop-schema', 'delete schema is not the last menu action');

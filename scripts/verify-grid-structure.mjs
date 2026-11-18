@@ -30,6 +30,7 @@ const invoke = async (command, args) => {
     if (failMutation) throw new Error('fixture: 类型转换失败');
     if (args.request.sql.includes('ADD COLUMN "note"')) details = { ...details, columns: [...details.columns, { name: 'note', dataType: 'text', nullable: true, defaultValue: null, comment: '' }] };
     if (args.request.sql.includes('SET DEFAULT')) details = { ...details, columns: details.columns.map((column) => column.name === 'status' ? { ...column, defaultValue: "'ready'::text" } : column) };
+    if (args.request.sql.includes('COMMENT ON TABLE "public"."orders"')) details = { ...details, comment: '订单主表' };
     return { columns: [], rows: [], row_count: 0 };
   }
   return fixture.invoke(command, args);
@@ -212,6 +213,8 @@ try {
   assert.ok(await editor.locator('[data-field-row="0"][data-field="defaultValue"]').isDisabled());
   assert.ok(await editor.locator('[data-field-row="2"][data-field="dataType"]').isDisabled());
   assert.equal(mutations.length, 0);
+  await editor.getByLabel('表注释', { exact: true }).fill('订单主表');
+  assert.match(await editor.locator('.structure-sql-preview pre').innerText(), /COMMENT ON TABLE "public"\."orders" IS E'订单主表'/);
   await editor.locator('[data-field-row="1"][data-field="defaultValue"]').fill("'ready'");
   await editor.getByRole('button', { name: '＋ 添加字段', exact: true }).click();
   await editor.locator('[data-field-row="3"][data-field="name"]').fill('note');
@@ -240,6 +243,7 @@ try {
   assert.equal(mutations.length, 2);
   assert.equal(mutations[1].connectionId, 'conn-dev'); assert.equal(mutations[1].database, 'app'); assert.equal(mutations[1].schema, 'public');
   assert.ok((await page.locator('#structurePanel').innerText()).includes('note'));
+  assert.ok((await page.locator('#structurePanel').innerText()).includes('订单主表'));
   assert.ok(await page.locator('#editorPane').isHidden());
   const browseTab = page.locator('.query-tab').filter({ hasText: /^×SQLorders$/ });
   if (await browseTab.count()) {
