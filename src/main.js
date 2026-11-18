@@ -1457,7 +1457,7 @@ function writeSavedTreeQueries(entries) {
   syncTreeQueries();
   return true;
 }
-function saveTreeQuery(target, heading) {
+function saveTreeQuery(target) {
   const tab = activeTab();
   const schema = tab && (tabSchema(tab) || queryTargetData(tab)?.context?.defaultSchema);
   if (!tab || tab.browse || tab.structureOnly || tab.console || !tab.sql.trim() ||
@@ -1472,7 +1472,10 @@ function saveTreeQuery(target, heading) {
   const id = current?.id || makeId("saved-query");
   if (writeSavedTreeQueries([{ ...scope, id, title: tab.title, sql: tab.sql }, ...savedTreeQueries.filter(entry => entry.id !== id)])) {
     tab.savedTreeQueryId = id;
-    toggleTreeRow(heading, true);
+    const key = treeTargetKey(target);
+    const heading = [...refs.objectTree.querySelectorAll('.tree-category[data-kind="query"] > .category-summary')]
+      .find(row => treeTargetKey(treeTargetFromNode(row)) === key);
+    if (heading) toggleTreeRow(heading, true);
     showToast("SQL 已保存到查询");
   }
 }
@@ -1497,16 +1500,9 @@ function syncTreeQueries() {
   }
 }
 
-const creatableTreeKinds = { table: "新建表", partitioned_table: "新建表", view: "新建视图", materialized_view: "新建物化视图", routine: "新建函数或存储过程", query: "新建查询" };
 function treeCategory(kind, count, expanded, contents) {
   const label = kindLabels[kind] || kind;
-  const create = creatableTreeKinds[kind];
-  const actions = [
-    kind === "query" ? `<button type="button" class="icon-btn tree-category-action" data-tree-query-save title="保存当前 SQL 到查询" aria-label="保存当前 SQL 到查询">${svgIcon('<path d="M4 4h13l3 3v13H4zM8 4v6h8V4M8 20v-6h8v6"/>')}</button>` : "",
-    create ? `<button type="button" class="icon-btn tree-category-action" data-tree-category-create title="${create}" aria-label="${create}">${svgIcon('<path d="M12 5v14M5 12h14"/>')}</button>` : "",
-    `<button type="button" class="icon-btn tree-category-action" data-tree-category-refresh title="刷新${escapeHtml(label)}" aria-label="刷新${escapeHtml(label)}">${refreshIcon}</button>`,
-  ].join("");
-  return `<div class="tree-category${expanded ? "" : " collapsed"}" data-kind="${escapeHtml(kind)}"><div class="category-summary" tabindex="0" aria-expanded="${expanded}">${treeToggle(label, expanded)}<span class="category-kind-icon" data-catalog-icon="${escapeHtml(kind)}">${kindIcons[kind] || "•"}</span><span class="tree-label">${escapeHtml(label)}</span>${actions}<span class="count">${count}</span></div><div class="category-items">${contents}</div></div>`;
+  return `<div class="tree-category${expanded ? "" : " collapsed"}" data-kind="${escapeHtml(kind)}"><div class="category-summary" tabindex="0" aria-expanded="${expanded}" aria-haspopup="menu">${treeToggle(label, expanded)}<span class="category-kind-icon" data-catalog-icon="${escapeHtml(kind)}">${kindIcons[kind] || "•"}</span><span class="tree-label">${escapeHtml(label)}</span><span class="count">${count}</span></div><div class="category-items">${contents}</div></div>`;
 }
 function sqlObjectCategories(database, schema, objects, query, driver, filter = query) {
   const groups = orderedObjectGroups(objects.filter(object => objectMatchesSearch(object, filter)), { driver, searching: Boolean(query) });
@@ -3165,16 +3161,17 @@ function prepareObjectContextMenu(target) {
     if (driver === "postgres") actions.add("drop-schema");
   } else if (target?.type === "category") {
     actions.add("refresh-schema");
+    if (target.kind === "query") actions.add("save-tree-query");
     if (target.kind === "routine") { actions.add("create-function"); actions.add("create-procedure"); }
     if (target.kind === "materialized_view") actions.add("create-materialized-view");
-    actions.add("new-database-query");
+    if (["table", "partitioned_table", "foreign_table"].includes(target.kind)) actions.add("new-database-query");
     if (["table", "partitioned_table"].includes(target.kind)) actions.add("create-table");
     if (target.kind === "view") actions.add("create-view");
   } else if (target?.type === "object") {
     if (["table", "partitioned_table", "view", "materialized_view", "foreign_table"].includes(target.object.kind)) {
       actions.add("open-data");
-      actions.add("new-query");
     }
+    if (isTable || target.object.kind === "foreign_table") actions.add("new-query");
     actions.add("open-structure");
     actions.add("copy-name");
     if (canViewObjectDdl(target.object) || target.object.kind === 'foreign_table') actions.add("copy-ddl");
@@ -3196,6 +3193,7 @@ function prepareObjectContextMenu(target) {
     button.hidden = !actions.has(button.dataset.contextAction);
   }
   refs.objectContextTitle.textContent = contextTargetLabel(target);
+  refs.objectContextMenu.querySelector('[data-context-action="refresh-schema"] [data-context-label]').textContent = target?.kind === "query" ? "刷新查询列表" : "刷新对象列表";
   refs.objectContextMenu.querySelector('[data-context-action="open-data"] [data-context-label]').textContent = isTable ? "打开表数据" : "打开数据";
   refs.objectContextMenu.querySelector('[data-context-action="open-structure"] [data-context-label]').textContent = isTable ? "查看表结构" : detailNouns[target?.object?.kind] ? `查看${detailNouns[target.object.kind]}` : "查看结构 / 定义";
   refs.objectContextMenu.querySelector('[data-context-action="copy-ddl"] [data-context-label]').textContent = isTable ? "复制建表 SQL" : "复制 DDL";
@@ -3954,9 +3952,6 @@ function refreshTreeCategory(target) {
 }
 
 function createFromTreeCategory(target, kind) {
-  if (["table", "partitioned_table"].includes(kind)) return openContextObjectDialog(target, "create-table");
-  if (kind === "view") return editView(target);
-  if (kind === "query") return openDatabaseContextQuery(target);
   const mysql = target.driver === "mysql";
   const qualified = `${contextIdentifier(target.schema, target.driver)}.${contextIdentifier("new_" + kind, target.driver)}`;
   const templates = {
@@ -6239,7 +6234,19 @@ function bindEvents() {
     if (event.target.closest('[data-tree-toggle]')) return;
     const row = event.target.closest('.tree-root, summary, .category-summary');
     if (!row || event.target !== row) return;
-    if (["Enter", " "].includes(event.key)) {
+    if (row.matches(".category-summary") && (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10"))) {
+      const target = treeTargetFromNode(row);
+      if (!target?.connectionId || state.connectionStatuses[target.connectionId] !== "connected") return;
+      event.preventDefault();
+      hideContextMenus();
+      selectTreeTarget(target);
+      state.contextObject = null;
+      state.contextTreeTarget = target;
+      prepareObjectContextMenu(target);
+      const { left, bottom } = row.getBoundingClientRect();
+      showContextMenu(refs.objectContextMenu, left, bottom);
+      refs.objectContextMenu.querySelector('button:not([hidden]):not(:disabled)')?.focus({ preventScroll: true });
+    } else if (["Enter", " "].includes(event.key)) {
       event.preventDefault();
       selectTreeTarget(treeTargetFromNode(row));
     } else if (["ArrowRight", "ArrowLeft"].includes(event.key) && !row.matches('.tree-root')) {
@@ -6248,23 +6255,6 @@ function bindEvents() {
     }
   });
   refs.objectTree.addEventListener("click", async (event) => {
-    const heading = event.target.closest(".category-summary");
-    const categoryAction = event.target.closest("[data-tree-category-create], [data-tree-category-refresh], [data-tree-query-save]");
-    if (categoryAction && heading) {
-      const target = treeTargetFromNode(heading);
-      if (categoryAction.hasAttribute("data-tree-query-save")) return saveTreeQuery(target, heading);
-      if (categoryAction.hasAttribute("data-tree-category-refresh")) return refreshTreeCategory(target);
-      if (target.kind === "routine") {
-        event.stopPropagation();
-        state.contextTreeTarget = target;
-        prepareObjectContextMenu(target);
-        const { left, bottom } = categoryAction.getBoundingClientRect();
-        showContextMenu(refs.objectContextMenu, left, bottom);
-        refs.objectContextMenu.querySelector('[data-context-action="create-function"]').focus({ preventScroll: true });
-        return;
-      }
-      return createFromTreeCategory(target, target.kind);
-    }
     const saved = event.target.closest("[data-tree-saved-query], [data-tree-remove-query]");
     if (saved) {
       const entry = savedTreeQueries.find(item => item.id === (saved.dataset.treeSavedQuery || saved.dataset.treeRemoveQuery));
@@ -6418,6 +6408,7 @@ function bindEvents() {
     hideContextMenus();
     if (action === "copy-ddl") return copyContextDdl(target);
     if (action === "new-database-query") return openDatabaseContextQuery(target);
+    if (action === "save-tree-query") return saveTreeQuery(target);
     if (action === "refresh-database") return refreshDatabaseContext(target);
     if (action === "refresh-databases") return refreshDatabaseList(target);
     if (action === "refresh-redis") return refreshRedisContext();

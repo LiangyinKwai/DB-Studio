@@ -146,7 +146,7 @@ body #objectTree .category-items::before {
 }
 body #objectTree .category-items :is(.tree-object, .tree-status) { padding-left: 61px; }
 body #objectTree .tree-category-action { width: 20px; height: 23px; min-width: 20px; flex: none; padding: 0; color: var(--app-muted); }
-body #objectTree .tree-category-action .ui-icon { width: 13px; height: 13px; }
+body #objectTree .tree-object:not(:hover):not(:focus-within) > [data-tree-remove-query] { opacity: 0; }
 body .mysql-driver-icon { overflow: hidden; }
 body #objectTree :is(.tree-root, summary, .category-summary, .tree-object):hover {
   background: var(--hover-bg);

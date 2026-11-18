@@ -5,7 +5,7 @@ on:
   push:
     branches: [master]
     tags: ['v*']
-    paths: [.github/workflows/release.yml]
+    paths: ['.github/workflows/release.yml', '.github/release-notes/v*.md']
 
 permissions:
   contents: write
