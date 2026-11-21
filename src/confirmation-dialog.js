@@ -3,12 +3,6 @@ import { setSelectableText } from "./selectable-text.js";
 // Use the same confirmation UI in desktop WebViews and browser previews.
 export function createConfirmationDialog(dialog) {
   let pending = null;
-  let pressedBackdrop = false;
-  const isBackdrop = (event) => {
-    if (event.target !== dialog) return false;
-    const bounds = dialog.getBoundingClientRect();
-    return event.clientX < bounds.left || event.clientX > bounds.right || event.clientY < bounds.top || event.clientY > bounds.bottom;
-  };
   const finish = (accepted) => {
     const resolve = pending;
     pending = null;
@@ -17,17 +11,6 @@ export function createConfirmationDialog(dialog) {
   dialog.addEventListener("close", () => finish(dialog.returnValue === "accept"));
   dialog.addEventListener("cancel", () => {
     dialog.returnValue = "cancel";
-  });
-  dialog.addEventListener("pointerdown", (event) => {
-    pressedBackdrop = event.button === 0 && isBackdrop(event);
-  });
-  dialog.addEventListener("pointercancel", () => { pressedBackdrop = false; });
-  dialog.addEventListener("click", (event) => {
-    // Selecting or scrolling SQL can end outside the modal. Only dismiss a
-    // click that also began on the backdrop, never a drag out of its content.
-    const dismiss = pressedBackdrop && isBackdrop(event);
-    pressedBackdrop = false;
-    if (dismiss) dialog.close("cancel");
   });
   return (message, { title = "确认操作", detail = "", acceptLabel = "确认执行" } = {}) => {
     if (pending) return Promise.resolve(false);
@@ -40,7 +23,6 @@ export function createConfirmationDialog(dialog) {
     preview.setAttribute("aria-label", "待确认操作详情");
     dialog.querySelector("[value='accept']").textContent = acceptLabel;
     dialog.returnValue = "cancel";
-    pressedBackdrop = false;
     return new Promise((resolve, reject) => {
       pending = resolve;
       try {

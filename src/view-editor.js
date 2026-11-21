@@ -13,7 +13,7 @@ export function openViewEditor({ targetLabel, driver, details, qualify, onApply 
       <label>查询 SQL<textarea name="query" rows="9" spellcheck="false" required></textarea></label>
       <details class="structure-sql-preview"><summary>SQL 预览</summary><pre class="definition"></pre></details>
       <p class="dialog-feedback error" role="alert"></p>
-      <div class="dialog-actions"><button type="button" class="secondary-btn">取消</button><button type="submit" class="primary-btn">保存视图</button></div>
+      <div class="dialog-actions"><button type="button" class="secondary-btn">取消</button><button type="submit" class="primary-btn">下一步</button></div>
     </form>`;
   dialog.querySelector('h2').textContent = title;
   dialog.querySelector('.dialog-header p').textContent = targetLabel;

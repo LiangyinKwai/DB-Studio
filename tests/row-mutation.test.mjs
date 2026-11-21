@@ -2,8 +2,9 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import vm from "node:vm";
-import { cellColumnName, sqlValueLiteral, sqlTypedValueLiteral } from "../src/cell-edit.js";
+import { cellColumnName, sqlValueLiteral, sqlTypedValueLiteral, validateCellDraft } from "../src/cell-edit.js";
 import { formatCellValue } from "../src/result-grid.js";
+import { readRowInput } from "../src/row-input.js";
 
 const mainSource = readFileSync(new URL("../src/main.js", import.meta.url), "utf8");
 const mutationSource = mainSource.slice(mainSource.indexOf("function sqlLiteral(value"), mainSource.indexOf("function resultData() {"));
@@ -44,7 +45,8 @@ function fixture(type, { driver = "mysql", row = ["001", "001", { ok: true }, tr
     cancelMutation: { focus() { focused.push('cancel'); } },
   };
   const sandbox = {
-    refs, state, sqlValueLiteral, sqlTypedValueLiteral, cellColumnName, cellText: formatCellValue,
+    refs, state, sqlValueLiteral, sqlTypedValueLiteral, cellColumnName, validateCellDraft, readRowInput, cellText: formatCellValue,
+    mountRowInputShortcuts() {},
     activeTab: () => tab, driverForTab: () => driver, cellWritePending: () => false,
     resultGrid: { getSelectedRows: () => [tab.result.rows[0]], getCellEditDraft: () => null },
     quoteIdentForDriver: (name, selectedDriver) => {

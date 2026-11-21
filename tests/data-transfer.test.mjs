@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import ExcelJS from 'exceljs';
-import { autoMapColumns, buildImportSql, createExport, decodeDelimited, decodeJson, encodeDelimited, parseLosslessJson, readTransferFile } from '../src/data-transfer.js';
+import { autoMapColumns, buildCopiedRowsSql, buildImportSql, createExport, decodeDelimited, decodeJson, encodeDelimited, parseLosslessJson, readTransferFile } from '../src/data-transfer.js';
 
 const data = { columns: ['id', 'note', 'value'], rows: [['9007199254740993', 'a,"b"\n中文', null], ['0002', '', '\\N'], ['3', '=SUM(A1:A2)', true]] };
 const table = { schema: 'sales', name: 'items', kind: 'table', columns: [{ name: 'id', dataType: 'bigint', nullable: false, primaryKey: true }, { name: 'note', dataType: 'text', nullable: true }, { name: 'value', dataType: 'text', nullable: true }] };
@@ -84,6 +84,36 @@ test('INSERT handles both dialects, generated fields, ALWAYS identity and missin
   const mysql = buildImportSql(source, ['id', 'note'], metadata, 'mysql');
   assert.match(mysql, /INSERT INTO `sales`\.`items`/); assert.match(mysql, /CONVERT\(X'/);
   assert.throws(() => buildImportSql(source, ['id', 'computed'], metadata), /生成列/);
+});
+
+test('copied rows use readable SQL literals without changing numeric precision or string values', () => {
+  const source = {
+    columns: ['id', 'code', 'amount', 'label', 'day', 'path', 'binary'],
+    rows: [['9007199254740993', '0002', '123456789.123456789012345678', "中文 'book'", '2026-11-20', "a\\b\n", '0x00ff']],
+  };
+  for (const driver of ['mysql', 'postgres']) {
+    const metadata = {
+      ...table,
+      primaryKeys: ['id', 'code'],
+      columns: [
+        table.columns[0], { name: 'code', dataType: 'varchar(10)' },
+        { name: 'amount', dataType: 'numeric(30,18)' }, { name: 'label', dataType: 'text' },
+        { name: 'day', dataType: 'date' }, { name: 'path', dataType: 'text' },
+        { name: 'binary', dataType: driver === 'mysql' ? 'varbinary(10)' : 'text' },
+      ],
+    };
+    const mysql = driver === 'mysql';
+    const prefix = mysql ? '_utf8mb4' : '';
+    const path = mysql ? "CONVERT(X'615c620a' USING utf8mb4)" : "E'a\\\\b\n'";
+    const binary = mysql ? "X'00ff'" : "'0x00ff'";
+    const insert = buildCopiedRowsSql(source, metadata, driver, 'insert');
+    assert.ok(insert.endsWith(`(9007199254740993, '0002', 123456789.123456789012345678, ${prefix}'中文 ''book''', '2026-11-20', ${path}, ${binary});`), insert);
+    const update = buildCopiedRowsSql(source, metadata, driver, 'update');
+    assert.ok(update.includes(` = ${prefix}'中文 ''book'''`), update);
+    assert.ok(update.endsWith(mysql
+      ? "WHERE `id` <=> 9007199254740993 AND `code` <=> '0002';"
+      : `WHERE "id" IS NOT DISTINCT FROM 9007199254740993 AND "code" IS NOT DISTINCT FROM '0002';`), update);
+  }
 });
 
 test('malformed and oversized files are rejected rather than truncated', async () => {

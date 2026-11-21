@@ -92,6 +92,8 @@ struct QueryRequest {
     single_statement: bool,
     #[serde(default)]
     transaction_script: bool,
+    #[serde(default)]
+    query_edit_relation: Option<Vec<String>>,
 }
 
 fn deserialize_optional_database<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
@@ -162,6 +164,8 @@ struct QueryResponse {
     statement_count: usize,
     columns: Vec<String>,
     rows: Vec<Vec<Value>>,
+    #[serde(rename = "editSource", skip_serializing_if = "Option::is_none")]
+    edit_source: Option<QueryEditSource>,
     row_count: usize,
     elapsed_ms: f64,
     truncated: bool,
@@ -171,6 +175,39 @@ struct QueryResponse {
     query_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     transaction_script: Option<transaction_script::End>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    statement_summaries: Vec<QueryStatementSummary>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct QueryEditSource {
+    object_id: String,
+    schema: String,
+    name: String,
+    // PostgreSQL describes source attributes by ordinal. MySQL supplies original names.
+    attributes: Vec<Value>,
+}
+
+#[derive(Debug, Serialize)]
+struct QueryStatementSummary {
+    sql: String,
+    elapsed_ms: f64,
+    row_count: Option<usize>,
+    has_result_set: bool,
+    truncated: bool,
+}
+
+impl QueryStatementSummary {
+    fn transaction_control(sql: &str, started: Instant) -> Self {
+        Self {
+            sql: sql.trim().to_string(),
+            elapsed_ms: started.elapsed().as_secs_f64() * 1000.0,
+            row_count: None,
+            has_result_set: false,
+            truncated: false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -2088,7 +2125,7 @@ async fn execute_query(
             request.database.as_deref(),
         )
         .await?;
-        return mysql::execute_read_only(&pool, &request.sql, &query_id, Instant::now()).await;
+        return mysql::execute_read_only_with_source(&pool, &request.sql, &query_id, Instant::now(), request.query_edit_relation.as_deref()).await;
     }
     let mut client = acquire_query_client(
         &app,
@@ -2121,7 +2158,7 @@ async fn execute_query(
     }
 
     let result =
-        query::execute_read_only(&mut client, &request.sql, &cancelled, &query_id, started).await;
+        query::execute_read_only_with_source(&mut client, &request.sql, &cancelled, &query_id, started, request.query_edit_relation.as_deref()).await;
     *live.lock().await = false;
     if let Ok(mut queries) = state.queries.lock() {
         queries.remove(&query_id);

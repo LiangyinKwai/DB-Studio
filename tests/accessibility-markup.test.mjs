@@ -10,7 +10,7 @@ test("object tree search has an explicit accessible name", async () => {
   const markup = await readFile(join(projectRoot, "index.html"), "utf8");
   assert.match(
     markup,
-    /id="objectSearch"\s+aria-label="搜索表、字段或 schema"/,
+    /id="objectSearch"\s+aria-label="搜索数据库、Schema 或对象"/,
   );
 });
 

@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { buildCreateTablePlan, buildStructurePlan, createStructureDraft, structureFingerprint } from '../src/structure-editor.js';
+import { newStructureKey, structureKeyDrafts } from '../src/structure-keys.js';
 const details = { id: '1', schema: 'pub"lic', name: 'orders', kind: 'table', columns: [
   { name: 'id', dataType: 'bigint', nullable: false, primaryKey: true, identity: true },
   { name: 'status', dataType: 'text', nullable: true, defaultValue: "'draft'::text", comment: '状态' },
@@ -68,6 +69,67 @@ const newRows = () => [
   { name: 'id', dataType: 'bigint', nullable: false, primaryKey: true, identity: true, defaultValue: '', comment: '' },
   { name: 'status', dataType: 'varchar(64)', nullable: false, defaultValue: "'draft'", comment: "状态 'draft'" },
 ];
+test('new tables include composite indexes and constraints with dialect-specific DDL', () => {
+  for (const driver of ['postgres', 'mysql']) {
+    const rows = newRows();
+    const indexes = [{ ...newStructureKey('index'), name: 'idx_order', columns: [rows[1], rows[0]], unique: true }];
+    const constraints = [
+      { ...newStructureKey('check'), name: 'status_check', expression: "status <> 'unavailable'" },
+      { ...newStructureKey('foreign_key'), name: 'status_ref', columns: [rows[1]], referenceTable: 'statuses',
+        referenceColumns: 'code', onDelete: 'RESTRICT' },
+    ];
+    const target = { schema: 'app', name: 'orders' };
+    const { sql } = buildCreateTablePlan(target, rows, driver, { indexes, constraints });
+    if (driver === 'mysql') {
+      assert.match(sql, /UNIQUE KEY `idx_order` \(`status`, `id`\)/);
+      assert.match(sql, /CONSTRAINT `status_check` CHECK \(status <> 'unavailable'\) ENFORCED/);
+      assert.match(sql, /REFERENCES `app`\.`statuses` \(`code`\) ON DELETE RESTRICT/);
+      assert.equal(sql.split(';').filter(Boolean).length, 1);
+    } else {
+      assert.match(sql, /CREATE UNIQUE INDEX "idx_order" ON "app"\."orders" \("status", "id"\);/);
+      assert.match(sql, /ALTER TABLE "app"\."orders" ADD CONSTRAINT "status_ref"/);
+      assert.ok(sql.indexOf('CREATE UNIQUE INDEX') < sql.indexOf('ADD CONSTRAINT "status_ref"'));
+    }
+    rows[1].removed = true;
+    assert.throws(() => buildCreateTablePlan(target, rows, driver, { indexes, constraints }), /有效的字段/);
+    rows[1].removed = false;
+    constraints[0].expression = "1); DROP TABLE orders;";
+    assert.throws(() => buildCreateTablePlan(target, rows, driver, { indexes, constraints }), /检查表达式/);
+  }
+});
+test('editing simple indexes and check constraints preserves untouched definitions', () => {
+  for (const driver of ['postgres', 'mysql']) {
+    const mysql = driver === 'mysql';
+    const table = { ...details, schema: 'app', indexes: [
+      { name: 'orders_pkey', primary: true, definition: 'PRIMARY KEY (id)' },
+      { name: 'status_idx', definition: mysql ? 'KEY `status_idx` (`status`)' : 'CREATE INDEX status_idx ON app.orders USING btree (status)' },
+      { name: 'special_idx', definition: mysql ? 'KEY `special_idx` (`status`(4))' : 'CREATE INDEX special_idx ON app.orders USING btree (status) WHERE status IS NOT NULL' },
+    ], constraints: [
+      { name: 'status_check', kind: 'CHECK', definition: mysql ? "CONSTRAINT `status_check` CHECK ((`status` <> ''))" : "CHECK (status <> ''::text)" },
+    ] };
+    const rows = createStructureDraft(table);
+    const keys = structureKeyDrafts(table, rows, driver);
+    assert.equal(buildStructurePlan(table, rows, driver, '', keys).sql, '');
+    assert.equal(keys.indexes[0].managed, 'primary');
+    assert.equal(keys.indexes[2].complex, true);
+    keys.indexes[1].columns = [rows[0], rows[1]];
+    keys.constraints[0].expression = "status <> 'cancelled'";
+    const plan = buildStructurePlan(table, rows, driver, '', keys);
+    assert.equal(plan.indexesChanged, 1);
+    assert.equal(plan.constraintsChanged, 1);
+    assert.doesNotMatch(plan.sql, /special_idx|orders_pkey/);
+    if (mysql) {
+      assert.match(plan.sql, /DROP INDEX `status_idx`/);
+      assert.match(plan.sql, /ADD KEY `status_idx` \(`id`, `status`\)/);
+      assert.match(plan.sql, /DROP CHECK `status_check`/);
+      assert.equal(plan.sql.split(';').filter(Boolean).length, 1);
+    } else {
+      assert.match(plan.sql, /DROP INDEX "app"\."status_idx";/);
+      assert.match(plan.sql, /CREATE INDEX "status_idx" ON "app"\."orders" \("id", "status"\);/);
+      assert.match(plan.sql, /DROP CONSTRAINT "status_check"/);
+    }
+  }
+});
 test('creates PostgreSQL tables with the final name, identity, defaults and comments', () => {
   const plan = buildCreateTablePlan({ schema: 'app', name: '  new"table  ' }, newRows());
   assert.equal(plan.name, 'new"table');

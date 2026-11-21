@@ -3,15 +3,11 @@ export function redisLocation(entry) {
   return `${entry.connectionName || 'Redis'} · DB ${entry.database}`;
 }
 export function initRedisDialog(dialog, { canClose = () => true, onClose = () => {} } = {}) {
-  let previousFocus, backdrop = false;
+  let previousFocus;
   const close = () => { if (canClose()) { dialog.close(); onClose(); if (previousFocus?.isConnected) previousFocus.focus({ preventScroll: true }); } };
   dialog.querySelectorAll('[data-close]').forEach(button => button.addEventListener('click', close));
   dialog.addEventListener('cancel', event => { event.preventDefault(); close(); });
-  const outside = event => { const r = dialog.getBoundingClientRect(); return event.target === dialog && (event.clientX < r.left || event.clientX > r.right || event.clientY < r.top || event.clientY > r.bottom); };
-  dialog.addEventListener('pointerdown', event => { backdrop = event.button === 0 && outside(event); });
-  dialog.addEventListener('pointercancel', () => { backdrop = false; });
-  dialog.addEventListener('click', event => { const dismiss = backdrop && outside(event); backdrop = false; if (dismiss) close(); });
-  return { close, open() { previousFocus = document.activeElement; backdrop = false; dialog.showModal(); } };
+  return { close, open() { previousFocus = document.activeElement; dialog.showModal(); } };
 }
 
 export function redisValueForCopy(payload) {

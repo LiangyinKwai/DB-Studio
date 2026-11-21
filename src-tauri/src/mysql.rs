@@ -9,7 +9,8 @@ use crate::{
         DatabaseInfo, DatabaseSchema, EventDetails, MySqlMetadata, ObjectConstraint, ObjectDetails,
         ObjectIndex, RoutineParameter, SchemaColumn, SchemaObject, TableTrigger,
     },
-    timeout_error, transaction_script, ConnectionProfile, QueryResponse, MAX_RESULT_ROWS, QUERY_TIMEOUT,
+    timeout_error, transaction_script, ConnectionProfile, QueryEditSource, QueryResponse, QueryStatementSummary,
+    MAX_RESULT_ROWS, QUERY_TIMEOUT,
 };
 use futures_util::StreamExt;
 use mysql_async::{prelude::Queryable, OptsBuilder, Pool, PoolConstraints, PoolOpts, Row, Value};
@@ -208,11 +209,42 @@ fn query_id_or_default(query_id: &str) -> String {
     }
 }
 
+fn query_edit_source(columns: &[mysql_async::Column], relation: Option<&[String]>) -> Option<QueryEditSource> {
+    let first = columns.first()?;
+    let schema = first.schema_str();
+    let name = first.org_table_str();
+    if schema.is_empty() || name.is_empty() { return None; }
+    match relation? {
+        [table] if table == name.as_ref() => {},
+        [database, table] if database == schema.as_ref() && table == name.as_ref() => {},
+        _ => return None,
+    }
+    let attributes = columns.iter().map(|column| {
+        let original = column.org_name_str();
+        if column.schema_ref() != first.schema_ref() || column.org_table_ref() != first.org_table_ref() || original.is_empty() {
+            return None;
+        }
+        Some(JsonValue::String(original.into_owned()))
+    }).collect::<Option<Vec<_>>>()?;
+    Some(QueryEditSource { object_id: mysql_object_id("table", &schema, &name), schema: schema.into_owned(), name: name.into_owned(), attributes })
+}
+
+#[cfg(test)]
 pub async fn execute_read_only(
     pool: &Pool,
     sql: &str,
     query_id: &str,
     started: Instant,
+) -> Result<QueryResponse, String> {
+    execute_read_only_with_source(pool, sql, query_id, started, None).await
+}
+
+pub async fn execute_read_only_with_source(
+    pool: &Pool,
+    sql: &str,
+    query_id: &str,
+    started: Instant,
+    relation: Option<&[String]>,
 ) -> Result<QueryResponse, String> {
     if !read_allowed(sql) {
         return Err(
@@ -249,6 +281,7 @@ pub async fn execute_read_only(
             .iter()
             .map(|c| c.name_str().into_owned())
             .collect::<Vec<_>>();
+        let mut edit_source = query_edit_source(result.columns_ref(), relation);
         let mut rows = Vec::new();
         let mut bytes = 0usize;
         let mut truncated_reason = None;
@@ -284,16 +317,25 @@ pub async fn execute_read_only(
             .drop_result()
             .await
             .map_err(|e| error("清理查询结果失败", e))?;
+        if let Some(source) = &edit_source {
+            let qualified = format!("`{}`.`{}`", source.schema.replace('`', "``"), source.name.replace('`', "``"));
+            let definition: Option<Row> = conn.query_first(format!("SHOW CREATE TABLE {qualified}")).await.ok().flatten();
+            if !definition.and_then(|row| row.get::<String, _>(1)).is_some_and(|ddl| ddl.starts_with("CREATE TABLE ")) {
+                edit_source = None;
+            }
+        }
         Ok(QueryResponse {
             statement_count: 1,
             columns,
             row_count: rows.len(),
             rows,
+            edit_source,
             elapsed_ms: started.elapsed().as_secs_f64() * 1000.0,
             truncated: truncated_reason.is_some(),
             truncated_reason,
             query_id: query_id_or_default(query_id),
             transaction_script: None,
+            statement_summaries: vec![],
         })
     })
     .await
@@ -383,7 +425,9 @@ async fn run_write_statements(
     transaction_open: bool,
     mut script: Option<(&QueryLease, &mut usize)>,
 ) -> Result<QueryResponse, String> {
-    let mut last = transaction_script::empty_response(query_id);
+    let mut last = transaction_script::empty_response(&query_id_or_default(query_id));
+    last.statement_count = statements.len();
+    last.statement_summaries.reserve(statements.len());
     for (index, statement) in statements.iter().enumerate() {
         let statement = statement.as_ref();
         if let Some((lease, current_statement)) = &mut script {
@@ -395,6 +439,7 @@ async fn run_write_statements(
             conn.close(prepared).await.map_err(|e| error("清理 SQL 预检查失败", e))?;
         }
         let number = index + if script.is_some() { 2 } else { 1 };
+        let statement_started = Instant::now();
         let mut result = conn.query_iter(statement).await.map_err(|e| format!("第 {} 条 MySQL SQL 执行失败：{e}{}", number, if index > 0 && !transaction_open { "；此前语句可能已提交，请核对后再重试" } else { "" }))?;
         let mut columns = Vec::new(); let mut rows = Vec::new(); let mut affected_rows = 0; let mut truncated_reason = None;
         while let Some(mut stream) = result.stream::<Row>().await.map_err(|e| error("读取 MySQL 结果失败", e))? {
@@ -416,9 +461,23 @@ async fn run_write_statements(
                 columns = set_columns; rows = set_rows; affected_rows = set_affected; truncated_reason = limit;
             }
         }
-        last = QueryResponse { statement_count: statements.len(), row_count: if columns.is_empty() { affected_rows } else { rows.len() }, columns, rows,
-            elapsed_ms: started.elapsed().as_secs_f64() * 1000.0, truncated: truncated_reason.is_some(), truncated_reason, query_id: query_id_or_default(query_id), transaction_script: None };
+        let has_result_set = !columns.is_empty();
+        let row_count = if has_result_set { rows.len() } else { affected_rows };
+        let truncated = truncated_reason.is_some();
+        last.statement_summaries.push(QueryStatementSummary {
+            sql: statement.trim().to_string(),
+            elapsed_ms: statement_started.elapsed().as_secs_f64() * 1000.0,
+            row_count: Some(row_count),
+            has_result_set,
+            truncated,
+        });
+        last.row_count = row_count;
+        last.columns = columns;
+        last.rows = rows;
+        last.truncated = truncated;
+        last.truncated_reason = truncated_reason;
     }
+    last.elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
     Ok(last)
 }
 
@@ -457,8 +516,12 @@ pub(crate) async fn execute_transaction_script(
     let deadline = tokio::time::Instant::from_std(started + QUERY_TIMEOUT);
     let mut current_statement = 0;
     let execution = tokio::time::timeout_at(deadline, async {
+        let begin_started = Instant::now();
         conn.query_drop("START TRANSACTION").await.map_err(|e| error("开启 MySQL 脚本事务失败", e))?;
-        run_write_statements(&mut conn, &statements[1..statements.len() - 1], query_id, started, true, Some((&lease, &mut current_statement))).await
+        let begin = QueryStatementSummary::transaction_control(statements[0], begin_started);
+        let mut result = run_write_statements(&mut conn, &statements[1..statements.len() - 1], query_id, started, true, Some((&lease, &mut current_statement))).await?;
+        result.statement_summaries.insert(0, begin);
+        Ok::<_, String>(result)
     }).await;
     // Wait for any active KILL and prevent late cancellation of COMMIT.
     let cancelled = lease.finish().await;
@@ -478,6 +541,7 @@ pub(crate) async fn execute_transaction_script(
         }
     };
     let last = statements.len() - 1;
+    let end_started = Instant::now();
     if end == End::Rollback {
         if let Err(failure) = rollback_script(&mut conn).await {
             return Err(ScriptError::from("执行 ROLLBACK 时未能完整回滚".to_string())
@@ -496,6 +560,7 @@ pub(crate) async fn execute_transaction_script(
                 .with_rollback(Err((Rollback::Unconfirmed, "请核对数据库中的实际修改".to_string())))),
         }
     }
+    result.statement_summaries.push(QueryStatementSummary::transaction_control(statements[last], end_started));
     result.elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
     result.transaction_script = Some(end);
     Ok(result)
@@ -638,15 +703,23 @@ pub async fn list_databases(pool: &Pool) -> Result<Vec<DatabaseInfo>, String> {
         .await
         .map_err(|e| error("读取当前 MySQL 数据库失败", e))?
         .and_then(|r| r.get::<Option<String>, _>(0).flatten());
-    Ok(rows
-        .into_iter()
-        .filter_map(|r| r.get::<String, _>(0))
-        .map(|name| DatabaseInfo {
-            current: current.as_deref() == Some(name.as_str()),
-            name,
-            allow_connections: true,
-        })
-        .collect())
+    let mut databases = Vec::with_capacity(rows.len());
+    for name in rows.into_iter().filter_map(|row| row.get::<String, _>(0)) {
+        let is_current = current.as_deref() == Some(name.as_str());
+        if !is_current && name != "information_schema" {
+            // Global SHOW DATABASES can expose names the account cannot open.
+            // Check privileges without changing the pooled session's default
+            // database or fetching anything about its tables.
+            let quoted = name.replace('`', "``");
+            match conn.query_drop(format!("SHOW CREATE DATABASE `{quoted}`")).await {
+                Ok(()) => {}
+                Err(mysql_async::Error::Server(error)) if matches!(error.code, 1044 | 1049) => continue,
+                Err(err) => return Err(error("验证 MySQL 数据库权限失败", err)),
+            }
+        }
+        databases.push(DatabaseInfo { name, current: is_current, allow_connections: true });
+    }
+    Ok(databases)
 }
 
 pub async fn list_schemas(pool: &Pool) -> Result<Vec<DatabaseSchema>, String> {

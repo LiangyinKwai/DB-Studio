@@ -37,10 +37,11 @@ const browser = await chromium.launch({ headless: true, executablePath: process.
 const reports = [];
 const snapshot = dialog => dialog.evaluate(node => {
   const box = element => { const { x, y, width, height } = element.getBoundingClientRect(); return { x, y, width, height }; };
+  const scroll = element => ({ height: element.scrollHeight, visible: element.clientHeight, top: element.scrollTop });
   return {
     dialog: box(node), add: box(node.querySelector('.structure-editor-toolbar button')), footer: box(node.querySelector('.structure-editor-footer')),
     preview: box(node.querySelector('.structure-sql-preview')), scroller: box(node.querySelector('.structure-editor-scroll')),
-    outerScroll: { height: node.scrollHeight, visible: node.clientHeight, top: node.scrollTop },
+    outerScroll: scroll(node), namingScroll: scroll(node.querySelector('.structure-table-naming')),
   };
 });
 const delta = (first, second) => Math.max(...['x', 'y', 'width', 'height'].map(key => Math.abs(first[key] - second[key])));
@@ -53,6 +54,8 @@ try {
       await page.goto(`http://127.0.0.1:${server.address().port}`); await page.waitForFunction(() => window.layoutHarnessReady);
       await page.evaluate(driver => window.openDesigner(driver), driver);
       const dialog = page.locator('.create-table-dialog'); await dialog.waitFor();
+      // The shared entry animation translates the dialog before it settles.
+      await dialog.evaluate(node => Promise.all(node.getAnimations().map(animation => animation.finished)));
       const initial = await snapshot(dialog), samples = [];
       const check = async name => {
         const current = await snapshot(dialog); samples.push({ name, ...current });
@@ -75,33 +78,43 @@ try {
       }
       await dialog.locator('.structure-editor-scroll').evaluate(node => { node.scrollTop = 0; node.scrollLeft = 0; });
       await dialog.screenshot({ path: resolve(evidence, `${observe ? 'before-' : ''}${driver}-${viewport.width}-fields.png`) });
-      const save = dialog.getByRole('button', { name: '保存…', exact: true }); await save.click();
+      const save = dialog.getByRole('button', { name: '创建表', exact: true });
+      const previewControl = dialog.locator('.structure-sql-preview summary');
+      await previewControl.click();
       const naming = await snapshot(dialog);
       if (!observe) {
         assert.ok(Math.abs(initial.dialog.height - naming.dialog.height) <= 1, 'naming preserves the dialog height');
         assert.ok(Math.abs(initial.dialog.y - naming.dialog.y) <= 1, 'naming preserves the vertical position');
+        assert.ok(naming.footer.y + naming.footer.height <= viewport.height - 12, 'naming footer outside viewport');
+        assert.ok(naming.outerScroll.height <= naming.outerScroll.visible + 1, 'naming introduced outer scrolling');
       }
       for (const value of ['layout_probe', '', 'layout_probe_with_a_long_name']) {
         await dialog.getByLabel('表名', { exact: true }).fill(value);
         const current = await snapshot(dialog);
         if (!observe) assert.ok(delta(naming.dialog, current.dialog) <= 1, 'table-name edits resize the dialog');
       }
-      await dialog.getByRole('button', { name: '创建表', exact: true }).click();
+      for (const tab of ['索引', '约束', '字段']) {
+        await dialog.getByRole('tab', { name: tab, exact: true }).click();
+        assert.equal(await dialog.locator('.structure-sql-preview pre').isVisible(), true, `SQL preview disappeared from ${tab}`);
+        assert.ok(delta(naming.footer, (await snapshot(dialog)).footer) <= 1, `footer moved on ${tab}`);
+      }
+      await save.click();
       await dialog.locator('.dialog-feedback').filter({ hasText: '模拟数据库返回' }).waitFor();
       const failed = await snapshot(dialog);
       if (!observe) {
         assert.ok(delta(naming.dialog, failed.dialog) <= 1, 'database error resized naming');
         assert.ok(failed.footer.y + failed.footer.height <= viewport.height - 12, 'error pushed submit outside viewport');
         assert.ok(failed.outerScroll.height <= failed.outerScroll.visible + 1, 'error caused outer scrolling');
+        assert.ok(failed.namingScroll.height <= failed.namingScroll.visible + 1, 'error clipped the naming fields');
       }
       await dialog.screenshot({ path: resolve(evidence, `${observe ? 'before-' : ''}${driver}-${viewport.width}-naming.png`) });
-      await dialog.getByRole('button', { name: '返回编辑', exact: true }).click(); await check('return to fields');
+      await previewControl.click();
       while (await dialog.locator('tbody > tr').count() > 1) {
         const count = await dialog.locator('tbody > tr').count();
         await dialog.locator('tbody > tr').last().getByRole('button', { name: '删除', exact: true }).click(); await check(`delete row ${count - 1}`);
       }
-      await dialog.locator('.structure-sql-preview summary').click(); await check('collapse SQL');
-      await dialog.locator('.structure-sql-preview summary').click(); await check('expand SQL');
+      await previewControl.click(); await check('expand SQL');
+      await previewControl.click(); await check('collapse SQL');
       assert.deepEqual(errors, []);
       reports.push({ driver, viewport, initial, maxDialogDelta: Math.max(...samples.map(sample => delta(initial.dialog, sample.dialog))), naming, failed, samples });
     } finally { await context.close(); }

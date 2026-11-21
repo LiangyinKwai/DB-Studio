@@ -55,7 +55,7 @@ export function openRoutineEditor({ kind, driver, targetLabel, definition, plan,
     <div class="dialog-actions">
       <span class="routine-editor-meta"></span>
       <button type="button" class="secondary-btn" data-routine-cancel>取消</button>
-      <button type="button" class="primary-btn" data-routine-save disabled><span></span><kbd>⌘ S</kbd></button>
+      <button type="button" class="primary-btn" data-routine-save disabled><span>下一步</span><kbd aria-hidden="true">⌘ S</kbd></button>
     </div>`;
   dialog.querySelector('h2').textContent = `编辑${label}`;
   dialog.querySelector('.routine-editor-target').textContent = targetLabel;
@@ -65,7 +65,6 @@ export function openRoutineEditor({ kind, driver, targetLabel, definition, plan,
   const meta = dialog.querySelector('.routine-editor-meta');
   const cancel = dialog.querySelector('[data-routine-cancel]');
   const save = dialog.querySelector('[data-routine-save]');
-  save.querySelector('span').textContent = `保存${label}`;
 
   const lock = new Compartment();
   let view = null;
@@ -87,7 +86,7 @@ export function openRoutineEditor({ kind, driver, targetLabel, definition, plan,
         if (current.warnings.length) {
           status.classList.add('warning');
           for (const warning of current.warnings) status.append(Object.assign(document.createElement('div'), { textContent: warning }));
-        } else status.textContent = '已修改，保存前会再次确认。';
+        } else status.textContent = '已修改，下一步确认保存。';
       } catch (error) {
         status.classList.add('invalid');
         status.textContent = error.message;
@@ -154,21 +153,6 @@ export function openRoutineEditor({ kind, driver, targetLabel, definition, plan,
   dialog.addEventListener('cancel', event => {
     event.preventDefault();
     void requestClose();
-  });
-  // Clicking the blank area behaves like 取消 (including the unsaved-changes prompt), but only when the press
-  // and the click both land on the backdrop: dragging a selection out of the editor must never dismiss it.
-  const onBackdrop = event => {
-    if (event.target !== dialog) return false;
-    const bounds = dialog.getBoundingClientRect();
-    return event.clientX < bounds.left || event.clientX > bounds.right || event.clientY < bounds.top || event.clientY > bounds.bottom;
-  };
-  let pressedBackdrop = false;
-  dialog.addEventListener('pointerdown', event => { pressedBackdrop = event.button === 0 && onBackdrop(event); });
-  dialog.addEventListener('pointercancel', () => { pressedBackdrop = false; });
-  dialog.addEventListener('click', event => {
-    const dismiss = pressedBackdrop && onBackdrop(event);
-    pressedBackdrop = false;
-    if (dismiss && !busy) void requestClose();
   });
   dialog.addEventListener('close', () => { view.destroy(); dialog.remove(); }, { once: true });
   document.body.append(dialog);

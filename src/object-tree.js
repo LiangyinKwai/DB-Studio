@@ -4,6 +4,13 @@ const emptyKinds = {
   mysql: ['table', 'view', 'routine', 'event'],
 };
 
+const mysqlSystemDatabases = new Set(['information_schema', 'mysql', 'performance_schema', 'sys']);
+const postgresSystemDatabases = new Set(['postgres', 'template0', 'template1']);
+
+export function isSystemDatabase(name, driver) {
+  return (driver === 'mysql' ? mysqlSystemDatabases : postgresSystemDatabases).has(name);
+}
+
 export function isRoutine(kind) {
   return kind === 'function' || kind === 'procedure';
 }

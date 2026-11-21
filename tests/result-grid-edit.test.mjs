@@ -377,13 +377,14 @@ function domGrid(t) {
   const grid = editableGrid();
   for (const name of ['mountCellEditor', 'unmountCellEditor', 'updateCellEditor', 'render', 'invalidate', 'focusActiveCell']) delete grid[name];
   Object.assign(grid, {
-    viewport: new GridNode(), body: new GridNode(), header: new GridNode(),
+    viewport: new GridNode(), canvas: new GridNode(), body: new GridNode(), header: new GridNode(),
     widths: [112, 180], offsets: [52, 164], container: new GridNode(),
     renderHeader() {}, headerSignature: '', renderSignature: '',
     scheduleRender() { this.render(); },
   });
   grid.container.append(grid.viewport);
-  grid.viewport.append(grid.header, grid.body);
+  grid.viewport.append(grid.canvas);
+  grid.canvas.append(grid.header, grid.body);
   document.body.append(grid.container);
   grid.render();
   return grid;
@@ -716,7 +717,7 @@ test('right click operations on a different cell remain available while another 
   assert.equal(grid.getCellEditDraft().draftValue, 'Keep this draft');
 });
 
-test('empty grid space and out-of-bounds coordinates cannot manufacture a selected cell', (t) => {
+test('clicking empty grid space clears selection and out-of-bounds coordinates cannot select a cell', (t) => {
   const grid = domGrid(t);
   grid.handleClick({ target: grid.viewport });
   grid.handleClick({ target: grid.body });
@@ -725,10 +726,14 @@ test('empty grid space and out-of-bounds coordinates cannot manufacture a select
     assert.equal(grid.startCellEdit(target), false);
     assert.equal(grid.selectCell(target), false);
   }
-  grid.handleClick({ target: cellNode(grid, 1) });
-  grid.handleClick({ target: grid.body });
-  assert.deepEqual(grid.activeCell, { position: 1, column: 1 });
-  assert.equal(grid.body.querySelectorAll('.db-grid-cell-active').length, 1);
+  for (const background of [grid.viewport, grid.canvas, grid.body, grid.header, grid.body.querySelector('.db-grid-row')]) {
+    grid.handleClick({ target: cellNode(grid, 1) });
+    assert.deepEqual(grid.activeCell, { position: 1, column: 1 });
+    grid.handleClick({ target: background });
+    assert.equal(grid.activeCell, null);
+    assert.equal(grid.body.querySelectorAll('.db-grid-cell-active').length, 0);
+    assert.equal(document.activeElement, document.body);
+  }
 });
 
 test('selecting a real cell clears a hidden inspector selection so copying uses the cell value', (t) => {

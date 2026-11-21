@@ -203,7 +203,7 @@ function element(tag, className, text) {
 /** A dependency-free, two-axis virtual result grid. It retains original row
  * references; only the visible cells and a small overscan exist in the DOM. */
 export class ResultGrid {
-  constructor(container, { onInspect, shouldInspectCell, onSelectionChange, onTextFilterChange, onDraftChange, getCellEditState, onCommitCell, onCommitCells, onCopyCell, editActions } = {}) {
+  constructor(container, { onInspect, shouldInspectCell, onSelectionChange, onTextFilterChange, onDraftChange, getCellEditState, onCommitCell, onCommitCells, onCopyCell, getRowActions, editActions } = {}) {
     this.container = container;
     this.onInspect = onInspect;
     this.shouldInspectCell = shouldInspectCell;
@@ -214,6 +214,7 @@ export class ResultGrid {
     this.onCommitCell = onCommitCell;
     this.onCommitCells = onCommitCells;
     this.onCopyCell = onCopyCell;
+    this.getRowActions = getRowActions;
     // Result arrays belong to their tabs. Keep drafts with that exact result,
     // never with a visible position that sorting or a new query can change.
     this.editSessions = new WeakMap();
@@ -301,7 +302,9 @@ export class ResultGrid {
       const header = event.target.closest('[data-column-header]');
       if (header) { event.preventDefault(); event.stopPropagation(); this.openColumnMenu(header, event); return; }
       const cell = event.target.closest('[data-grid-cell]');
-      if (cell) { event.preventDefault(); event.stopPropagation(); this.openCellMenu(cell, event); }
+      if (cell) { event.preventDefault(); event.stopPropagation(); this.openCellMenu(cell, event); return; }
+      const selector = event.target.closest('.db-grid-selector');
+      if (selector) this.openSelectedRowMenu(selector, event);
     }, options);
     this.viewport.addEventListener('compositionstart', (event) => {
       const cell = event.target.closest('[data-grid-cell]');
@@ -764,6 +767,10 @@ export class ResultGrid {
     if (this.cellPayload(cell)) {
       this.selectCell(cell);
       this.updateFooter();
+    } else if (event.target === this.viewport || event.target === this.canvas ||
+               event.target === this.body || event.target === this.header ||
+               event.target.matches('.db-grid-row')) {
+      this.clearSelection();
     }
   }
 
@@ -1218,7 +1225,6 @@ export class ResultGrid {
   openCellMenu(cell, event) {
     const payload = this.cellPayload(cell);
     if (!payload) return;
-    const rect = cell.getBoundingClientRect();
     this.closeCellMenu(false);
     this.closeFilter(false);
     const rows = this.rows;
@@ -1270,6 +1276,62 @@ export class ResultGrid {
       if (this.editorInput) this.editorInput.value = '';
       this.updateCellEditor();
     }, state.allowNull === false ? '此列不允许 NULL' : reason);
+    const rowActions = this.selectedRowActions(payload.rowIndex);
+    if (rowActions.length) {
+      const divider = element('div', 'db-grid-menu-divider');
+      divider.setAttribute('role', 'separator');
+      menu.append(divider);
+      this.appendRowActions(menu, rowActions);
+    }
+    this.showCellMenu(menu, cell, event);
+    this.updateFooter();
+  }
+
+  selectedRowActions(rowIndex) {
+    if (!this.getRowActions || !this.selected.has(rowIndex)) return [];
+    return this.getRowActions({ columns: this.columns, rows: this.getSelectedRows() });
+  }
+
+  appendRowActions(menu, actions) {
+    const rows = this.rows;
+    const columns = this.columns;
+    for (const { id, label, disabledReason, run } of actions) {
+      const button = element('button', 'db-grid-cell-menu-item', label);
+      button.type = 'button';
+      button.dataset.rowAction = id;
+      button.setAttribute('role', 'menuitem');
+      button.disabled = Boolean(disabledReason);
+      if (disabledReason) {
+        button.title = disabledReason;
+        button.setAttribute('aria-description', disabledReason);
+      }
+      button.addEventListener('click', () => {
+        this.closeCellMenu(true);
+        if (rows === this.rows && columns === this.columns) void run();
+      });
+      menu.append(button);
+    }
+  }
+
+  openSelectedRowMenu(selector, event) {
+    const row = selector.closest('[data-row-index]');
+    if (!row) return;
+    const actions = this.selectedRowActions(Number(row.dataset.rowIndex));
+    if (!actions.length) return;
+    event.preventDefault();
+    event.stopPropagation();
+    this.closeCellMenu(false);
+    this.closeFilter(false);
+    const menu = element('div', 'db-grid-cell-menu');
+    menu.setAttribute('role', 'menu');
+    menu.setAttribute('aria-label', `所选 ${this.selected.size} 行的操作`);
+    this.appendRowActions(menu, actions);
+    this.columnMenuTrigger = selector.querySelector('[data-select-row]');
+    this.showCellMenu(menu, selector, event.type === 'contextmenu' ? event : null);
+  }
+
+  showCellMenu(menu, anchor, event) {
+    const rect = anchor.getBoundingClientRect();
     menu.addEventListener('keydown', (key) => {
       key.stopPropagation();
       const items = [...menu.querySelectorAll('button:not(:disabled)')];
@@ -1286,7 +1348,6 @@ export class ResultGrid {
     menu.style.left = `${Math.max(8, Math.min(event?.clientX ?? rect.left + 8, window.innerWidth - menu.offsetWidth - 8))}px`;
     menu.style.top = `${Math.max(8, Math.min(event?.clientY ?? rect.bottom, window.innerHeight - menu.offsetHeight - 8))}px`;
     menu.querySelector('button:not(:disabled)')?.focus({ preventScroll: true });
-    this.updateFooter();
   }
 
   async commitCellEdit() {
@@ -1471,6 +1532,10 @@ export class ResultGrid {
     }
     const cell = event.target.closest('[data-grid-cell]');
     if (cell && (event.key === 'ContextMenu' || (event.key === 'F10' && event.shiftKey))) { event.preventDefault(); event.stopPropagation?.(); this.openCellMenu(cell); return; }
+    if ((event.key === 'ContextMenu' || (event.key === 'F10' && event.shiftKey)) && event.target.matches('[data-select-row]')) {
+      this.openSelectedRowMenu(event.target.closest('.db-grid-selector'), event);
+      return;
+    }
     if (cell && (event.key === 'F2' || event.key === 'Enter') && !event.ctrlKey && !event.metaKey) { event.preventDefault(); event.stopPropagation?.(); this.startCellEdit(cell); return; }
     if (cell && event.key.length === 1 && event.key !== ' ' && !event.ctrlKey && !event.metaKey && !event.altKey) {
       event.preventDefault(); event.stopPropagation?.();

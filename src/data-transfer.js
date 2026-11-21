@@ -1,4 +1,4 @@
-import { sqlTypedValueLiteral, validateCellDraft } from './cell-edit.js';
+import { buildPrimaryKeyPredicate, sqlTypedValueLiteral, validateCellDraft } from './cell-edit.js';
 import { parse as parseJson, stringify as stringifyJson, isLosslessNumber } from 'lossless-json';
 
 export const TRANSFER_FORMATS = ['sql', 'csv', 'json', 'txt', 'xlsx'];
@@ -113,7 +113,7 @@ export function autoMapColumns(source, fields) {
   });
 }
 
-export function buildImportSql(data, mapping, table, driver = 'postgres') {
+export function buildImportSql(data, mapping, table, driver = 'postgres', valueLiteral = sqlTypedValueLiteral) {
   if (!['postgres', 'mysql'].includes(driver) || !['table', 'partitioned_table'].includes(table.kind)) throw new Error('仅支持导入 PostgreSQL/MySQL 数据表');
   if (!data.rows.length) throw new Error('文件没有可导入的数据行');
   const fields = table.columns || [];
@@ -129,11 +129,49 @@ export function buildImportSql(data, mapping, table, driver = 'postgres') {
     if (value !== null) value = scalarText(value);
     try { validateCellDraft(value, { dataType: field.dataType, allowNull: field.nullable === true }); }
     catch (error) { throw new Error(`第 ${index + 1} 行 ${field.name}：${error.message}`); }
-    return sqlTypedValueLiteral(typeof original === 'boolean' ? original : value, field.dataType, driver);
+    return valueLiteral(typeof original === 'boolean' ? original : value, field.dataType, driver);
   }).join(', ') + ')');
   const override = driver === 'postgres' && selected.some(({ field }) => field.identity && field.identityGeneration !== 'byDefault') ? ' OVERRIDING SYSTEM VALUE' : '';
   const sql = `INSERT INTO ${quote(table.schema, driver)}.${quote(table.name, driver)} (${selected.map(item => quote(item.name, driver)).join(', ')})${override}\nVALUES\n${records.join(',\n')};`;
   if (new TextEncoder().encode(sql).length > 8 * 1024 * 1024) throw new Error('生成的 SQL 超过 8 MiB，请拆分文件后导入');
+  return sql;
+}
+
+export function buildCopiedRowsSql(data, table, driver, operation) {
+  return buildSelectedRowsSql(data, table, driver, operation, (value, dataType, dialect) =>
+    sqlTypedValueLiteral(value, dataType, dialect, { readable: true }));
+}
+
+function buildSelectedRowsSql(data, table, driver, operation, valueLiteral) {
+  if (!['postgres', 'mysql'].includes(driver) || !['table', 'partitioned_table'].includes(table?.kind)) throw new Error('需要能够识别来源的数据表');
+  if (!data.rows.length) throw new Error('请选择要复制的数据行');
+  const fields = data.columns.map(name => {
+    const field = table.columns.find(item => item.name === name);
+    if (!field) throw new Error(`缺少字段 ${name} 的元数据，请刷新后重试`);
+    return field;
+  });
+  if (new Set(data.columns).size !== data.columns.length || data.rows.some(row => row.length !== fields.length || fields.some((_, index) => row[index] === undefined))) {
+    throw new Error('结果中的字段或行数据不完整');
+  }
+  if (operation === 'insert') {
+    const mapping = fields.map(field => field.generated ? '' : field.name);
+    const excerpt = { ...table, columns: table.columns.map(field => ({ ...field, nullable: true })) };
+    return buildImportSql(data, mapping, excerpt, driver, valueLiteral);
+  }
+  if (operation !== 'update') throw new Error('SQL 格式无效');
+  const primaryKeys = table.primaryKeys || [];
+  const keyTypes = Object.fromEntries(table.columns.map(field => [field.name, field.dataType]));
+  const updated = fields.map((field, index) => ({ field, index })).filter(({ field }) =>
+    !primaryKeys.includes(field.name) && !field.generated &&
+    !(driver === 'postgres' && field.identity && field.identityGeneration !== 'byDefault'));
+  if (!updated.length) throw new Error('所选行没有可更新的非主键字段');
+  const qualified = `${quote(table.schema, driver)}.${quote(table.name, driver)}`;
+  const sql = data.rows.map(row => {
+    const where = buildPrimaryKeyPredicate({ primaryKeys, columns: data.columns, row, driver, keyTypes, valueLiteral });
+    const set = updated.map(({ field, index }) => `${quote(field.name, driver)} = ${valueLiteral(row[index], field.dataType, driver)}`);
+    return `UPDATE ${table.only && driver === 'postgres' ? 'ONLY ' : ''}${qualified}\nSET ${set.join(', ')}\nWHERE ${where};`;
+  }).join('\n\n');
+  if (new TextEncoder().encode(sql).length > 8 * 1024 * 1024) throw new Error('生成的 SQL 超过 8 MiB，请分批复制');
   return sql;
 }
 
@@ -160,15 +198,9 @@ export async function createExport(data, format, { table, driver = 'postgres', t
   if (format === 'json') contents = JSON.stringify({ format: 'db-studio', version: 1, columns: data.columns, rows: data.rows }, null, 2);
   else if (format === 'sql') {
     if (!table) throw new Error('请从表数据页导出 INSERT SQL');
-    const mapping = data.columns.map(column => {
-      const field = table.columns.find(field => field.name === column);
-      if (!field) throw new Error(`缺少字段 ${column} 的元数据，请刷新表结构后导出 SQL`);
-      return field.generated ? '' : field.name;
-    });
     // Export may intentionally contain only selected columns. Missing required
     // columns are valid for an excerpt, and are checked when importing it.
-    const exportTable = { ...table, columns: table.columns.map(field => ({ ...field, nullable: true })) };
-    contents = data.rows.length ? '-- Keybay 数据导出；生成列由数据库维护。\n' + buildImportSql(data, mapping, exportTable, driver) : '-- 没有可导出的数据\n';
+    contents = data.rows.length ? '-- Keybay 数据导出；生成列由数据库维护。\n' + buildSelectedRowsSql(data, table, driver, 'insert', sqlTypedValueLiteral) : '-- 没有可导出的数据\n';
   } else contents = '\uFEFF' + encodeDelimited(data, format === 'txt' ? '\t' : ',');
   return { name, contents, mime: format === 'json' ? 'application/json;charset=utf-8' : 'text/plain;charset=utf-8' };
 }

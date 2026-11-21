@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createConfirmationDialog } from "../src/confirmation-dialog.js";
+import { initDialogBackdropDismissal } from "../src/dialog-backdrop.js";
 import { createSchemaSelect } from "../src/schema-select.js";
 import { initWorkspaceLayout } from "../src/workspace-layout.js";
 
@@ -11,7 +12,7 @@ class Element extends EventTarget {
   attributes = new Map();
   dataset = {};
   style = { setProperty() {}, removeProperty() {} };
-  classList = { toggle() {}, add() {}, remove() {} };
+  classList = { toggle() {}, add() {}, remove() {}, contains() { return false; } };
   value = "";
   hidden = false;
   disabled = false;
@@ -105,23 +106,29 @@ test("picker filtering announces match counts and composition cannot commit a se
 });
 
 function confirmation(t) {
-  environment(t);
-  const dialog = new Element();
+  const { document } = environment(t);
+  initDialogBackdropDismissal(document);
+  const dialog = new Element("dialog");
   const parts = Object.fromEntries(["[data-confirm-title]", "[data-confirm-message]", "[data-confirm-detail]", "[value='accept']", "[value='cancel']"].map((selector) => [selector, new Element()]));
   dialog.querySelector = (selector) => parts[selector];
   dialog.showModal = () => { dialog.open = true; };
-  dialog.close = (value) => { dialog.returnValue = value; dialog.open = false; emit(dialog, "close"); };
-  return { dialog, parts, confirm: createConfirmationDialog(dialog) };
+  dialog.close = (value = dialog.returnValue) => { dialog.returnValue = value; dialog.open = false; emit(dialog, "close"); };
+  return { document, dialog, parts, confirm: createConfirmationDialog(dialog) };
 }
 
 test("confirmation ignores drags from content to backdrop but dismisses an intentional backdrop click", async (t) => {
-  const { dialog, confirm } = confirmation(t);
+  const { document, dialog, confirm } = confirmation(t);
   const result = confirm("执行 SQL？");
-  emit(dialog, "pointerdown", { button: 0, clientX: 200, clientY: 200 });
-  emit(dialog, "click", { clientX: 20, clientY: 20 });
+  const outside = { target: dialog, clientX: 20, clientY: 20 };
+  emit(document, "pointerdown", { target: dialog, button: 0, clientX: 200, clientY: 200 });
+  emit(document, "click", outside);
   assert.equal(dialog.open, true);
-  emit(dialog, "pointerdown", { button: 0, clientX: 20, clientY: 20 });
-  emit(dialog, "click", { clientX: 20, clientY: 20 });
+  dialog.addEventListener("cancel", event => event.preventDefault(), { once: true });
+  emit(document, "pointerdown", { ...outside, button: 0 });
+  emit(document, "click", outside);
+  assert.equal(dialog.open, true);
+  emit(document, "pointerdown", { ...outside, button: 0 });
+  emit(document, "click", outside);
   assert.equal(await result, false);
 });
 
@@ -146,7 +153,7 @@ test("confirmation resets long details, focuses cancel and recovers from a modal
 
 test("responsive pane collapse returns a focused separator to its restore button", (t) => {
   const { document } = environment(t);
-  const ids = ["workspaceBody", "editorResult", "connectionsPane", "objectsPane", "connectionsRail", "objectsRail", "editorPane",
+  const ids = ["workspaceBody", "editorResult", "connectionsPane", "objectsPane", "connectionsRail", "objectsRail", "editorPane", "editorFooter",
     "connectionsSplitter", "objectsSplitter", "editorSplitter", "toggleConnections", "toggleObjects", "resetLayout",
     "sidebarSplit", "historySplitter", "toggleHistory", "historySearchBox", "recentQueries", "clearHistory"];
   const elements = Object.fromEntries(ids.map((id) => [id, new Element()]));

@@ -247,7 +247,7 @@ try {
   await routineText.fill(pgRoutine.replace('refresh_orders()', 'refresh_orders(days integer)'));
   await routineEditor.locator('.routine-editor-status.warning').getByText(/参数列表已改变.*重载/).waitFor();
   await routineText.fill(pgRoutine.replace('daily_orders', 'weekly_orders'));
-  await routineStatus.getByText('已修改，保存前会再次确认。').waitFor();
+  await routineStatus.getByText('已修改，下一步确认保存。').waitFor();
   await routineEditor.locator('[data-routine-cancel]').click();
   await page.getByText('放弃尚未保存的存储过程修改？').waitFor();
   await page.locator('#confirmActionCancel').click();
@@ -301,7 +301,7 @@ try {
   const surfaceHeight = (await surface.boundingBox()).height;
   const compactText = (await routineText.innerText()).trimEnd();
   await routineText.fill(`${compactText}\n${'-- extra line\n'.repeat(60)}`);
-  await routineStatus.getByText('已修改，保存前会再次确认。').waitFor();
+  await routineStatus.getByText('已修改，下一步确认保存。').waitFor();
   const grownBox = await routineEditor.boundingBox();
   assert.deepEqual([grownBox.x, grownBox.y, grownBox.width, grownBox.height], [compactBox.x, compactBox.y, compactBox.width, compactBox.height], 'typing never resizes or moves the dialog');
   assert.equal((await surface.boundingBox()).height, surfaceHeight);
@@ -338,7 +338,7 @@ try {
 
   // While a save is in flight the backdrop is inert.
   await routineText.fill(compactText.replace('weekly_orders', 'monthly_orders'));
-  await routineStatus.getByText('已修改，保存前会再次确认。').waitFor();
+  await routineStatus.getByText('已修改，下一步确认保存。').waitFor();
   holdRoutineSave = true;
   const savesBefore = mutations.length;
   await routineSave.click();
@@ -355,21 +355,18 @@ try {
   await routineEditor.waitFor({ state: 'hidden' });
   assert.match(mutations.at(-1).sql, /monthly_orders/);
   await page.locator('.query-tab.active [data-close-tab]').click();
-  const sequences = page.locator(`${schema} .tree-category[data-kind="sequence"] > .category-summary`);
-  assert.equal(await sequences.getAttribute('aria-expanded'), 'false');
-  assert.equal(await sequences.locator('.count').innerText(), '1');
-  await category(schema, 'sequence').click();
-  await treeObject(independentSequence.id).waitFor();
+  assert.equal(await page.locator(`${schema} .tree-category[data-kind="sequence"]`).count(), 0);
   assert.equal(await treeObject(sequence.id).count(), 0);
+  assert.equal(await treeObject(independentSequence.id).count(), 0);
   await page.locator('#objectSearch').fill(sequence.name);
   assert.equal(await page.locator('#objectTree .tree-category[data-kind="sequence"]').count(), 0);
   assert.equal(await page.locator(`${pgDb} > summary`).count(), 0);
   await page.locator('#objectSearch').fill(independentSequence.name);
-  await treeObject(independentSequence.id).waitFor();
+  assert.equal(await page.locator(`${pgDb} > summary`).count(), 0);
   await page.locator('#objectSearch').fill('');
   assert.equal(await page.locator(`${pgDb} > .database-children > .tree-category[data-kind="query"]`).count(), 0);
   const pgQueries = page.locator(`${schema} > .tree-category[data-kind="query"]`);
-  assert.deepEqual(await page.locator(`${schema} > .tree-category`).evaluateAll(groups => groups.map(group => group.dataset.kind)), ['table', 'view', 'materialized_view', 'routine', 'query', 'sequence']);
+  assert.deepEqual(await page.locator(`${schema} > .tree-category`).evaluateAll(groups => groups.map(group => group.dataset.kind)), ['table', 'view', 'materialized_view', 'routine', 'query']);
   const schemaGroup = kind => page.locator(`${schema} > .tree-category[data-kind="${kind}"] > .category-summary`);
   const menuAction = action => page.locator(`#objectContextMenu [data-context-action="${action}"]`);
   for (const [kind, create] of [['view', 'create-view'], ['materialized_view', 'create-materialized-view'], ['routine', 'create-function'], ['query', null]]) {
@@ -434,12 +431,12 @@ try {
   await form.getByRole('textbox', { name: '视图名称' }).fill('new_view');
   const query = form.getByRole('textbox', { name: '查询 SQL' });
   await query.fill('SELECT 1 AS id');
-  await form.getByRole('button', { name: '保存视图' }).click();
+  await form.getByRole('button', { name: '下一步' }).click();
   await confirm();
   await form.getByRole('alert').filter({ hasText: 'fixture rejected view' }).waitFor();
   assert.equal(await query.inputValue(), 'SELECT 1 AS id');
   failView = false;
-  await form.getByRole('button', { name: '保存视图' }).click();
+  await form.getByRole('button', { name: '下一步' }).click();
   await confirm();
   await form.waitFor({ state: 'hidden' });
   assert.equal(mutations.at(-1).sql, 'CREATE VIEW "public"."new_view" AS\nSELECT 1 AS id');
@@ -449,7 +446,7 @@ try {
   await openContext(treeObject('public.orders_view'), 'edit-view');
   assert.equal(await query.inputValue(), 'SELECT id FROM public.orders');
   await query.fill('SELECT id FROM public.orders WHERE id > 0');
-  await form.getByRole('button', { name: '保存视图' }).click();
+  await form.getByRole('button', { name: '下一步' }).click();
   await confirm();
   await form.waitFor({ state: 'hidden' });
   assert.match(mutations.at(-1).sql, /security_barrier = 'true'[\s\S]*WHERE id > 0/);
@@ -610,7 +607,7 @@ try {
   await category(mysqlDb, 'view').click();
   await openContext(treeObject('warehouse.orders_view'), 'edit-view');
   assert.match(await query.inputValue(), /LOCAL CHECK OPTION/);
-  await form.getByRole('button', { name: '保存视图' }).click();
+  await form.getByRole('button', { name: '下一步' }).click();
   await confirm();
   await form.waitFor({ state: 'hidden' });
   assert.match(mutations.at(-1).sql, /ALTER ALGORITHM=MERGE DEFINER=.* SQL SECURITY INVOKER VIEW `warehouse`\.`orders_view` AS/);
@@ -618,7 +615,7 @@ try {
   await openContext(page.locator(`${mysqlDb} > summary`), 'create-view');
   await form.getByRole('textbox', { name: '视图名称' }).fill('new_view');
   await query.fill('SELECT 1 AS id');
-  await form.getByRole('button', { name: '保存视图' }).click();
+  await form.getByRole('button', { name: '下一步' }).click();
   await confirm();
   await form.waitFor({ state: 'hidden' });
   await treeObject('warehouse.new_view').waitFor();

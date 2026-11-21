@@ -4,6 +4,8 @@ import { mysqlColumns, mysqlColumnChange, mysqlDefaultClause, mysqlCommentLitera
 import { getTypeParameters, updateTypeParameters, createDefaultSql, isIdentityType } from './create-table-fields.js';
 import { createStructureCommentEditor } from './structure-comment-editor.js';
 import { structureMetadataTabs, mountStructureTabs } from './structure-tabs.js';
+import { buildKeyChanges, structureKeyChanged, structureKeyDrafts } from './structure-keys.js';
+import { createStructureKeyEditor } from './structure-key-editor.js';
 
 const editableKeys = ['name', 'dataType', 'nullable', 'defaultValue', 'comment'];
 const columnTypes = {
@@ -102,7 +104,7 @@ function fragment(value, label, { type = false, mysql = false } = {}) {
       continue;
     }
     if (c === "'" || c === '"' || c === '`') { quote = c; outer += 'x'; continue; }
-    if (c === ';' || c === '$' || text.slice(i, i + 2) === '--' || text.slice(i, i + 2) === '/*') throw new Error(`${label}只能填写一个${type ? '类型' : '表达式'}，不能包含语句或注释`);
+    if (c === ';' || c === '$' || (mysql && c === '#') || text.slice(i, i + 2) === '--' || text.slice(i, i + 2) === '/*') throw new Error(`${label}只能填写一个${type ? '类型' : '表达式'}，不能包含语句或注释`);
     if (c === '(') depth++;
     if (c === ')' && --depth < 0) throw new Error(`${label}括号不匹配`);
     if (c === ',' && depth === 0) throw new Error(`${label}不能包含额外字段定义`);
@@ -148,7 +150,7 @@ function mysqlColumnPositions(columns, rows, quote) {
   return positions;
 }
 
-export function buildStructurePlan(details, rows, driver = 'postgres', tableComment = details.comment ?? '') {
+export function buildStructurePlan(details, rows, driver = 'postgres', tableComment = details.comment ?? '', keys) {
   const mysql = driver === 'mysql';
   if (!['postgres', 'mysql'].includes(driver) || !['table', 'partitioned_table'].includes(details.kind)) throw new Error('此对象暂不支持可视化编辑');
   const q = (name) => identifier(String(name ?? ''), mysql);
@@ -168,6 +170,10 @@ export function buildStructurePlan(details, rows, driver = 'postgres', tableComm
   const statements = [];
   const clauses = [];
   const alter = (clause) => mysql ? clauses.push(clause) : statements.push(`ALTER TABLE ${table} ${clause};`);
+  const { dropClauses, addClauses, foreignKeys, dropIndexes, createIndexes, indexesChanged, constraintsChanged, keysDropped } =
+    buildKeyChanges(details, rows, keys, { mysql, q, validateExpression: (value, name) => fragment(value, `${name} 的检查表达式`, { mysql }) });
+  for (const clause of dropClauses) alter(clause);
+  statements.push(...dropIndexes);
   const positions = mysql ? mysqlColumnPositions(details.columns || [], kept, q) : new Map();
   let changed = 0;
   let dropped = 0;
@@ -214,11 +220,15 @@ export function buildStructurePlan(details, rows, driver = 'postgres', tableComm
     if (mysql) alter(`COMMENT = ${mysqlCommentLiteral(tableComment, details.mysql?.sqlMode, { table: true })}`);
     else statements.push(`COMMENT ON TABLE ${table} IS ${tableComment ? literal(tableComment, false) : 'NULL'};`);
   }
+  for (const clause of addClauses) alter(`ADD ${clause}`);
+  statements.push(...createIndexes);
+  for (const clause of foreignKeys) alter(`ADD ${clause}`);
   const sql = mysql && clauses.length ? `ALTER TABLE ${table}\n  ${clauses.join(',\n  ')};` : statements.join('\n');
-  return { sql, changed, dropped, tableCommentChanged, positionedColumns: new Set(positions.keys()), ...(mysql ? mysqlSqlModeExpectation(sql, details.mysql?.sqlMode) : {}) };
+  return { sql, changed, dropped, tableCommentChanged, indexesChanged, constraintsChanged, keysDropped,
+    positionedColumns: new Set(positions.keys()), ...(mysql ? mysqlSqlModeExpectation(sql, details.mysql?.sqlMode) : {}) };
 }
 
-export function buildCreateTablePlan({ schema, name, charset, collation, comment, mysql: mysqlMetadata }, rows, driver = 'postgres') {
+export function buildCreateTablePlan({ schema, name, charset, collation, comment, mysql: mysqlMetadata }, rows, driver = 'postgres', keys) {
   if (!['postgres', 'mysql'].includes(driver)) throw new Error('此驱动暂不支持可视化建表');
   const mysql = driver === 'mysql';
   if (!name?.trim()) throw new Error('请输入表名');
@@ -230,6 +240,7 @@ export function buildCreateTablePlan({ schema, name, charset, collation, comment
   if (!columns.length) throw new Error('请至少添加一个字段');
   const names = new Set();
   const primary = columns.filter(row => row.primaryKey);
+  if (primary.length && keys?.constraints.some(row => row.kind === 'primary_key' && !row.removed)) throw new Error('每张表只能有一个主键');
   if (mysql && columns.filter(row => row.identity).length > 1) throw new Error('MySQL 只允许一个自增字段');
   const definitions = columns.map(row => {
     if (!row.name?.trim()) throw new Error('字段名不能为空');
@@ -251,14 +262,18 @@ export function buildCreateTablePlan({ schema, name, charset, collation, comment
     return `  ${column} ${type}${generated}${row.nullable ? '' : ' NOT NULL'}${def}${mysql && row.comment ? ` COMMENT ${literal(row.comment, true, mysqlMetadata?.sqlMode)}` : ''}`;
   });
   if (primary.length) definitions.push(`  PRIMARY KEY (${primary.map(row => q(row.name)).join(', ')})`);
+  const { addClauses, createIndexes, foreignKeys, indexesChanged, constraintsChanged } =
+    buildKeyChanges({ schema, name: name.trim() }, rows, keys, { mysql, q, validateExpression: (value, label) => fragment(value, `${label} 的检查表达式`, { mysql }) });
+  definitions.push(...[...addClauses, ...(mysql ? foreignKeys : [])].map(clause => `  ${clause}`));
   const tableOptions = mysql ? ` ENGINE=InnoDB${mysqlCharacterClause(charset, collation)}${comment ? ` COMMENT=${mysqlCommentLiteral(comment, mysqlMetadata?.sqlMode, { table: true })}` : ''}` : '';
   const statements = [`CREATE TABLE ${table} (\n${definitions.join(',\n')}\n)${tableOptions};`];
+  if (!mysql) statements.push(...createIndexes, ...foreignKeys.map(clause => `ALTER TABLE ${table} ADD ${clause};`));
   if (!mysql && comment) statements.push(`COMMENT ON TABLE ${table} IS ${literal(comment, false)};`);
   if (!mysql) for (const row of columns) {
     if (row.comment) statements.push(`COMMENT ON COLUMN ${table}.${q(row.name)} IS ${literal(row.comment, false)};`);
   }
   const sql = statements.join('\n');
-  return { sql, name: name.trim(), changed: columns.length, dropped: 0, ...(mysql ? mysqlSqlModeExpectation(sql, mysqlMetadata?.sqlMode) : {}) };
+  return { sql, name: name.trim(), changed: columns.length, indexesChanged, constraintsChanged, dropped: 0, ...(mysql ? mysqlSqlModeExpectation(sql, mysqlMetadata?.sqlMode) : {}) };
 }
 
 // Compare the catalog attributes that can influence an edit before applying it.
@@ -278,6 +293,7 @@ const node = (tag, className = '', text) => {
 export function openStructureEditor({ details, driver, targetLabel, onApply, onClose, confirmDiscard, create = false, mysqlCharacterSettings = null }) {
   const newCreateRow = values => ({ defaultMode: 'none', defaultInput: '', defaultError: '', typeParameterError: '', typeParameterDraft: null, defaultDraft: null, ...values });
   const rows = create ? [newCreateRow({ name: 'id', dataType: 'bigint', nullable: false, primaryKey: true, identity: true, defaultValue: '', comment: '' })] : createStructureDraft(details);
+  const keys = structureKeyDrafts(details, rows, driver);
   const initialRows = JSON.stringify(rows);
   const originalTableComment = details.comment ?? '';
   let tableComment = originalTableComment;
@@ -294,7 +310,7 @@ export function openStructureEditor({ details, driver, targetLabel, onApply, onC
   const title = node('h2', '', create ? '新建表' : `编辑表结构 · ${details.name}`); header.append(title);
   const close = node('button', 'icon-btn', '×'); close.type = 'button'; close.setAttribute('aria-label', '关闭结构编辑'); header.append(close);
   const target = node('p', 'structure-editor-target', targetLabel);
-  const note = node('p', 'form-note', create ? '先设计字段，保存时再填写表名。'
+  const note = node('p', 'form-note', create ? ''
     : driver === 'mysql'
     ? canReorder ? '用 ↑ 和 ↓ 调整字段顺序。MySQL DDL 会隐式提交。' : '支持新增字段、删除字段、改名（MySQL 8+）。已有字段的其他属性保留原样，请通过 SQL 编辑器修改。DDL 会直接提交。'
     : '默认值填写 SQL 表达式（文本用单引号）。留空表示无默认值。');
@@ -307,14 +323,17 @@ export function openStructureEditor({ details, driver, targetLabel, onApply, onC
   const tbody = node('tbody'); table.append(tbody); scroller.append(table);
   const typePopup = node('div', 'column-type-menu'); typePopup.id = `column-type-menu-${crypto.randomUUID?.() || Date.now()}`;
   typePopup.setAttribute('role', 'listbox'); typePopup.setAttribute('aria-label', '匹配的数据类型'); typePopup.hidden = true;
-  const previewBox = node('details', 'structure-sql-preview'); previewBox.open = true;
-  const previewTitle = node('summary', '', create ? 'SQL 预览 · 表名将在保存时填写' : 'SQL 预览'); previewBox.append(previewTitle);
+  const previewBox = node('details', 'structure-sql-preview'); previewBox.open = !create;
+  const previewTitle = node('summary', '', 'SQL 预览'); previewBox.append(previewTitle);
   const preview = node('pre'); previewBox.append(preview);
+  const validation = node('p', 'structure-validation');
+  validation.setAttribute('role', 'status');
+  validation.hidden = true;
   const feedback = node('p', 'dialog-feedback'); feedback.setAttribute('role', 'status');
   const footer = node('div', 'structure-editor-footer');
   const cancel = node('button', 'secondary-btn', '取消'); cancel.type = 'button';
-  const submit = node('button', 'primary-btn', create ? '保存…' : '预览并应用'); submit.type = 'submit';
-  const naming = node('div', 'connection-form structure-table-naming'); naming.hidden = true;
+  const submit = node('button', 'primary-btn', create ? '创建表' : '保存'); submit.type = 'submit';
+  const naming = node('div', 'connection-form structure-table-naming'); naming.hidden = !create;
   const nameLabel = node('label', '', '表名');
   const nameInput = node('input'); nameInput.type = 'text'; nameInput.autocomplete = 'off'; nameInput.placeholder = '例如：orders'; nameInput.setAttribute('aria-label', '表名');
   nameLabel.append(nameInput);
@@ -325,25 +344,32 @@ export function openStructureEditor({ details, driver, targetLabel, onApply, onC
   tableCommentInput.value = tableComment;
   tableCommentField.append(tableCommentInput);
   const characterPicker = create && driver === 'mysql' && mysqlCharacterSettings ? createMysqlCharacterPicker(mysqlCharacterSettings, '继承数据库默认值') : null;
-  if (characterPicker) { naming.append(nameLabel, characterPicker.element); } else naming.append(nameLabel);
-  if (create) naming.append(tableCommentField);
-  naming.append(node('p', 'form-note', '确认表名和下方 SQL 后创建；返回编辑可继续调整字段。'));
+  naming.append(nameLabel, tableCommentField);
+  if (characterPicker) {
+    const characterOptions = node('details', 'structure-key-wide structure-table-charset');
+    characterOptions.append(node('summary', '', '字符集与排序规则'), characterPicker.element);
+    naming.append(characterOptions);
+  }
   footer.append(cancel, submit);
   form.append(header, target);
-  if (create) form.append(note, toolbar, scroller);
-  else {
-    const fieldsPanel = node('div');
-    fieldsPanel.append(tableCommentField, note, toolbar, scroller);
-    mountStructureTabs(form, [
-      { id: 'fields', label: '字段', content: fieldsPanel },
-      ...structureMetadataTabs(details, driver),
-    ], { onSelect: id => { previewBox.hidden = id !== 'fields'; } });
-  }
-  form.append(naming, previewBox, feedback, footer);
+  const fieldsPanel = node('div', 'structure-fields-panel');
+  if (create) fieldsPanel.append(naming);
+  else fieldsPanel.append(tableCommentField, note);
+  fieldsPanel.append(toolbar, scroller);
+  const keyEditors = ['indexes', 'constraints'].map(id => ({
+    id,
+    label: id === 'indexes' ? '索引' : '约束',
+    editor: createStructureKeyEditor(keys[id], rows, driver, id, () => update(), { create }),
+  }));
+  mountStructureTabs(form, [
+    { id: 'fields', label: '字段', content: fieldsPanel },
+    ...keyEditors.map(({ id, label, editor }) => ({ id, label, content: editor.content })),
+    ...(create ? [] : structureMetadataTabs(details, driver).filter(({ id }) => !['indexes', 'constraints'].includes(id))),
+  ]);
+  form.append(previewBox, validation, feedback, footer);
   dialog.append(form, typePopup); document.body.append(dialog);
   const commentEditor = createStructureCommentEditor({ parent: dialog });
   let busy = false;
-  let namingTable = false;
   let plan;
   let activeTypeInput = null;
   let activeTypeOptions = [];
@@ -474,16 +500,25 @@ export function openStructureEditor({ details, driver, targetLabel, onApply, onC
   const update = () => {
     syncCommentControls();
     syncCreateControls();
+    for (const { editor } of keyEditors) editor.update();
     try {
       if (create) {
         const invalid = rows.find(row => row.defaultError || row.typeParameterError);
         if (invalid) throw new Error(`${invalid.name || '新字段'}：${invalid.typeParameterError || invalid.defaultError}`);
       }
-      plan = create ? buildCreateTablePlan({ ...details, comment: tableComment, name: namingTable ? nameInput.value : '<保存时填写表名>', ...(characterPicker?.value() || {}) }, rows, driver) : buildStructurePlan(details, rows, driver, tableComment);
+      plan = create ? buildCreateTablePlan({ ...details, comment: tableComment, name: nameInput.value || '<表名>', ...(characterPicker?.value() || {}) }, rows, driver, keys) : buildStructurePlan(details, rows, driver, tableComment, keys);
       setSelectableText(preview, plan.sql || '尚未修改结构');
-      count.textContent = `${rows.filter((row) => !row.removed).length} 个字段 · ${plan.changed} 项变更${plan.dropped ? ` · 删除 ${plan.dropped} 列` : ''}`;
-      submit.disabled = busy || !plan.sql;
-    } catch (error) { plan = null; setSelectableText(preview, error.message); submit.disabled = true; count.textContent = '请完善字段信息'; }
+      validation.hidden = true;
+      count.textContent = `${rows.filter((row) => !row.removed).length} 个字段${create ? '' : ` · ${plan.changed} 项字段变更`}${plan.dropped ? ` · 删除 ${plan.dropped} 列` : ''}`;
+      submit.disabled = busy || !plan.sql || (create && !nameInput.value.trim());
+    } catch (error) {
+      plan = null;
+      setSelectableText(preview, error.message);
+      validation.textContent = error.message;
+      validation.hidden = false;
+      submit.disabled = true;
+      count.textContent = '';
+    }
     for (const [index, row] of rows.entries()) {
       const tr = tbody.children[index];
       if (!tr) continue;
@@ -495,19 +530,6 @@ export function openStructureEditor({ details, driver, targetLabel, onApply, onC
         labelControl(button, `${row.name || '新字段'} · ${button.title}`);
       }
     }
-  };
-  const setNaming = (value) => {
-    namingTable = value; naming.hidden = !value;
-    dialog.classList.toggle('naming-table', value);
-    note.hidden = toolbar.hidden = scroller.hidden = value;
-    title.textContent = value ? '保存新表' : '新建表';
-    previewTitle.textContent = value ? '建表 SQL' : 'SQL 预览 · 表名将在保存时填写';
-    cancel.textContent = value ? '返回编辑' : '取消';
-    submit.textContent = value ? '创建表' : '保存…';
-    feedback.textContent = ''; feedback.classList.remove('error');
-    update();
-    if (value) { nameInput.focus(); nameInput.select(); }
-    else submit.focus();
   };
   characterPicker?.element.addEventListener('change', () => update());
   nameInput.addEventListener('input', () => { feedback.textContent = ''; update(); });
@@ -739,8 +761,8 @@ export function openStructureEditor({ details, driver, targetLabel, onApply, onC
   });
   const dismiss = async () => {
     if (busy) return;
-    if (namingTable) { setNaming(false); return; }
-    const changed = create ? JSON.stringify(rows) !== initialRows : plan?.sql || rows.some(changedColumn);
+    const changed = (create ? nameInput.value.trim() || JSON.stringify(rows) !== initialRows : plan?.sql || rows.some(changedColumn))
+      || [...keys.indexes, ...keys.constraints].some(structureKeyChanged);
     if ((changed || tableComment !== originalTableComment) && !await confirmDiscard()) return;
     dialog.close();
   };
@@ -759,12 +781,11 @@ export function openStructureEditor({ details, driver, targetLabel, onApply, onC
   dialog.addEventListener('cancel', (event) => { event.preventDefault(); void dismiss(); });
   dialog.addEventListener('close', () => { closeTypeMenu(); commentEditor?.destroy(); window.removeEventListener('resize', positionTypeMenu); dialog.remove(); onClose(); }, { once: true });
   form.addEventListener('keydown', event => {
-    if (!create || namingTable || event.defaultPrevented || event.isComposing || event.keyCode === 229 || event.key !== 'Enter') return;
+    if (event.defaultPrevented || event.isComposing || event.keyCode === 229 || event.key !== 'Enter') return;
     if (event.target.matches('input[type="text"], input[type="number"]')) event.preventDefault();
   });
   form.addEventListener('submit', async (event) => {
     event.preventDefault(); if (busy || !plan?.sql) return;
-    if (create && !namingTable) { setNaming(true); return; }
     busy = true;
     const fields = [...dialog.querySelectorAll('input, textarea, select, button')].map((element) => [element, element.disabled]);
     for (const [element] of fields) element.disabled = true;

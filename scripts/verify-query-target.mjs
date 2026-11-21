@@ -32,19 +32,22 @@ let holdQuery = false;
 let releaseQuery;
 let holdContext = false;
 let releaseContext;
+let stageSearchPath = ["public", "analytics"];
 await context.exposeFunction("__FIXTURE_INVOKE__", async (command, args) => {
   const result = await fixture.invoke(command, args);
   if (command === "get_query_context") {
     if (failContext) throw new Error("fixture context unavailable");
     if (holdContext) { holdContext = false; await new Promise((resolve) => { releaseContext = resolve; }); }
+    if (result.database === "app_stage") return { ...result, searchPath: stageSearchPath };
   }
-  if (command === "execute_query" && holdQuery) {
+  if ((command === "execute_query" || command === "execute_mutation") && holdQuery) {
     holdQuery = false;
     await new Promise((resolve) => { releaseQuery = resolve; });
   }
   return result;
 });
 const page = await context.newPage();
+page.setDefaultTimeout(8000);
 const errors = [];
 page.on("pageerror", (error) => errors.push(error.message));
 const expect = (ok, message) => { if (!ok) throw new Error(message); };
@@ -75,6 +78,8 @@ try {
   // The first tab must keep its generated SQL even though the shared editor
   // still contains the empty workspace document when activation begins.
   expect(await page.locator(".query-tab").count() === 0, "fixture did not start with an empty workspace");
+  await page.locator(".tree-database[data-database='app'] > summary [data-tree-toggle]").click();
+  await page.locator(".tree-schema[data-database='app'][data-schema='public']").waitFor();
   await page.locator("#objectSearch").fill("orders");
   const firstTable = page.locator("[data-object-id='public.orders'] .object-main");
   const browseStatement = 'SELECT *\nFROM "public"."orders"\nLIMIT 501 OFFSET 0;';
@@ -141,6 +146,13 @@ try {
   expect(await page.locator("#modeBadge").count() === 0, "header still exposes the read-only switch");
   expect(await page.locator("#queryTargetDetail").isHidden(), "healthy queries still have a separate context row");
   expect((await schema.innerText()).includes("默认（public）"), "server default not visible");
+  await schema.click();
+  const options = page.locator("#querySchemaList");
+  const followedPath = options.locator('[data-value=""]');
+  expect(await followedPath.getByText("默认（public）", { exact: true }).isVisible() &&
+    await options.locator('[data-value="public"]').count() === 0, "a sole default public was shown twice");
+  expect(await options.locator('[data-value="analytics"]').isVisible(), "merging the default removed a different schema");
+  await page.keyboard.press("Escape");
   const firstId = await page.locator(".query-tab.active").getAttribute("data-tab-id");
   await selectSchema("analytics");
   await page.locator("[data-connection-id='conn-stage']").click();
@@ -149,11 +161,17 @@ try {
   expect(first.connectionId === "conn-dev" && first.database === "app" && first.schema === "analytics", "query destination differs from visible target");
   await page.locator("#addQueryTab").click();
   await ready();
-  expect((await targetHint()).includes("开发库 / app") && await schema.getAttribute("value") === "analytics", "new tab did not inherit query target");
+  expect((await targetHint()).includes("预发布库 / app_stage") && await schema.getAttribute("value") === "", "new tab ignored the browser's connection or reused the old schema");
   const secondId = await page.locator(".query-tab.active").getAttribute("data-tab-id");
+  await schema.click();
+  expect(await followedPath.getByText("跟随连接默认路径", { exact: true }).isVisible() &&
+    await followedPath.getByText("public → analytics", { exact: true }).isVisible(), "multi-schema default did not show the complete path");
+  expect(await options.locator('[data-value="public"]').getByText("固定使用此 Schema", { exact: true }).isVisible(),
+    "multi-schema default did not offer a separate fixed public");
+  await page.keyboard.press("Escape");
   await selectSchema("public");
   const second = await execute("SELECT 1");
-  expect(second.schema === "public", "second schema not passed");
+  expect(second.connectionId === "conn-stage" && second.database === "app_stage" && second.schema === "public", "second query did not use the browser's connection and its own schema");
   expect(await page.locator("#recentQueries .recent-query").count() === 2, "history collapsed different schemas");
   await page.locator(`.query-tab[data-tab-id='${firstId}'] .tab-select`).click();
   expect(await schema.getAttribute("value") === "analytics", "tabs share a schema binding");
@@ -167,18 +185,24 @@ try {
   await page.locator("[data-context-action='new-database-query']").click();
   await ready();
   expect((await targetHint()).includes("开发库 / app_reporting") && await schema.getAttribute("value") === "" && (await schema.innerText()).includes("默认（reporting）"), "new database query inherited an unrelated schema");
+  holdQuery = true;
   await editor.fill("ALTER TABLE reporting.orders ADD COLUMN flag bool;");
   await run.click();
-  await page.locator("#confirmActionModal").waitFor();
-  const message = await page.locator("#confirmActionMessage").innerText();
-  expect(message.includes("开发库 / app_reporting / reporting") && message.includes("fixture.local:5432"), "confirmation destination missing");
-  expect(await schema.isDisabled(), "confirmation permits target switch");
-  await page.keyboard.press("Escape");
+  await until(() => Boolean(releaseQuery));
+  const mutation = fixture.callsFor("execute_mutation").at(-1).args.request;
+  expect(mutation.connectionId === "conn-dev" && mutation.database === "app_reporting" && mutation.schema === null, "mutation lost its database or default schema");
+  expect(await schema.isDisabled(), "running a mutation permits a target switch");
+  releaseQuery();
+  releaseQuery = undefined;
   await ready();
-  await selectSchema("reporting");
+  await schema.click();
+  expect(await options.getByRole("option").count() === 1 &&
+    await followedPath.getByText("默认（reporting）", { exact: true }).isVisible() &&
+    await page.locator("#querySchemaCount").innerText() === "1 个 Schema", "a one-schema catalog should have one option and a count of one");
+  await page.keyboard.press("Escape");
   await page.reload({ waitUntil: "networkidle" });
   await ready();
-  expect((await targetHint()).includes("开发库 / app_reporting") && await schema.getAttribute("value") === "reporting", "schema not persisted");
+  expect((await targetHint()).includes("开发库 / app_reporting") && await schema.getAttribute("value") === "", "default target not persisted");
   holdQuery = true;
   await editor.fill("SELECT 1");
   await run.click();
@@ -190,7 +214,7 @@ try {
   expect(await schema.getAttribute("value") === "analytics", "background completion changed active target");
   // A delayed response for a previous connection must never overwrite controls.
   holdContext = true;
-  await page.locator("#refreshQueryTarget").click();
+  await schema.click();
   await until(() => Boolean(releaseContext));
   await page.locator("[data-connection-id='conn-stage']").click();
   await page.locator(".tree-database[data-database='app_stage'] > summary").click({ button: "right" });
@@ -200,12 +224,14 @@ try {
   await page.waitForTimeout(80);
   expect((await targetHint()).includes("预发布库 / app_stage"), "late context response replaced new target");
   failContext = true;
-  await page.locator("#refreshQueryTarget").click();
+  await schema.click();
   await until(async () => (await page.locator("#queryTargetDetail").innerText()).includes("fixture context unavailable"));
   expect(await run.isDisabled(), "unresolved destination permits execution");
+  await page.keyboard.press("Escape");
   failContext = false;
-  await page.locator("#refreshQueryTarget").click();
+  await schema.click();
   await ready();
+  await page.keyboard.press("Escape");
   await page.locator("#beginTransaction").click();
   await until(() => schema.isDisabled());
   expect((await schema.getAttribute("title")).includes("预发布库 / app_stage"), "transaction lost database binding");
@@ -291,13 +317,12 @@ try {
   // when merely browsing options or closing the menu.
   fixture.schemas.push(...["upsell", "agent_track", "aifeed", "aipage", "bestsourcing", "butler", "gift", "share", "shopify_test", "sonarfulfill", "tracking",
     ...Array.from({ length: 20 }, (_, i) => `warehouse_${i}`), 'team_<demo>_"schema"'].map((name) => ({ name })));
-  await page.locator("#refreshQueryTarget").click();
-  await ready();
   const search = page.locator("#querySchemaSearch");
   const menu = page.locator("#querySchemaMenu");
   const list = page.locator("#querySchemaList");
   await schema.focus();
   await page.keyboard.press("ArrowDown");
+  await list.locator('[data-value="upsell"]').waitFor();
   expect(await search.evaluate((el) => el === document.activeElement), "keyboard opening did not focus search");
   expect(await list.locator("[aria-selected='true']").getAttribute("data-value") === "analytics", "menu lost selected schema");
   await search.fill("UPSELL");
@@ -319,12 +344,22 @@ try {
   await page.keyboard.press("Enter");
   expect(await schema.getAttribute("value") === "warehouse_1", "arrow key navigation failed");
   await selectSchema("");
-  expect((await schema.innerText()).includes("默认（public）"), "default search path not selectable");
+  expect((await schema.innerText()).includes("默认（public → analytics）"), "default search path not selectable");
   await selectSchema("public");
   expect(await schema.innerText() === "public", "explicit public schema confused with default search path");
+  stageSearchPath = ["public"];
+  await schema.click();
+  await until(async () => await schema.innerText() === "默认（public）");
+  expect(await followedPath.getAttribute("aria-selected") === "true" &&
+    await options.locator('[data-value="public"]').count() === 0, "the fixed tab did not share the sole default row");
+  await page.keyboard.press("Escape");
+  expect((await execute("SELECT 21")).schema === "public", "refresh silently changed a fixed tab to follow the default");
+  await selectSchema("");
+  expect((await execute("SELECT 22")).schema === null, "choosing the merged option did not switch to following the default");
   await schema.click();
   await page.keyboard.press("Tab");
-  expect(await menu.isHidden() && await page.locator("#refreshQueryTarget").evaluate((el) => el === document.activeElement), "Tab did not return to toolbar order");
+  expect(await menu.isHidden() && await run.evaluate((el) => el === document.activeElement), "Tab did not return to toolbar order");
+  expect(await page.locator("#refreshQueryTarget").count() === 0, "PostgreSQL still shows a separate refresh button");
   await schema.click();
   await editor.click();
   expect(await menu.isHidden(), "outside click did not dismiss menu");

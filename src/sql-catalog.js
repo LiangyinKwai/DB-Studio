@@ -1,4 +1,5 @@
 import { syntaxTree } from "@codemirror/language";
+import { CompletionContext } from "@codemirror/autocomplete";
 import { MySQL, PostgreSQL, schemaCompletionSource } from "@codemirror/lang-sql";
 
 const relationKinds = new Set(["table", "partitioned_table", "view", "materialized_view", "foreign_table"]);
@@ -109,21 +110,26 @@ export function objectMatchesSearch(object, query) {
     .toLowerCase().includes(search) || matchingColumns(object, search).length > 0;
 }
 
-export function buildCompletionSchema(objects, database, driver = "postgres") {
+export function buildCompletionSchema(objects, database, driver = "postgres", namespaceNames = []) {
   const quote = driver === "mysql" ? "`" : '"';
   const identifier = (name) => (driver === "mysql" ? /^[a-z_][a-z_\d]*$/i : /^[a-z_][a-z_\d]*$/).test(name)
     ? name : quote + name.split(quote).join(quote + quote) + quote;
   const namespace = Object.create(null);
-  for (const object of objects) {
-    if (object.database !== database || !relationKinds.has(object.kind)) continue;
-    if (driver === "mysql" && object.schema !== database) continue;
-    const schemaKey = namespaceKey(object.schema);
-    namespace[schemaKey] ??= {
-      self: { label: object.schema, apply: identifier(object.schema), type: "namespace",
-        kindLabel: driver === "mysql" ? "数据库" : "Schema", detail: driver === "mysql" ? "当前数据库" : "Schema" },
+  const addNamespace = name => {
+    return namespace[namespaceKey(name)] ??= {
+      self: { label: name, apply: identifier(name), type: "namespace",
+        kindLabel: driver === "mysql" ? "数据库" : "Schema" },
       children: Object.create(null),
     };
-    namespace[schemaKey].children[namespaceKey(object.name)] = {
+  };
+  const available = new Set(namespaceNames);
+  for (const name of available) addNamespace(name);
+  for (const object of objects) {
+    if (!relationKinds.has(object.kind)) continue;
+    if (driver === "mysql") {
+      if (object.schema !== object.database || (object.database !== database && !available.has(object.database))) continue;
+    } else if (object.database !== database) continue;
+    addNamespace(object.schema).children[namespaceKey(object.name)] = {
       self: {
         label: object.name, apply: identifier(object.name), type: "class",
         kindLabel: object.kind.includes("view") ? "视图" : "表",
@@ -141,26 +147,44 @@ export function buildCompletionSchema(objects, database, driver = "postgres") {
   return namespace;
 }
 
+// Read metadata only for a database actually named in the current statement.
+export function mysqlCompletionDatabases(context) {
+  let statement = syntaxTree(context.state).resolveInner(context.pos, -1);
+  while (statement && statement.name !== "Statement") statement = statement.parent;
+  const databases = new Set();
+  statement?.cursor().iterate(node => {
+    if (node.name !== "CompositeIdentifier") return;
+    const first = node.node.firstChild;
+    if (!first || first.nextSibling?.name !== ".") return;
+    const name = context.state.sliceDoc(first.from, first.to);
+    databases.add(name.startsWith("`") ? name.slice(1, -1).replaceAll("``", "`") : name);
+  });
+  return [...databases];
+}
 
 /** Prefer the active namespace, with fields scoped to the SQL's FROM/JOIN relations. */
 export function catalogCompletionSource(config) {
   // An editor has no default table, even when opened from a table browser.
   const complete = schemaCompletionSource({ ...config, defaultTable: undefined });
-  const mysql = config.driver === "mysql" || config.dialect === MySQL;
-  const secondaryRelations = mysql ? [] : Object.values(config.schema || {})
+  const quoteIdentifier = config.dialect === MySQL ? "`" : '"';
+  const secondaryRelations = Object.values(config.schema || {})
     .filter((scope) => scope.self.label !== config.defaultSchema)
     .flatMap((scope) => Object.values(scope.children).map(({ self }) => ({
       ...self,
       label: `${scope.self.label}.${self.label}`,
       apply: `${scope.self.apply || scope.self.label}.${self.apply || self.label}`,
-      quotedLabel: [scope.self.label, self.label].map((name) => `"${name.replace(/"/g, '""')}"`).join("."),
+      quotedLabel: [scope.self.label, self.label].map(name =>
+        quoteIdentifier + name.replaceAll(quoteIdentifier, quoteIdentifier.repeat(2)) + quoteIdentifier).join("."),
       boost: -10,
     })));
   return (context) => {
     let node = syntaxTree(context.state).resolveInner(context.pos, -1);
     if (/Comment|String/.test(node.name)) return null;
     while (node && node.name !== "Statement") node = node.parent;
+    const preceding = context.state.sliceDoc(node?.from ?? Math.max(0, context.pos - 256), context.pos);
+    const inRelation = /\b(?:FROM|JOIN|UPDATE|INTO)\s+[\p{L}\p{N}_$"`]*$/iu.test(preceding);
     let result = complete(context);
+    if (!result && inRelation && !context.explicit) result = complete(new CompletionContext(context.state, context.pos, true));
     if (!result || context.state.sliceDoc(result.from - 1, result.from) === ".") return result;
     const quote = context.state.sliceDoc(result.from, result.from + 1).match(/^["`]/)?.[0];
     result = { ...result, options: [
@@ -168,7 +192,7 @@ export function catalogCompletionSource(config) {
       ...secondaryRelations.map((option) => quote ? { ...option, label: option.quotedLabel, apply: option.quotedLabel } : option),
     ] };
     if (!node) return result;
-    if (/\b(?:FROM|JOIN|UPDATE|INTO)\s+[\w"`]*$/i.test(context.state.sliceDoc(node.from, context.pos)))
+    if (inRelation)
       return { ...result, options: result.options.filter((option) => option.type !== "property") };
     const fields = new Map();
     let inFrom = false, expectRelation = false;

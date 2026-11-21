@@ -9,7 +9,13 @@ const emptyTextType = dataType => /^(?:(?:pg_catalog\.)?(?:text|character(?: var
 const jsonType = (dataType) => /^(?:pg_catalog\.)?jsonb?$/i.test(String(dataType || '').trim());
 const safeKeyValue = (value) => typeof value === 'string' || typeof value === 'boolean' ||
   (typeof value === 'number' && Number.isFinite(value) && (!Number.isInteger(value) || Number.isSafeInteger(value)));
+const mysqlExactNumericType = /^(?:tinyint|smallint|mediumint|int|integer|bigint|decimal|numeric)\b/i;
+const postgresExactNumericType = /^(?:pg_catalog\.)?(?:smallint|int2|int|integer|int4|bigint|int8|(?:decimal|numeric)(?:\(\d+(?:,\s*-?\d+)?\))?)$/i;
+const exactDecimalText = /^-?\d+(?:\.\d+)?$/;
 const safeTypedKey = (value, dataType, driver) => {
+  if (driver === 'mysql' && mysqlExactNumericType.test(dataType || '')) {
+    return typeof value === 'boolean' || (safeKeyValue(value) && exactDecimalText.test(String(value)));
+  }
   if (safeKeyValue(value)) return true;
   if (driver !== 'mysql' || value?.$dbStudio !== 'mysql-binary' || !/^(?:binary|varbinary|tinyblob|blob|mediumblob|longblob)\b/i.test(dataType || '')) return false;
   try { sqlTypedValueLiteral(value, dataType, driver); return true; } catch { return false; }
@@ -64,8 +70,8 @@ export function getCellEditCapability(tab, { column, columnIndex, rowIndex } = {
   }
 
   if (!['postgres', 'mysql'].includes(driver)) return deny('此数据库暂不支持单元格编辑');
-  const browse = tab.browse;
-  if (!browse || !['table', 'partitioned_table'].includes(browse.kind)) return deny('仅支持普通表和分区表的单元格编辑');
+  const browse = tab.browse || result.editTable;
+  if (!browse || !['table', 'partitioned_table'].includes(browse.kind)) return deny(result.editReason || '查询结果需能确认原表、字段和完整主键后才能编辑');
   if (!validIdentifier(browse.schema) || !validIdentifier(browse.name) ||
       (browse.connectionId && browse.connectionId !== tab.connectionId)) return deny('无法确认当前表的执行位置');
   const metadata = Array.isArray(browse.columns) ? browse.columns.filter((item) => item.name === name) : [];
@@ -109,7 +115,7 @@ function quoteIdentifier(value, driver) {
   return quote + value.replaceAll(quote, quote + quote) + quote;
 }
 
-export function sqlValueLiteral(value, driver = 'postgres') {
+export function sqlValueLiteral(value, driver = 'postgres', { readable = false } = {}) {
   if (!['postgres', 'mysql'].includes(driver)) throw new Error('此数据库暂不支持数据写入');
   if (value === null) return 'NULL';
   if (typeof value === 'number' || typeof value === 'boolean') {
@@ -121,9 +127,12 @@ export function sqlValueLiteral(value, driver = 'postgres') {
     catch { throw new Error('JSON 数据无法序列化'); }
   }
   if (typeof value !== 'string') throw new Error('写入内容必须为文本、数值、布尔值、JSON 或 NULL');
+  if (readable && !/[\\\p{Cc}\p{Cs}\p{Zl}\p{Zp}]/u.test(value)) {
+    const prefix = driver === 'mysql' && /[^\x00-\x7f]/.test(value) ? '_utf8mb4' : '';
+    return `${prefix}'${value.replaceAll("'", "''")}'`;
+  }
   if (driver === 'mysql') {
-    // Hex-encoded UTF-8 is independent of NO_BACKSLASH_ESCAPES and preserves
-    // empty strings, leading zeroes, quotes, backslashes and Unicode exactly.
+    // Backslashes and control characters need a mode-independent representation.
     const bytes = new TextEncoder().encode(value);
     if (new TextDecoder().decode(bytes) !== value) throw new Error('单元格包含无效 Unicode 字符');
     const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('');
@@ -133,8 +142,12 @@ export function sqlValueLiteral(value, driver = 'postgres') {
   return `E'${value.replaceAll('\\', '\\\\').replaceAll("'", "''")}'`;
 }
 
-export function sqlTypedValueLiteral(value, dataType = '', driver = 'postgres') {
-  if (driver !== 'mysql' || value === null) return sqlValueLiteral(value, driver);
+export function sqlTypedValueLiteral(value, dataType = '', driver = 'postgres', options) {
+  if (options?.readable && typeof value === 'string' && exactDecimalText.test(value) &&
+      (driver === 'mysql' ? mysqlExactNumericType.test(dataType) : driver === 'postgres' && postgresExactNumericType.test(dataType))) {
+    return value;
+  }
+  if (driver !== 'mysql' || value === null) return sqlValueLiteral(value, driver, options);
   if (typeof value === 'boolean' && !dataType) return sqlValueLiteral(value, driver);
   if (typeof value === 'boolean') {
     if (/^(?:tinyint|smallint|mediumint|int|integer|bigint|decimal|numeric|float|double|real|bool|boolean|bit)\b/i.test(dataType)) return value ? '1' : '0';
@@ -158,27 +171,36 @@ export function sqlTypedValueLiteral(value, dataType = '', driver = 'postgres') 
     return text;
   }
   if (/^(?:bool(?:ean)?\b|tinyint\(1\)(?=\s|$))/i.test(dataType) && (typeof value === 'boolean' || /^(?:true|false)$/i.test(String(value)))) return String(value).toLowerCase() === 'true' ? '1' : '0';
-  return sqlValueLiteral(value, driver);
+  return sqlValueLiteral(value, driver, options);
 }
 
-export function buildCellUpdateSql({ schema, name, column, primaryKeys, columns, row, value, driver = 'postgres', dataType, capability, keyTypes = {} } = {}) {
+export function buildPrimaryKeyPredicate({ primaryKeys, columns, row, driver, keyTypes = {}, valueLiteral = sqlTypedValueLiteral }) {
+  const q = (identifier) => quoteIdentifier(identifier, driver);
+  if (!Array.isArray(columns) || !Array.isArray(row) || columns.length !== row.length) throw new Error('结果字段和行数据不完整');
+  const names = columns.map(cellColumnName);
+  if (!Array.isArray(primaryKeys) || !primaryKeys.length || new Set(primaryKeys).size !== primaryKeys.length) {
+    throw new Error('缺少完整主键，无法安全定位要更新的行');
+  }
+  return primaryKeys.map((key) => {
+    q(key);
+    const index = uniqueIndex(names, key);
+    if (index < 0 || !safeTypedKey(row[index], keyTypes[key], driver)) throw new Error('结果缺少有效主键，无法安全定位要更新的行');
+    const original = row[index];
+    // A MySQL string-to-number comparison can round BIGINT or DECIMAL keys.
+    const literal = driver === 'mysql' && mysqlExactNumericType.test(keyTypes[key] || '') && typeof original !== 'boolean'
+      ? String(original) : valueLiteral(original, keyTypes[key], driver);
+    return `${q(key)} ${driver === 'mysql' ? '<=>' : 'IS NOT DISTINCT FROM'} ${literal}`;
+  }).join(' AND ');
+}
+
+export function buildCellUpdateSql({ schema, name, only = false, column, primaryKeys, columns, row, value, driver = 'postgres', dataType, capability, keyTypes = {} } = {}) {
   if (!['postgres', 'mysql'].includes(driver)) throw new Error('此数据库暂不支持单元格编辑');
   if (value !== null && typeof value !== 'string') throw new Error('单元格内容必须为文本或 NULL');
   const q = (identifier) => quoteIdentifier(identifier, driver);
   const table = `${q(schema)}.${q(name)}`;
   q(column);
-  if (!Array.isArray(columns) || !Array.isArray(row) || columns.length !== row.length) throw new Error('结果字段和行数据不完整');
-  const names = columns.map(cellColumnName);
-  if (uniqueIndex(names, column) < 0) throw new Error('结果中缺少唯一对应的待编辑字段');
-  if (!Array.isArray(primaryKeys) || !primaryKeys.length || new Set(primaryKeys).size !== primaryKeys.length) {
-    throw new Error('缺少完整主键，无法安全定位要更新的行');
-  }
+  const predicate = buildPrimaryKeyPredicate({ primaryKeys, columns, row, driver, keyTypes });
+  if (uniqueIndex(columns.map(cellColumnName), column) < 0) throw new Error('结果中缺少唯一对应的待编辑字段');
   if (primaryKeys.includes(column) && value === null) throw new Error('主键不能设为 NULL');
-  const predicates = primaryKeys.map((key) => {
-    q(key);
-    const index = uniqueIndex(names, key);
-    if (index < 0 || !safeTypedKey(row[index], keyTypes[key], driver)) throw new Error('结果缺少有效主键，无法安全定位要更新的行');
-    return `${q(key)} ${driver === 'mysql' ? '<=>' : 'IS NOT DISTINCT FROM'} ${sqlTypedValueLiteral(row[index], keyTypes[key], driver)}`;
-  });
-  return `UPDATE ${table} SET ${q(column)} = ${sqlTypedValueLiteral(value, dataType || capability?.dataType, driver)} WHERE ${predicates.join(' AND ')};`;
+  return `UPDATE ${only && driver === 'postgres' ? 'ONLY ' : ''}${table} SET ${q(column)} = ${sqlTypedValueLiteral(value, dataType || capability?.dataType, driver)} WHERE ${predicate};`;
 }

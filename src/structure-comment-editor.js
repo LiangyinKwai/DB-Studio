@@ -22,7 +22,7 @@ export function createStructureCommentEditor({ parent, onCommit } = {}) {
   const abort = new AbortController();
   const options = { signal: abort.signal };
   let context = null, lastPublished = '', composing = false, pendingClose = false;
-  let backdropPressed = false, ignoreCancel = false, cancelTimer = 0, destroyed = false;
+  let ignoreCancel = false, cancelTimer = 0, destroyed = false;
   let model = createCommentValue(), beforeEdit = null, paste = null, pasteTimer = 0;
   let groupSequence = 0, compositionGroup = null, typing = null;
 
@@ -90,10 +90,6 @@ export function createStructureCommentEditor({ parent, onCommit } = {}) {
     restoreFocus();
     return true;
   };
-  const outside = event => {
-    const bounds = dialog.getBoundingClientRect();
-    return event.target === dialog && (event.clientX < bounds.left || event.clientX > bounds.right || event.clientY < bounds.top || event.clientY > bounds.bottom);
-  };
   textarea.addEventListener('beforeinput', event => {
     if (!composing && ['historyUndo', 'historyRedo'].includes(event.inputType) && event.cancelable) {
       event.preventDefault(); history(event.inputType === 'historyRedo'); return;
@@ -138,13 +134,7 @@ export function createStructureCommentEditor({ parent, onCommit } = {}) {
   }, options);
   dialog.addEventListener('cancel', event => {
     event.preventDefault(); event.stopPropagation();
-    if (!composing && !ignoreCancel) close();
-  }, options);
-  dialog.addEventListener('pointerdown', event => { backdropPressed = event.button === 0 && outside(event); }, options);
-  dialog.addEventListener('pointercancel', () => { backdropPressed = false; }, options);
-  dialog.addEventListener('click', event => {
-    const dismiss = backdropPressed && outside(event); backdropPressed = false;
-    if (dismiss) close();
+    if (event.detail === "backdrop" || (!composing && !ignoreCancel)) close();
   }, options);
   dialog.addEventListener('close', () => {
     if (dialog.open || destroyed) return;
@@ -161,7 +151,7 @@ export function createStructureCommentEditor({ parent, onCommit } = {}) {
       textarea.value = commentDisplayValue(model.value);
       lastPublished = model.value;
       beforeEdit = paste = typing = null; compositionGroup = null; clearTimeout(pasteTimer);
-      composing = pendingClose = backdropPressed = ignoreCancel = false;
+      composing = pendingClose = ignoreCancel = false;
       clearTimeout(cancelTimer);
       feedback.textContent = ''; feedback.hidden = true;
       dialog.showModal();

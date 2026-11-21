@@ -112,7 +112,7 @@ body .connection-card > .connection-edit { width: 23px; margin: 0 3px 0 0; font-
 .recent-query strong { font: 11px/1.7 ui-monospace,SFMono-Regular,Menlo,monospace; }
 body .recent-query small { display: block; margin-top: 4px; font-size: 10px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; color: var(--subtle-text); }
 .recent-query .ui-icon { width: 14px; height: 14px; margin-top: 3px; }
-body .pane-footnote { display: flex; align-items: center; gap: 7px; padding: 12px 14px; border-color: var(--hairline); color: var(--subtle-text); }
+body .pane-footnote { display: flex; align-items: center; gap: 7px; height: 37px; min-height: 37px; padding: 0 14px; border-color: var(--hairline); color: var(--subtle-text); }
 .save-indicator { width: 5px; height: 5px; border-radius: 50%; background: var(--success); opacity: .8; }
 #draftSaveStatus .save-indicator { flex: none; background: var(--app-muted); }
 #draftSaveStatus[data-state="saved"] .save-indicator { background: var(--success); }
@@ -133,8 +133,12 @@ body #objectTree :is(.tree-root, summary, .category-summary, .tree-object) {
 }
 body #objectTree .tree-root { padding-inline: 9px; }
 body #objectTree .tree-database > summary { padding-inline: 5px 7px; }
+body #objectTree .system-databases > summary { display: flex; align-items: center; gap: 6px; padding-inline: 5px 7px; cursor: pointer; }
+body #objectTree .system-databases > summary::-webkit-details-marker { display: none; }
+body #objectTree .system-databases > summary .tree-label { color: var(--app-muted); }
+body #objectTree .tree-default-database { flex: none; color: var(--accent-muted); font-size: 10px; }
 body #objectTree .tree-schema > summary { padding-left: 13px; padding-right: 7px; }
-body #objectTree .category-summary { padding-left: 21px; padding-right: 7px; }
+body #objectTree .category-summary { padding-left: 21px; padding-right: 7px; cursor: pointer; }
 body #objectTree .tree-object { padding-left: 45px; padding-right: 7px; }
 body #objectTree .redis-key-object { padding-left: 29px; }
 body #objectTree[data-driver="mysql"] .mysql-database-objects > .tree-category > .category-summary { padding-left: 18px; }
@@ -205,6 +209,32 @@ body #objectTree[data-driver] .tree-object > [data-catalog-icon] { width: 18px; 
 body [data-catalog-icon]:is([data-catalog-icon="table"], [data-catalog-icon="partitioned_table"], [data-catalog-icon="foreign_table"], [data-catalog-icon="view"], [data-catalog-icon="materialized_view"]) { --catalog-icon-color: var(--catalog-data); }
 body [data-catalog-icon]:is([data-catalog-icon="routine"], [data-catalog-icon="function"]) { --catalog-icon-color: var(--catalog-function); }
 body [data-catalog-icon]:is([data-catalog-icon="query"], [data-catalog-icon="procedure"]) { --catalog-icon-color: var(--catalog-code); }
+body [data-catalog-icon]:is([data-catalog-icon="database"], [data-catalog-icon="schema"]) { --catalog-icon-color: var(--catalog-namespace); }
+.catalog-create-icon {
+  position: relative;
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 16px;
+  height: 16px;
+  color: var(--catalog-icon-color);
+  --catalog-icon-paper: var(--app-surface);
+}
+.catalog-create-icon > .ui-icon { transform: translate(-1px, -1px) scale(.89); }
+.catalog-create-icon::after {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  box-shadow: 0 0 0 1px var(--app-surface);
+  background:
+    linear-gradient(var(--app-surface), var(--app-surface)) center / 4px 1px no-repeat,
+    linear-gradient(var(--app-surface), var(--app-surface)) center / 1px 4px no-repeat,
+    currentColor;
+  content: "";
+}
 body #objectTree[data-driver] [data-catalog-icon] { color: var(--catalog-icon-color, var(--app-muted)); }
 body .tab-glyph[data-catalog-icon], body .structure-title .schema-icon[data-catalog-icon] { color: var(--catalog-icon-color); background: transparent; }
 body .tab-glyph[data-catalog-icon] .ui-icon, body .structure-title .schema-icon[data-catalog-icon] .ui-icon { width: 18px; height: 18px; }
@@ -248,6 +278,22 @@ body .workspace-body {
   grid-template-columns: var(--connections-track-width, var(--connections-width)) var(--connections-splitter-width, 1px) var(--objects-track-width, var(--objects-width)) var(--objects-splitter-width, 1px) minmax(0, 1fr);
 }
 body .editor-result { grid-template-rows: var(--editor-height) 1px minmax(180px, 1fr); min-height: 281px; }
+body .editor-result.sql-editor-only { grid-template-rows: minmax(0, 1fr); min-height: 0; }
+body .editor-result.has-editor-footer { grid-template-rows: var(--editor-height) 1px minmax(180px, 1fr) 37px; }
+body .editor-result.has-editor-footer.sql-editor-only { grid-template-rows: minmax(0, 1fr) 37px; }
+body .editor-result:not(.has-editor-footer) > .editor-footer { display: none; }
+body .editor-result.sql-summary-only { display: flex; flex-direction: column; }
+.sql-summary-only .editor-pane { flex: 1 1 0; }
+.sql-summary-only .results-pane {
+  --summary-pane-height: min(var(--summary-results-height, 0px), calc(100% - var(--summary-editor-minimum, 128px)));
+  flex: 0 0 auto;
+  min-height: var(--summary-pane-height);
+  max-height: max(min(33%, 260px), var(--summary-pane-height));
+}
+/* Let summary content determine the compact height, with internal scrolling once capped. */
+.sql-summary-only .result-content { container-type: normal; display: flex; flex-direction: column; flex-basis: auto; }
+.sql-summary-only .query-output { flex: 1 1 auto; height: auto; min-height: 0; }
+body .sql-query-workspace .result-footer { display: none; }
 body .splitter.vertical, body .splitter.horizontal { background: var(--hairline); border: 0; }
 body .splitter.horizontal { height: 1px; }
 body .splitter.vertical::before { inset: 0 -3px; }
@@ -257,6 +303,7 @@ body .splitter.horizontal::after { inset: -1px 0; }
 body .splitter::after { transition: background-color .12s ease; }
 body .splitter:hover::after { transition-delay: .12s; }
 body .splitter.dragging::after { transition-delay: 0s; }
+body #editorSplitter:focus:not(:focus-visible):not(:hover):not(.dragging)::after { background: transparent; }
 body .tabbar { min-height: 42px; height: 42px; background: var(--app-panel); border-color: var(--hairline); }
 body .query-tab {
   min-width: 140px; max-width: 250px; border-right-color: var(--hairline);
@@ -291,6 +338,45 @@ body .query-toolbar .primary-btn { min-height: 31px; padding: 6px 12px; }
 body .results-pane { container-type: inline-size; }
 body .result-heading { height: auto; min-height: 44px; flex: none; flex-wrap: wrap; gap: 8px; padding: 0 12px 0 8px; overflow: visible; border-color: var(--hairline); background: var(--app-panel); }
 body .result-tabs { flex: none; height: 44px; margin-right: auto; }
+.query-output { height: 100%; }
+.query-summary { width: 100%; min-width: 420px; table-layout: fixed; border-spacing: 0; color: var(--app-text); font-size: 12px; text-align: left; }
+.query-summary.has-failure { min-width: 500px; }
+.query-summary .summary-index { width: 40px; }
+.query-summary .summary-time { width: 90px; }
+.query-summary .summary-status { width: 72px; }
+.query-summary .summary-result { width: clamp(120px, 24cqw, 260px); }
+.query-summary.has-failure .summary-result { width: clamp(175px, 42cqw, 520px); }
+.query-summary :is(th, td) { height: 32px; padding: 0 12px; border-bottom: 1px solid var(--app-border); border-right: 1px solid var(--app-border); }
+.query-summary :is(th, td):last-child { border-right: 0; }
+.query-summary thead th { position: sticky; top: 0; height: 36px; background: var(--app-panel); color: var(--app-muted); font-weight: 600; white-space: nowrap; }
+body .sql-summary-only :is(.result-heading, .result-tab) { min-height: 30px; }
+body .sql-summary-only .result-tabs { height: 30px; }
+.sql-summary-only .query-summary td { height: 26px; }
+.sql-summary-only .query-summary th { height: 28px; }
+.query-summary tr > :first-child { padding-inline: 4px; text-align: center; color: var(--app-muted); font-weight: 400; }
+.query-summary tr > :is(:nth-child(3), :last-child) { font-variant-numeric: tabular-nums; }
+.query-summary tbody tr:nth-child(even) { background: var(--app-bg); }
+.query-summary tbody tr:hover { background: var(--hover-bg); }
+.query-summary td .selectable-text { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.query-summary td:nth-child(2) { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; }
+.query-summary .summary-success { color: var(--success); }
+.query-summary .summary-failure { color: var(--error); white-space: nowrap; }
+.query-summary .summary-unknown { white-space: nowrap; }
+.query-summary .summary-unknown, body .result-context.summary-unknown { color: var(--warning); }
+.summary-preview { display: flex; align-items: center; gap: 8px; }
+.summary-preview .selectable-text { flex: 1; min-width: 0; }
+.summary-preview button {
+  flex: none; border: 0; padding: 2px 4px; border-radius: 3px; background: transparent;
+  color: var(--accent-muted); font: 12px system-ui, sans-serif; cursor: pointer; white-space: nowrap;
+}
+.summary-preview button:hover { text-decoration: underline; }
+body .execution-details-dialog { width: min(660px, calc(100vw - 48px)); }
+body .execution-details-dialog .dialog-header { margin-bottom: 0; }
+.execution-details-dialog .dialog-header p { margin: 4px 0 0; color: var(--app-muted); font-size: 12px; overflow-wrap: anywhere; }
+.execution-details-body { min-height: 0; max-height: 52vh; }
+.execution-details-body h3 { margin: 0 0 6px; color: var(--app-muted); font-size: 12px; font-weight: 600; }
+.execution-details-body .definition { display: block; margin: 0; font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
+#executionDiagnostic:not([hidden]) { margin-bottom: 14px; }
 body .result-heading .result-filter { flex: 1 1 110px; width: 180px; min-width: 90px; max-width: 260px; }
 body .result-action-host, body .table-action-host { display: flex; align-items: center; flex: none; }
 body .result-actions { display: flex; align-items: center; gap: 0; flex: none; }
@@ -345,6 +431,17 @@ body .data-import-preview table { width: 100%; border-collapse: collapse; font-s
 body .data-import-preview th, body .data-import-preview td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--hairline); max-width: 280px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 body .data-import-preview th { position: sticky; top: 0; background: var(--app-panel); }
 body .data-import-sql { font-size: 12px; }
+.mutation-field { align-items: start; }
+.mutation-field > label { line-height: 32px; }
+.mutation-field-value { display: grid; gap: 3px; min-width: 0; }
+.mutation-field-value > input { width: 100%; }
+.mutation-field-value > small { grid-column: auto; margin-top: 0; }
+.mutation-field-tools { display: flex; flex-wrap: wrap; align-items: start; gap: 3px 5px; }
+.mutation-field-tools .quiet-btn, .mutation-temporal-options > summary { min-height: 24px; padding: 3px 6px; color: var(--app-muted); font-size: 11px; }
+.mutation-temporal-options > summary { cursor: pointer; border-radius: 4px; }
+.mutation-temporal-options > summary:hover { background: var(--hover-bg); color: var(--app-text); }
+.mutation-temporal-picker { max-width: 100%; margin-top: 3px; }
+.mutation-field-value input[data-mutation-value] { color: var(--syntax-keyword); }
 body .data-import-sql pre { max-height: 180px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
 body .data-import-dialog .dialog-actions { justify-content: flex-end; }
 .result-tab { font-size: 12px; padding-inline: 13px; }
@@ -354,7 +451,15 @@ body .result-footer .result-context { flex: 1; min-width: 0; height: 28px; min-h
 body .result-selection { display: flex; align-items: center; gap: 6px; min-width: 0; }
 body .result-selection .selection-count { overflow: hidden; text-overflow: ellipsis; }
 body .result-selection .quiet-btn { flex: none; height: 28px; white-space: nowrap; }
-body .editor-footer { height: 27px; min-height: 27px; font-size: 10px; border-color: var(--hairline); }
+body .editor-footer { flex: none; height: 37px; min-height: 37px; font-size: 10px; border-color: var(--hairline); }
+body .sql-query-workspace .editor-footer { justify-content: flex-start; }
+.sql-query-workspace #editorHint { flex: 1; }
+.query-footer-status, .query-footer-grid { min-width: 0; flex: 0 1 auto; max-width: 40%; }
+.query-footer-status { max-width: 55%; }
+.query-footer-status .result-context { display: block; height: auto; min-height: 0; padding: 0; border: 0; background: transparent; }
+.query-footer-grid .db-grid-footer { gap: 0; min-height: 0; padding: 0; border: 0; background: transparent; }
+.query-footer-grid .db-grid-footer-hint { display: none; }
+.query-footer-grid .db-grid-footer-status { max-width: 100%; }
 body .result-filter { height: 27px; border-color: var(--hairline); }
 body .result-content { background: var(--input-bg); }
 body .page-controls { flex: none; gap: 3px; margin: 0 0 0 auto; color: var(--app-muted); font-variant-numeric: tabular-nums; }
@@ -415,8 +520,8 @@ body .workspace-attention { max-width: 250px; padding: 3px 7px; height: 24px; ov
 body .workspace-attention:hover { border-color: var(--warning); }
 body .table-toolbar .toolbar-spacer { display: none; }
 @container (max-width: 520px) {
-  body .result-heading { padding-bottom: 8px; gap: 0 6px; }
-  body .result-heading .result-filter { order: 3; flex-basis: 100%; max-width: none; width: 100%; }
+  body .editor-result:not(.sql-query-workspace) .result-heading { padding-bottom: 8px; gap: 0 6px; }
+  body .editor-result:not(.sql-query-workspace) .result-heading .result-filter { order: 3; flex-basis: 100%; max-width: none; width: 100%; }
   body .result-tab { padding-inline: 9px; }
 }
 @media (max-width: 1200px) {

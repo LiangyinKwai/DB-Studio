@@ -45,16 +45,16 @@ try {
 
   const structurePanel = page.locator("#structurePanel");
   const switchToQuery = () => page.locator(`[data-tab-id='${queryId}'] .tab-select`).click();
-  assert.deepEqual(await resultTabs(), ["数据", "消息"]);
+  assert.deepEqual(await resultTabs(), []);
 
   await editor.fill("SELECT * FROM orders WHERE id > 1");
   await page.locator("#runQuery").click();
   await page.locator("#resultGrid").waitFor();
-  assert.deepEqual(await resultTabs(), ["数据", "消息"]);
+  assert.deepEqual(await resultTabs(), ["数据", "摘要"]);
   assert.ok(await structurePanel.isHidden());
   assert.ok(await page.locator("#structureTab").isHidden());
   await page.locator("#messageTab").click();
-  assert.match(await page.locator("#messagePanel").innerText(), /执行成功/);
+  assert.match(await page.locator("#executionSummary").innerText(), /成功/);
 
   await editorMenuItem("查看引用表的结构");
   await structurePanel.getByRole("tab", { name: "字段" }).waitFor();
@@ -76,7 +76,7 @@ try {
   await switchToQuery();
   assert.equal(await editor.innerText(), "SELECT * FROM orders WHERE id > 1");
   assert.ok(await page.locator("#messagePanel").isVisible());
-  assert.deepEqual(await resultTabs(), ["数据", "消息"]);
+  assert.deepEqual(await resultTabs(), ["数据", "摘要"]);
   await editorMenuItem("查看引用表的结构");
   assert.equal(await page.locator(".query-tab.active").getAttribute("data-tab-id"), structureId);
   assert.equal(await structurePanel.getByRole("tab", { selected: true }).innerText(), "索引");
@@ -104,7 +104,7 @@ try {
   await page.keyboard.press("Escape");
 
   assert.deepEqual(errors, []);
-  console.log("PASS: query output shows data and messages; the editor menu and command palette open dedicated, categorized structure.");
+  console.log("PASS: query output shows data and summaries; the editor menu and command palette open dedicated, categorized structure.");
 } finally {
   await browser.close();
   server.close();

@@ -18,6 +18,7 @@ fixture.objectsBySchema.warehouse = [{ id: "warehouse.inventory", schema: "wareh
   columns: [{ name: "sku", dataType: "varchar(50)" }] }];
 fixture.objectsBySchema.warehouse_reporting = [{ id: "warehouse_reporting.private_inventory", schema: "warehouse_reporting", name: "private_inventory", kind: "table",
   columns: [{ name: "private_sku" }] }];
+fixture.schemas.push({ name: "empty_schema" });
 const server = createServer((req, res) => {
   const relative = decodeURIComponent((req.url || "/").split("?")[0]).replace(/^\//, "") || "index.html";
   const file = resolve(dist, relative);
@@ -56,6 +57,13 @@ try {
     // CodeMirror deliberately ignores acceptance keys just after opening.
     await page.waitForTimeout(100);
   }
+  await suggest("PA");
+  await page.keyboard.press("Meta+A");
+  await page.keyboard.press("Backspace");
+  await page.locator(".cm-tooltip-autocomplete").waitFor({ state: "hidden" });
+  await page.keyboard.press("Control+Space");
+  await page.waitForTimeout(180);
+  expect(await page.locator(".cm-tooltip-autocomplete").isHidden(), "cleared editor still offers SQL completions");
   for (const theme of ["dark", "light"]) {
     await page.locator("#themeButton").click();
     await page.locator(`[data-theme-option='${theme}']`).click();
@@ -145,6 +153,8 @@ try {
   expect(await selectedOption.locator(".cm-completionLabel").innerText() === "orders" &&
     await selectedOption.locator(".cm-completionDetail").innerText() === "analytics", "schema switch retained the old completion priority");
   expect(await page.locator(".cm-completionLabel").getByText("public.orders", { exact: true }).count() === 1, "previous schema disappeared from same-database alternatives");
+  await suggest("SELECT * FROM empty_s");
+  expect(await selectedOption.locator(".cm-completionLabel").innerText() === "empty_schema", "empty PostgreSQL schema not suggested");
   await page.keyboard.press("Escape");
 
   await page.locator("[data-connection-id='mysql-local']").click();
@@ -153,18 +163,27 @@ try {
   await page.locator("#runQuery").waitFor({ state: "visible" });
   await suggest("SELECT * FROM inv");
   expect(await selectedOption.locator(".cm-completionLabel").innerText() === "inventory", "MySQL current-database table not suggested");
-  expect(await page.locator("#querySchema").isHidden(), "MySQL exposes a PostgreSQL schema selector");
+  expect(await page.locator("#queryTargetIcon ellipse").count() === 1, "MySQL selector does not use the database icon");
   expect(fixture.callsFor("get_schema_objects").filter((call) => call.args.connectionId === "mysql-local")
     .every((call) => call.args.database === "warehouse" && call.args.schemaName === "warehouse"), "MySQL completion queried another database");
-  expect(!(await page.locator(".cm-completionLabel").getByText("private_inventory", { exact: true }).count()), "MySQL suggests another database");
+  expect(!(await page.locator(".cm-completionLabel").getByText("private_inventory", { exact: true }).count()), "other database table was suggested without qualification");
   await page.screenshot({ path: resolve(evidence, "mysql-current-db-completion.png") });
   await suggest("SELECT * FROM inventory i WHERE i.sk");
   expect(await selectedOption.locator(".cm-completionLabel").innerText() === "sku", "MySQL alias fields do not follow SQL relations");
   await page.keyboard.press("Tab");
   expect((await editor.innerText()).endsWith("i.sku"), "MySQL field completion inserted an invalid identifier");
+  await suggest("SELECT * FROM warehouse_r");
+  expect(await selectedOption.locator(".cm-completionLabel").innerText() === "warehouse_reporting" &&
+    await selectedOption.locator(".cm-completionKind").innerText() === "数据库", "other MySQL database names are missing");
+  expect(!fixture.callsFor("get_schema_objects").some(call => call.args.database === "warehouse_reporting"),
+    "suggesting a database name scanned its tables");
+  await suggest("SELECT * FROM warehouse_reporting.");
+  expect(await selectedOption.locator(".cm-completionLabel").innerText() === "private_inventory", "qualified MySQL table is missing");
+  await suggest("SELECT * FROM warehouse_reporting.private_inventory p WHERE p.priv");
+  expect(await selectedOption.locator(".cm-completionLabel").innerText() === "private_sku", "cross-database alias lost its fields");
   expect(!failures.length, failures.join("\n"));
   writeFileSync(resolve(evidence, "report.json"), JSON.stringify({ measurements, failures }, null, 2));
-  console.log("PASS: schema priority and qualified alternatives, SQL relation fields, MySQL database isolation, metadata, Tab/Enter acceptance and editor assistance in light and dark themes.");
+  console.log("PASS: blank editor dismissal, Schema/database hints, qualified tables and alias fields, lazy cross-database metadata and keyboard acceptance.");
 } finally {
   await context.close();
   await browser.close();

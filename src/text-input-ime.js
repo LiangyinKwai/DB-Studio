@@ -20,6 +20,15 @@ export function initTextInputIme(root = document) {
     root.addEventListener(type, handler, true);
     handlers.push([type, handler]);
   }
+  // Database identifiers, search terms and values need to retain the text
+  // entered by the user. Capture focus even for dynamically mounted controls,
+  // including CodeMirror's search fields, before the user starts typing.
+  listen('focus', ({ target }) => {
+    if (target.tagName !== 'TEXTAREA' && !(target.tagName === 'INPUT' && supportedTypes.has(target.type))) return;
+    target.setAttribute('autocorrect', 'off');
+    target.setAttribute('autocapitalize', 'off');
+    target.spellcheck = false;
+  });
   function clear() { clearTimeout(timer); timer = null; session = null; }
   function finish() {
     const current = session;

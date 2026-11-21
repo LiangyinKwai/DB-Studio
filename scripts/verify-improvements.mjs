@@ -66,6 +66,8 @@ try {
   await page.locator(".cm-completionLabel").filter({ hasText: /^status$/ }).waitFor();
   expect(fixture.callsFor("get_schema_objects").length === before, "cached completion reloaded schema objects");
   await page.keyboard.press("Escape");
+  await page.locator(".tree-database[data-database='app'] > summary [data-tree-toggle]").click();
+  await page.locator(".tree-schema[data-database='app'][data-schema='analytics']").waitFor();
   await page.locator("#objectSearch").fill("event_name");
   await page.locator("[data-object-id='analytics.events'] .object-main").waitFor();
   expect(await page.locator("[data-object-id='analytics.events'] .object-main").isVisible(), "field match stayed collapsed");
@@ -101,7 +103,7 @@ try {
   await page.reload({ waitUntil: "networkidle" });
   expect(await page.locator("#connectionsPane").isHidden() && await page.locator("#objectsPane").isHidden(), "hidden panes not persisted");
   expect(await page.locator("#toggleConnections").isVisible() && await page.locator("#toggleObjects").isVisible(), "collapsed layout has no local restore controls");
-  await page.keyboard.press("Meta+k");
+  await page.keyboard.press("Meta+Shift+k");
   expect(await page.locator("#objectsPane").isVisible(), "search shortcut did not restore objects");
   expect(await page.locator("#objectSearch").evaluate((node) => document.activeElement === node), "search shortcut failed to focus search");
   expect(await page.locator("#connectionsPane").isHidden(), "search shortcut changed the other pane");

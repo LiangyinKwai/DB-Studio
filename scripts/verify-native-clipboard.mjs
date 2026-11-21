@@ -59,7 +59,7 @@ try {
   assert.equal(await page.evaluate(() => window.__browserClipboardCalls), 0);
   await object.locator('.object-main').dblclick();
   await page.locator('#resultGrid [data-grid-cell]').first().waitFor();
-  const refreshPaths = await page.evaluate(() => ['#refreshSchema', '#refreshQueryTarget', '#refreshTableData', '[data-context-action="refresh-object"]'].map(selector => [...document.querySelectorAll(`${selector} svg path`)].map(path => path.getAttribute('d')).join('')));
+  const refreshPaths = await page.evaluate(() => ['#refreshSchema', '#refreshTableData', '[data-context-action="refresh-object"]'].map(selector => [...document.querySelectorAll(`${selector} svg path`)].map(path => path.getAttribute('d')).join('')));
   assert.ok(refreshPaths.every(path => path === refreshPaths[0] && path.length > 0), 'refresh icons differ');
   const beforeDdl = fixture.callsFor('execute_query').length;
   assert.equal(await page.locator('#viewTableDdl .tab-glyph').innerText(), 'DDL');

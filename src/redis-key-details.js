@@ -9,7 +9,7 @@ export function createRedisKeyDetails({ copyText, readTtl, onError = console.err
   dialog.innerHTML = '<div class="dialog-header"><h2 id="redis-key-detail-title">Key 详情</h2><button class="icon-btn" type="button" aria-label="关闭 Key 详情">×</button></div><div class="key-context"></div><div class="value-reader"></div><div class="dialog-actions"><span class="toolbar-spacer"></span><button class="secondary-btn" type="button" data-key-copy>复制完整 Key</button></div>';
   document.body.append(dialog);
   const reader = createValueReader(dialog.querySelector('.value-reader'), { label: '完整 Redis Key', showLineNumbers: false });
-  let current = null, previousFocus = null, backdropPointerDown = false;
+  let current = null, previousFocus = null;
   let ttlRequest = 0;
   const ttlLabel = ttl => ttl === -1 ? '无过期时间' : ttl === -2 ? 'Key 已不存在' : Number.isFinite(ttl) ? `TTL ${ttl} 秒（读取时）` : 'TTL 未读取';
   async function refreshTtl(entry, status, retry) {
@@ -26,7 +26,7 @@ export function createRedisKeyDetails({ copyText, readTtl, onError = console.err
       status.textContent = 'TTL 读取失败'; status.title = error?.message || String(error); retry.hidden = false;
     }
   }
-  const close = () => { current = null; backdropPointerDown = false; dialog.close(); previousFocus?.isConnected && previousFocus.focus({ preventScroll: true }); reader.destroy(); };
+  const close = () => { current = null; dialog.close(); previousFocus?.isConnected && previousFocus.focus({ preventScroll: true }); reader.destroy(); };
   dialog.querySelector('[aria-label="关闭 Key 详情"]').addEventListener('click', close);
   dialog.addEventListener('cancel', event => { event.preventDefault(); close(); });
   dialog.addEventListener('keydown', event => {
@@ -34,17 +34,6 @@ export function createRedisKeyDetails({ copyText, readTtl, onError = console.err
       event.preventDefault(); event.stopPropagation(); reader.find();
     }
   }, true);
-  const isBackdrop = event => {
-    const bounds = dialog.getBoundingClientRect();
-    return event.target === dialog && (event.clientX < bounds.left || event.clientX > bounds.right || event.clientY < bounds.top || event.clientY > bounds.bottom);
-  };
-  dialog.addEventListener('pointerdown', event => { backdropPointerDown = event.button === 0 && isBackdrop(event); });
-  dialog.addEventListener('pointercancel', () => { backdropPointerDown = false; });
-  dialog.addEventListener('click', event => {
-    const dismiss = backdropPointerDown && isBackdrop(event);
-    backdropPointerDown = false;
-    if (dismiss) close();
-  });
   dialog.querySelector('[data-key-copy]').addEventListener('click', async () => {
     const entry = current; if (!entry) return;
     try { await copyText(entry.key); if (current === entry && dialog.open) dialog.querySelector('[data-key-copy]').textContent = '已复制完整 Key'; }

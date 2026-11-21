@@ -2,8 +2,24 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import vm from "node:vm";
-import { sqlExecutionInfo, sqlTransactionAction } from "../src/sql-execution.js";
+import { queryEditRelation, sqlExecutionInfo, sqlTransactionAction } from "../src/sql-execution.js";
 import { isQueryCancellation } from "../src/query-status.js";
+
+test("query edits require a single unambiguous source relation", () => {
+  assert.deepEqual(queryEditRelation('SELECT o.id, o.name FROM "sales"."Orders" o WHERE o.id > 2 ORDER BY o.id;', "postgres"), ["sales", "Orders"]);
+  assert.deepEqual(queryEditRelation("SELECT * FROM `warehouse`.`orders` WHERE name = 'a,b' LIMIT 5;", "mysql"), ["warehouse", "orders"]);
+  for (const sql of [
+    "SELECT a.id, b.name FROM orders a JOIN orders b ON a.id <> b.id",
+    "SELECT a.id, b.name FROM orders a, orders b WHERE a.id <> b.id",
+    "SELECT * FROM orders UNION ALL SELECT * FROM old_orders",
+    "SELECT * FROM (SELECT * FROM orders) t",
+    "WITH orders AS (SELECT * FROM other_orders) SELECT * FROM orders",
+    "SELECT * FROM orders; SELECT * FROM old_orders",
+    "SELECT * FROM orders /*! JOIN old_orders ON old_orders.id=orders.id */",
+  ]) {
+    for (const driver of ["postgres", "mysql"]) assert.equal(queryEditRelation(sql, driver), null, sql);
+  }
+});
 
 test("SQL execution routes full scripts instead of classifying just their first keyword", () => {
   assert.deepEqual(sqlExecutionInfo("SELECT 1; ALTER TABLE t ADD COLUMN flag boolean;"), { count: 2, keywords: ["SELECT", "ALTER"], singleRead: false });
@@ -29,7 +45,7 @@ test("only complete PostgreSQL and MySQL transaction commands use the managed se
   }
 });
 
-test("write confirmation separates the actual target from server details and connection defaults", async () => {
+test("SQL executes directly unless it would discard unsaved cell edits", async () => {
   const source = readFileSync(new URL('../src/main.js', import.meta.url), 'utf8');
   const description = source.slice(source.indexOf('function queryTargetDescription('), source.indexOf('async function loadQueryTarget('));
   const confirmation = source.slice(source.indexOf('const discardDraftMessage'), source.indexOf('function firstRedisCommand('));
@@ -46,16 +62,14 @@ test("write confirmation separates the actual target from server details and con
     vm.runInContext(description + confirmation, context);
     const sql = 'INSERT INTO example (id) VALUES (1)';
     assert.equal(await context.confirmWrite(sql, tab), true);
-    assert.equal(calls[0].message.split('\n')[0], `执行位置：测试环境 / test${driver === 'postgres' ? ' / new_schema' : ''}`);
-    assert.equal(calls[0].message.split('\n')[1], `服务器：fixture.local:${profile.port}`);
-    assert.ok(!calls[0].message.includes('shopify'), 'the username/default database must not look like a second execution target');
-    assert.equal(calls[0].options.detail, sql);
+    assert.equal(calls.length, 0);
     await context.confirmWrite('SELECT 1', tab);
-    assert.equal(calls.length, 1, 'read-only SQL keeps its existing confirmation behavior');
+    assert.equal(calls.length, 0);
     await context.confirmWrite(sql, tab, { hasDrafts: true });
-    assert.equal(calls.length, 2, 'dirty write uses one combined confirmation');
-    assert.match(calls[1].message, /尚未保存的单元格修改/u);
-    assert.equal(calls[1].options.acceptLabel, "放弃并执行");
+    assert.equal(calls.length, 1);
+    assert.match(calls[0].message, /尚未保存的单元格修改/u);
+    assert.equal(calls[0].options.detail, sql);
+    assert.equal(calls[0].options.acceptLabel, "放弃并执行");
   }
 });
 
@@ -76,7 +90,8 @@ test("a pending cancel request cannot hide an uncertain PostgreSQL write outcome
       editor: { plugin: () => null, state: { selection: { main: { from: 0, to: 0 } }, sliceDoc: () => '' } },
     };
     const context = vm.createContext({
-      state, sqlIme: {}, sqlExecutionInfo, sqlTransactionAction, isQueryCancellation,
+      state, sqlIme: {}, sqlExecutionInfo, sqlTransactionAction, isQueryCancellation, performance,
+      isSqlQueryTab: () => true,
       runningViewWrites: new Set(),
       activeTab: () => tab, activeExecutionTab: () => tab, cellWritePending: () => false,
       cellDraftsForTabs: () => [], hasSavingCellDrafts: () => false, confirmWrite: async () => true,
@@ -93,8 +108,14 @@ test("a pending cancel request cannot hide an uncertain PostgreSQL write outcome
     assert.equal(state.transactionKeys.has('pg/app'), false);
     if (unknown) {
       assert.ok(tab.message.includes(message));
+      assert.equal(tab.executionSummary.failure.unknown, true);
+      assert.equal(tab.executionSummary.failure.detail, message);
+      assert.equal(tab.executionSummary.statements[0].sql, tab.sql);
       assert.ok(notices.at(-1).includes(message));
       assert.doesNotMatch(tab.message, /查询已取消|事务已回滚/);
-    } else assert.match(tab.message, /查询已取消/);
+    } else {
+      assert.match(tab.message, /查询已取消/);
+      assert.equal(tab.executionSummary, null);
+    }
   }
 });

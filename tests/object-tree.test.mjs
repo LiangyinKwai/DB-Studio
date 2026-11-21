@@ -14,6 +14,12 @@ test('schema group order is independent of the first alphabetically named object
   assert.deepEqual(orderedObjectGroups([...objects].reverse()).map(([kind]) => kind), groups.map(([kind]) => kind));
 });
 
+test('PostgreSQL does not include an empty sequence category', () => {
+  const groups = orderedObjectGroups([{ kind: 'table', name: 'orders' }], { driver: 'postgres' });
+  assert.deepEqual(groups.map(([kind]) => kind), ['table', 'view', 'materialized_view', 'routine']);
+  assert.deepEqual(orderedObjectGroups([], { driver: 'postgres', searching: true }), []);
+});
+
 test('disclosure state updates native details and the accessible button without selecting a row', () => {
   const attributes = {};
   const button = { dataset: { treeLabel: 'public' }, setAttribute(name, value) { attributes[name] = value; } };

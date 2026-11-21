@@ -1,6 +1,8 @@
 /** Searchable Schema picker. Browsing options never changes the execution target. */
-export function createSchemaSelect({ trigger, label, panel, search, list, empty, count, onChange, noun = "Schema", manageTrigger = true }) {
-  let options = [], value = "", contextKey, activeValue;
+export function createSchemaSelect({ trigger, label, panel, search, list, empty, count, onChange, onOpen, manageTrigger = true }) {
+  let options = [], value = "", selectedValue = "", contextKey, activeValue;
+  let noun = "Schema";
+  let refreshing = false;
   count.setAttribute("role", "status");
   count.setAttribute("aria-live", "polite");
   count.setAttribute("aria-atomic", "true");
@@ -49,11 +51,11 @@ export function createSchemaSelect({ trigger, label, panel, search, list, empty,
       row.className = "schema-select-option";
       row.dataset.value = option.value;
       row.setAttribute("role", "option");
-      row.setAttribute("aria-selected", String(option.value === value));
+      row.setAttribute("aria-selected", String(option.value === selectedValue));
       row.title = [option.label, option.detail].filter(Boolean).join(" · ");
       const check = document.createElement("span");
       check.className = "schema-select-check";
-      check.textContent = option.value === value ? "✓" : "";
+      check.textContent = option.value === selectedValue ? "✓" : "";
       check.setAttribute("aria-hidden", "true");
       const copy = document.createElement("span");
       copy.className = "schema-select-copy";
@@ -66,28 +68,24 @@ export function createSchemaSelect({ trigger, label, panel, search, list, empty,
         copy.append(detail);
       }
       row.append(check, copy);
-      if (option.value === "") {
-        const badge = document.createElement("span");
-        badge.className = "schema-select-default";
-        badge.textContent = "默认";
-        row.append(badge);
-      }
       return row;
     }));
     empty.hidden = visible.length > 0;
-    count.textContent = search.value.trim() ? `${visible.length} 个匹配项` : `${options.filter((option) => option.value !== "").length} 个${noun === "Schema" ? " Schema" : noun}`;
+    const schemaCount = options.filter(option => option.value !== "" || option.countsAsSchema).length;
+    count.textContent = refreshing ? "正在检查列表…" : search.value.trim() ? `${visible.length} 个匹配项` : `${schemaCount} 个${noun === "Schema" ? " Schema" : noun}`;
     highlight();
   }
   function open() {
     if (trigger.disabled || trigger.hidden) return;
     search.value = "";
-    activeValue = value;
+    activeValue = selectedValue;
     panel.hidden = false;
     trigger.setAttribute("aria-expanded", "true");
     search.setAttribute("aria-expanded", "true");
     position();
     render();
     search.focus();
+    onOpen?.();
   }
   function choose(nextValue) {
     if (!options.some((option) => option.value === nextValue)) return;
@@ -150,7 +148,14 @@ export function createSchemaSelect({ trigger, label, panel, search, list, empty,
     update(next) {
       if (next.contextKey !== contextKey || next.disabled || next.hidden) close();
       options = next.options;
+      noun = next.noun || "Schema";
+      refreshing = Boolean(next.refreshing);
+      search.placeholder = `搜索${noun === "Schema" ? " " : ""}${noun}…`;
+      search.setAttribute("aria-label", search.placeholder.slice(0, -1));
+      list.setAttribute("aria-label", `查询 ${noun}`);
+      empty.textContent = `没有匹配的${noun === "Schema" ? " " : ""}${noun}`;
       value = next.value;
+      selectedValue = next.selectedValue ?? value;
       contextKey = next.contextKey;
       trigger.value = value;
       trigger.disabled = next.disabled;

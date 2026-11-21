@@ -306,7 +306,7 @@ await check("closing all tabs returns to the empty workspace without creating a 
   expect(await page.evaluate(() => JSON.parse(localStorage.getItem("db-studio.workspace-tabs.v2") || "[]").length) === 0, "closed tabs remained in the saved workspace");
 });
 
-await check("write mode confirms mutations and supports transaction rollback", async () => {
+await check("write mode executes SQL directly and supports transaction rollback", async () => {
   await page.locator("#addQueryTab").click();
   expect((await page.locator(".tab-label").innerText()).trim() === "查询 1", "query numbering did not restart at the first available number");
   expect(await page.locator(".tab-close").count() === 1, "single query tab is missing its close button");
@@ -316,8 +316,8 @@ await check("write mode confirms mutations and supports transaction rollback", a
   await editor.click(); await page.keyboard.press("Meta+A"); await page.keyboard.type("UPDATE public.orders SET status = 'PAID'");
   const beforeMutation = calls("execute_mutation").length;
   await page.locator("#runQuery").click();
-  await page.locator("#confirmActionAccept").click();
   await waitFor(() => calls("execute_mutation").length > beforeMutation, "write SQL invoke");
+  expect(await page.locator("#confirmActionModal").isHidden(), "write SQL unexpectedly required confirmation");
   const beforeBegin = calls("begin_transaction").length;
   await page.locator("#beginTransaction").click();
   await waitFor(() => calls("begin_transaction").length > beforeBegin, "begin transaction invoke");

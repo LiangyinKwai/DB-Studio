@@ -178,6 +178,12 @@ test('primary key values use the captured original key for WHERE, including comp
   assert.equal(getCellEditCapability(tab, cell).allowNull, false);
 });
 
+test('MySQL numeric primary keys preserve exact values without string coercion', () => {
+  const keyTypes = { id: 'bigint unsigned' };
+  assert.match(update({ driver: 'mysql', keyTypes, row: ['Alice', '9007199254740993'] }), /WHERE `id` <=> 9007199254740993;/);
+  assert.throws(() => update({ driver: 'mysql', keyTypes, row: ['Alice', '1 OR 1=1'] }), /有效主键/);
+});
+
 test('draft validation preserves SQL NULL, empty text and raw JSON precision', () => {
   assert.equal(validateCellDraft(null, { allowNull: true }), null);
   assert.throws(() => validateCellDraft(null, { allowNull: false }), /NULL/);

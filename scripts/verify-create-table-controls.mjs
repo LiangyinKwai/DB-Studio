@@ -29,7 +29,7 @@ const field = (index, name) => row(index).locator(`[data-field="${name}"]`);
 const parameter = (index, name) => row(index).locator(`[data-type-parameter="${name}"]`);
 const mode = index => row(index).locator('[data-default-mode]');
 const preview = () => designer.locator('.structure-sql-preview pre').innerText();
-const save = () => designer.getByRole('button', { name: '保存…', exact: true });
+const save = () => designer.getByRole('button', { name: '下一步', exact: true });
 const add = async (name, type) => {
   await designer.getByRole('button', { name: '＋ 添加字段', exact: true }).click();
   const index = await designer.locator('tbody > tr').count() - 1;
@@ -47,7 +47,14 @@ const chooseType = async (index, type) => {
   await designer.locator(`.column-type-option[data-value="${type}"]`).click();
 };
 const finish = async name => {
-  await save().click(); await designer.getByLabel('表名', { exact: true }).fill(name);
+  const mutationCount = fixture.callsFor('execute_mutation').length;
+  await save().click();
+  const tableName = designer.getByLabel('表名', { exact: true });
+  assert.deepEqual(await tableName.evaluate(input => [
+    input === document.activeElement, input.getAttribute('autocorrect'), input.getAttribute('autocapitalize'), input.spellcheck,
+  ]), [true, 'off', 'off', false]);
+  assert.equal(fixture.callsFor('execute_mutation').length, mutationCount, 'Next opens the naming step without creating the table');
+  await tableName.fill(name);
   const sql = await preview(); await designer.getByRole('button', { name: '创建表', exact: true }).click();
   await designer.waitFor({ state: 'hidden' });
   assert.equal(fixture.callsFor('execute_mutation').at(-1).args.request.sql, sql);

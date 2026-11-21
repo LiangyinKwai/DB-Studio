@@ -160,6 +160,7 @@ export function initWorkspaceLayout({
     "connectionsRail",
     "objectsRail",
     "editorPane",
+    "editorFooter",
     "sidebarSplit",
     "connectionsSplitter",
     "objectsSplitter",
@@ -192,7 +193,7 @@ export function initWorkspaceLayout({
   const rootStyle = document.documentElement.style;
   const sizes = () => [
     elements.workspaceBody.clientWidth,
-    elements.editorResult.clientHeight,
+    elements.editorResult.clientHeight - (elements.editorResult.classList.contains('has-editor-footer') ? elements.editorFooter.offsetHeight : 0),
     elements.sidebarSplit.clientHeight,
   ];
   const listen = (element, event, handler, options) => {
@@ -214,6 +215,9 @@ export function initWorkspaceLayout({
     element.tabIndex = visible ? 0 : -1;
   };
   const historyPosition = (layout, height) => layout.historyAvailable - height;
+  const hasSummary = () => elements.editorResult.classList.contains("sql-summary-only");
+  const summaryHeightProperty = "--summary-results-height";
+  rootStyle.setProperty("--summary-editor-minimum", `${LIMITS.editorMin + LIMITS.rowSeparator + 37}px`);
   const separatorSizes = (kind) => {
     if (kind === "history") {
       return [
@@ -222,7 +226,10 @@ export function initWorkspaceLayout({
         historyPosition(applied, applied.historyHeight),
       ];
     }
-    if (kind === "editor") return [LIMITS.editorMin, applied.editorMax, applied.editorHeight];
+    if (kind === "editor") {
+      if (hasSummary()) return [LIMITS.editorMin, applied.editorAvailable, elements.editorPane.getBoundingClientRect().height];
+      return [LIMITS.editorMin, applied.editorMax, applied.editorHeight];
+    }
     return [LIMITS[`${kind}Min`], applied[`${kind}Max`], applied[`${kind}Width`]];
   };
   const render = () => {
@@ -273,9 +280,7 @@ export function initWorkspaceLayout({
     );
     setSeparator(
       elements.editorSplitter,
-      LIMITS.editorMin,
-      applied.editorMax,
-      applied.editorHeight,
+      ...separatorSizes("editor"),
     );
   };
   const schedule = () => {
@@ -293,6 +298,9 @@ export function initWorkspaceLayout({
       preferences.historyCollapsed = height <= current.historyCollapsedHeight + 8;
       if (preferences.historyCollapsed) preferences.historyHeight = beforeDrag?.historyHeight ?? preferences.historyHeight;
       else preferences.historyHeight = clamp(height, LIMITS.historyExpandedMin, current.historyMaxHeight);
+    } else if (kind === "editor" && hasSummary()) {
+      const height = current.editorAvailable - clamp(value, LIMITS.editorMin, current.editorAvailable);
+      elements.editorResult.style.setProperty(summaryHeightProperty, `${height}px`);
     } else if (kind === "editor")
       preferences.editorSize =
         (clamp(value, LIMITS.editorMin, current.editorMax) /
@@ -315,14 +323,20 @@ export function initWorkspaceLayout({
     if (!drag) return;
     const previous = drag;
     drag = null;
-    if (cancelled) preferences = previous.preferences;
+    if (cancelled) {
+      preferences = previous.preferences;
+      if (previous.summaryHeight !== undefined && hasSummary()) {
+        if (previous.summaryHeight) elements.editorResult.style.setProperty(summaryHeightProperty, previous.summaryHeight);
+        else elements.editorResult.style.removeProperty(summaryHeightProperty);
+      }
+    }
     previous.element.classList.remove("dragging");
     document.body.classList.remove("resizing");
     document.body.style.removeProperty("cursor");
     if (previous.element.hasPointerCapture?.(previous.pointerId))
       previous.element.releasePointerCapture(previous.pointerId);
     flush();
-    if (!cancelled) persist();
+    if (!cancelled && previous.moved) persist();
   };
   for (const kind of ["connections", "objects", "editor", "history"]) {
     const element = elements[`${kind}Splitter`];
@@ -332,7 +346,9 @@ export function initWorkspaceLayout({
       "aria-orientation",
       horizontal ? "horizontal" : "vertical",
     );
-    element.title = `${element.getAttribute("aria-label")} · 拖动或方向键调整，双击重置`;
+    const instructions = "拖动或方向键调整，双击重置";
+    if (kind === "editor") element.setAttribute("aria-description", instructions);
+    else element.title = `${element.getAttribute("aria-label")} · ${instructions}`;
     listen(element, "pointerdown", (event) => {
       if (event.button !== 0 || drag) return;
       flush();
@@ -344,6 +360,8 @@ export function initWorkspaceLayout({
         start: horizontal ? event.clientY : event.clientX,
         base: separatorSizes(kind)[2],
         preferences: { ...preferences },
+        moved: false,
+        summaryHeight: kind === "editor" && hasSummary() ? elements.editorResult.style.getPropertyValue(summaryHeightProperty) : undefined,
       };
       element.classList.add("dragging");
       document.body.classList.add("resizing");
@@ -358,10 +376,14 @@ export function initWorkspaceLayout({
     const move = (event) => {
       if (drag?.element !== element || drag.pointerId !== event.pointerId)
         return;
-      adjust(
-        kind,
-        drag.base + (horizontal ? event.clientY : event.clientX) - drag.start,
-      );
+      if (kind === "editor" && (drag.summaryHeight !== undefined) !== hasSummary()) {
+        finishDrag(true);
+        return;
+      }
+      const offset = (horizontal ? event.clientY : event.clientX) - drag.start;
+      if (!drag.moved && offset === 0) return;
+      drag.moved = true;
+      adjust(kind, drag.base + offset);
     };
     const up = (event) => {
       if (drag?.element !== element || drag.pointerId !== event.pointerId)
@@ -371,8 +393,11 @@ export function initWorkspaceLayout({
     };
     listen(window, "pointermove", move);
     listen(window, "pointerup", up);
-    listen(element, "pointercancel", () => finishDrag(true));
-    listen(element, "lostpointercapture", () => finishDrag(true));
+    const cancel = (event) => {
+      if (drag?.element === element && drag.pointerId === event.pointerId) finishDrag(true);
+    };
+    listen(element, "pointercancel", cancel);
+    listen(element, "lostpointercapture", cancel);
     listen(element, "keydown", (event) => {
       if (event.key === "Escape" && drag) {
         finishDrag(true);
@@ -400,6 +425,11 @@ export function initWorkspaceLayout({
     });
     listen(element, "dblclick", () => {
       finishDrag(true);
+      if (kind === "editor" && hasSummary()) {
+        elements.editorResult.style.removeProperty(summaryHeightProperty);
+        flush();
+        return;
+      }
       const key = kind === "history" ? "historyHeight" : kind === "editor" ? "editorSize" : `${kind}Width`;
       preferences[key] = DEFAULT_LAYOUT[key];
       if (kind === "history") preferences.historyCollapsed = false;
@@ -445,6 +475,7 @@ export function initWorkspaceLayout({
   }
   listen(elements.resetLayout, "click", () => {
     finishDrag(true);
+    elements.editorResult.style.removeProperty(summaryHeightProperty);
     preferences = normalizeLayout();
     flush();
     persist();

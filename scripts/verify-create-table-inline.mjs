@@ -104,7 +104,7 @@ try {
         document.execCommand('insertText', false, text.replace(/\r\n?/g, '\n'));
       }, original);
       assert.equal(await field(label, 'comment').getAttribute('title'), original);
-      assert.equal(await dialog.getByRole('button', { name: '保存…', exact: true }).isEnabled(), true, 'backslash comments remain saveable with known SQL_MODE');
+      assert.equal(await dialog.getByRole('button', { name: '下一步', exact: true }).isEnabled(), true, 'backslash comments remain saveable with known SQL_MODE');
       await textarea.evaluate(node => { node.setSelectionRange(node.value.indexOf('第二行') + 3, node.value.indexOf('第二行') + 3); });
       await page.keyboard.insertText('修改');
       assert.equal(await field(label, 'comment').getAttribute('title'), original.replace('第二行', '第二行修改'));
@@ -123,7 +123,7 @@ try {
       assert.equal(await textarea.inputValue(), original.replace(/\r\n?/g, '\n'), 'row rerender must preserve full multiline comment');
       assert.equal(await field(label, 'comment').getAttribute('title'), original);
       await textarea.press('Escape');
-      await dialog.getByRole('button', { name: '保存…', exact: true }).click();
+      await dialog.getByRole('button', { name: '下一步', exact: true }).click();
       await dialog.getByLabel('表名', { exact: true }).fill('inline_layout_test');
       await dialog.getByLabel('表注释', { exact: true }).fill('主表说明');
       const sql = await dialog.locator('.structure-sql-preview pre').textContent();
@@ -162,7 +162,7 @@ try {
       }
       await expand.click(); const editor = page.locator('.structure-comment-dialog'), text = editor.locator('textarea');
       assert.equal(await text.inputValue(), original.replace(/\r\n?/g, '\n'));
-      await text.press('Escape'); assert.equal(await parent.getByRole('button', { name: '预览并应用', exact: true }).isDisabled(), true);
+      await text.press('Escape'); assert.equal(await parent.getByRole('button', { name: '下一步', exact: true }).isDisabled(), true);
       await expand.click(); await text.evaluate(node => { const start = node.value.indexOf('second'); node.setSelectionRange(start, start + 6); });
       await page.keyboard.insertText('第二行'); const edited = original.replace('second', '第二行');
       assert.equal(await input.getAttribute('title'), edited);

@@ -1,4 +1,4 @@
-use crate::{postgres_error, timeout_error, transaction_script, ActiveQuery, QueryResponse, MAX_RESULT_ROWS, QUERY_TIMEOUT};
+use crate::{postgres_error, timeout_error, transaction_script, ActiveQuery, QueryEditSource, QueryResponse, QueryStatementSummary, MAX_RESULT_ROWS, QUERY_TIMEOUT};
 use futures_util::StreamExt;
 use serde_json::Value;
 use std::{
@@ -314,12 +314,47 @@ fn allowed_write(sql: &str) -> bool {
     )
 }
 
+async fn query_edit_source(client: &Client, statement: &tokio_postgres::Statement, relation: Option<&[String]>) -> Option<QueryEditSource> {
+    let parts = relation?;
+    if !(1..=2).contains(&parts.len()) || parts.iter().any(|part| part.is_empty() || part.contains('\0')) {
+        return None;
+    }
+    let qualified = parts.iter().map(|part| format!("\"{}\"", part.replace('"', "\"\""))).collect::<Vec<_>>().join(".");
+    let oid = statement.columns().first()?.table_oid()?;
+    let attributes = statement.columns().iter().map(|column| {
+        if column.table_oid() != Some(oid) { return None; }
+        column.column_id().filter(|&number| number > 0).map(Value::from)
+    }).collect::<Option<Vec<_>>>()?;
+    let row = client.query_opt(
+        "SELECT n.nspname, c.relname FROM pg_catalog.pg_class c
+         JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+         WHERE c.oid = $1 AND c.oid = pg_catalog.to_regclass($2)
+           AND c.relpersistence <> 't'
+           AND (c.relkind = 'p' OR (c.relkind = 'r' AND NOT EXISTS
+                (SELECT 1 FROM pg_catalog.pg_inherits i WHERE i.inhparent = c.oid)))",
+        &[&oid, &qualified],
+    ).await.ok()??;
+    Some(QueryEditSource { object_id: oid.to_string(), schema: row.get(0), name: row.get(1), attributes })
+}
+
+#[cfg(test)]
 pub async fn execute_read_only(
     client: &mut Client,
     sql: &str,
     cancelled: &Arc<AtomicBool>,
     query_id: &str,
     started: Instant,
+) -> Result<QueryResponse, String> {
+    execute_read_only_with_source(client, sql, cancelled, query_id, started, None).await
+}
+
+pub async fn execute_read_only_with_source(
+    client: &mut Client,
+    sql: &str,
+    cancelled: &Arc<AtomicBool>,
+    query_id: &str,
+    started: Instant,
+    relation: Option<&[String]>,
 ) -> Result<QueryResponse, String> {
     if !allowed(sql) {
         return Err("当前连接仅允许只读 SQL（SELECT / WITH / EXPLAIN / SHOW / VALUES）".into());
@@ -407,16 +442,19 @@ pub async fn execute_read_only(
                 _ => {}
             }
         }
+        let edit_source = if rows.is_empty() { None } else { query_edit_source(client, &statement, relation).await };
         Ok(QueryResponse {
             row_count: rows.len(),
             statement_count: 1,
             columns,
             rows,
+            edit_source,
             elapsed_ms: started.elapsed().as_secs_f64() * 1000.0,
             truncated: truncated_reason.is_some(),
             truncated_reason,
             query_id: query_id.to_string(),
             transaction_script: None,
+            statement_summaries: vec![],
         })
     })
     .await;
@@ -496,6 +534,7 @@ async fn execute_write_with_types(
             }
             None => Vec::new(),
         };
+        let mut statement_started = Instant::now();
         let stream = client
             .simple_query_raw(sql)
             .await
@@ -505,6 +544,7 @@ async fn execute_write_with_types(
         let mut rows: Vec<Vec<Value>> = Vec::new();
         let mut affected_rows = 0usize;
         let mut completed = 0usize;
+        let mut statement_summaries = Vec::with_capacity(statement_count);
         let mut has_result_set = false;
         let mut bytes = 0usize;
         let mut truncated_reason = None;
@@ -555,7 +595,18 @@ async fn execute_write_with_types(
                     );
                 }
                 tokio_postgres::SimpleQueryMessage::CommandComplete(count) => {
+                    let finished = Instant::now();
                     affected_rows = count as usize;
+                    if let Some(statement) = statements.get(completed) {
+                        statement_summaries.push(QueryStatementSummary {
+                            sql: statement.trim().to_string(),
+                            elapsed_ms: finished.duration_since(statement_started).as_secs_f64() * 1000.0,
+                            row_count: Some(if has_result_set { rows.len() } else { affected_rows }),
+                            has_result_set,
+                            truncated: truncated_reason.is_some() && has_result_set,
+                        });
+                    }
+                    statement_started = finished;
                     completed += 1;
                     if !has_result_set {
                         columns.clear();
@@ -585,6 +636,9 @@ async fn execute_write_with_types(
                 }
             }
         }
+        if completed != statement_count {
+            statement_summaries.clear();
+        }
         Ok(QueryResponse {
             row_count: if columns.is_empty() {
                 affected_rows
@@ -593,11 +647,13 @@ async fn execute_write_with_types(
             },
             columns,
             rows,
+            edit_source: None,
             elapsed_ms: started.elapsed().as_secs_f64() * 1000.0,
             truncated: truncated_reason.is_some(),
             truncated_reason,
             statement_count,
             transaction_script: None,
+            statement_summaries,
             query_id: query_id.to_string(),
         })
     })
@@ -638,7 +694,9 @@ pub(crate) async fn execute_transaction_script(
     let deadline = tokio::time::Instant::from_std(started + QUERY_TIMEOUT);
     let mut current_statement = 0;
     let execution = tokio::time::timeout_at(deadline, async {
+        let begin_started = Instant::now();
         client.batch_execute("BEGIN").await.map_err(|error| postgres_error("开启脚本事务失败", &error))?;
+        let mut summaries = vec![QueryStatementSummary::transaction_control(statements[0], begin_started)];
         let mut result = transaction_script::empty_response(query_id);
         for (index, statement) in body.iter().enumerate() {
             current_statement = index + 1;
@@ -652,7 +710,9 @@ pub(crate) async fn execute_transaction_script(
                 .await.map_err(|message| {
                     message.strip_prefix("第 1 条 SQL ").map(str::to_owned).unwrap_or(message)
                 })?;
+            summaries.append(&mut result.statement_summaries);
         }
+        result.statement_summaries = summaries;
         Ok::<_, String>(result)
     }).await;
 
@@ -682,6 +742,7 @@ pub(crate) async fn execute_transaction_script(
                 .at(sql, &statements, current_statement, false).with_rollback(rollback));
         }
     };
+    let end_started = Instant::now();
     if let Err(cause) = finish_transaction(client, end == transaction_script::End::Commit,
         deadline.saturating_duration_since(tokio::time::Instant::now())).await {
         let rollback = if cause.contains("[TX_ROLLED_BACK]") { Ok(()) }
@@ -689,6 +750,7 @@ pub(crate) async fn execute_transaction_script(
         return Err(transaction_script::ScriptError::from(cause)
             .at(sql, &statements, statements.len() - 1, false).with_rollback(rollback));
     }
+    result.statement_summaries.push(QueryStatementSummary::transaction_control(statements[statements.len() - 1], end_started));
     result.statement_count = body.len();
     result.elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
     result.transaction_script = Some(end);

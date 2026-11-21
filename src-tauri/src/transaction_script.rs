@@ -168,10 +168,12 @@ pub(crate) fn empty_response(query_id: &str) -> crate::QueryResponse {
         statement_count: 0,
         columns: vec![],
         rows: vec![],
+        edit_source: None,
         row_count: 0,
         elapsed_ms: 0.0,
         truncated: false,
         truncated_reason: None,
         transaction_script: None,
+        statement_summaries: vec![],
     }
 }

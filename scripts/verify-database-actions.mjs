@@ -165,13 +165,13 @@ try {
   await designer.getByRole('button', { name: '＋ 添加字段', exact: true }).click();
   const noteField = designer.locator('[data-field-row="1"][data-field="name"]');
   await noteField.fill('id');
-  expect(await designer.getByRole('button', { name: '保存…', exact: true }).isDisabled(), 'duplicate columns accepted');
+  expect(await designer.getByRole('button', { name: '下一步', exact: true }).isDisabled(), 'duplicate columns accepted');
   await noteField.fill('note');
   await chooseAppSelect(designer.locator('[data-default-mode]').nth(1), 'expression');
   await designer.locator('[data-field-row="1"][data-field="defaultValue"]').fill("'draft'");
   await designer.locator('[data-field-row="1"][data-field="comment"]').fill('说明');
   await page.screenshot({ path: resolve(evidence, 'new-table-fields.png') });
-  await designer.getByRole('button', { name: '保存…', exact: true }).click();
+  await designer.getByRole('button', { name: '下一步', exact: true }).click();
   const nameField = designer.getByLabel('表名', { exact: true });
   const createButton = designer.getByRole('button', { name: '创建表', exact: true });
   expect(await createButton.isDisabled(), 'empty table name accepted');
@@ -181,7 +181,7 @@ try {
   expect((await designer.locator('pre').innerText()).includes('CREATE TABLE "reporting"."items""new"'), 'final SQL did not quote the table name');
   await page.keyboard.press('Escape');
   expect(await nameField.isHidden() && await noteField.inputValue() === 'note', 'Escape discarded field draft');
-  await designer.getByRole('button', { name: '保存…', exact: true }).click();
+  await designer.getByRole('button', { name: '下一步', exact: true }).click();
   expect(await nameField.inputValue() === 'items"new', 'returning to save lost the name');
   expect(fixture.callsFor('execute_mutation').length === beforeTable, 'saving draft executed SQL before final confirmation');
   for (const theme of ['dark', 'light']) {
@@ -194,7 +194,7 @@ try {
   expect(await nameField.inputValue() === 'items"new', 'failed creation discarded the name');
   await designer.getByRole('button', { name: '返回编辑', exact: true }).click();
   expect(await noteField.inputValue() === 'note', 'failed creation discarded fields');
-  await designer.getByRole('button', { name: '保存…', exact: true }).click();
+  await designer.getByRole('button', { name: '下一步', exact: true }).click();
   failTableCreate = false;
   await createButton.click();
   await designer.waitFor({ state: 'hidden' });
@@ -262,7 +262,7 @@ try {
   expect(fixture.callsFor('execute_mutation').at(-1).args.request.sql === 'DROP DATABASE `warehouse_reporting`;', 'wrong database deletion SQL');
   await openMenu('warehouse');
   await action("create-table").click();
-  await designer.getByRole('button', { name: '保存…', exact: true }).click();
+  await designer.getByRole('button', { name: '下一步', exact: true }).click();
   await nameField.fill('items');
   await chooseAppSelect(designer.locator('select[aria-label="字符集"]'), 'utf8mb4');
   await chooseAppSelect(designer.locator('select[aria-label="排序规则"]'), 'utf8mb4_bin');

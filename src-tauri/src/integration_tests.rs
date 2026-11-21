@@ -27,6 +27,57 @@ async fn connect() -> Client {
 
 #[tokio::test]
 #[ignore = "requires a disposable PostgreSQL, never a user database"]
+async fn postgres_query_edit_source_runtime_contract() {
+    let mut client = connect().await;
+    client.batch_execute("
+        CREATE SCHEMA edit_source_probe;
+        CREATE TABLE edit_source_probe.orders (id bigint PRIMARY KEY, obsolete text, name text);
+        ALTER TABLE edit_source_probe.orders DROP COLUMN obsolete;
+        INSERT INTO edit_source_probe.orders VALUES (1, 'before');
+        CREATE VIEW edit_source_probe.orders_view AS SELECT * FROM edit_source_probe.orders;
+        CREATE TABLE edit_source_probe.inherited () INHERITS (edit_source_probe.orders);
+        CREATE TABLE edit_source_probe.plain_orders (id bigint PRIMARY KEY, name text);
+        INSERT INTO edit_source_probe.plain_orders VALUES (1, 'before');
+    ").await.unwrap();
+    let cancelled = Arc::new(AtomicBool::new(false));
+    for (sql, relation, expected) in [
+        ("SELECT * FROM edit_source_probe.plain_orders WHERE id = 1", "plain_orders", Some(vec![1, 2])),
+        ("SELECT id, upper(name) AS name FROM edit_source_probe.plain_orders", "plain_orders", None),
+        ("SELECT * FROM edit_source_probe.orders", "orders", None),
+        ("SELECT * FROM edit_source_probe.orders_view", "orders_view", None),
+    ] {
+        let source = query::execute_read_only_with_source(
+            &mut client, sql, &cancelled, "editable-source", Instant::now(),
+            Some(&["edit_source_probe".to_string(), relation.to_string()]),
+        ).await.unwrap().edit_source;
+        assert_eq!(source.map(|source| source.attributes), expected.map(|ids| ids.into_iter().map(Value::from).collect()));
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires DB_STUDIO_TEST_MYSQL_URL pointing to a disposable MySQL database"]
+async fn mysql_query_edit_source_runtime_contract() {
+    use mysql_async::{prelude::Queryable, Opts, Pool};
+    let url = std::env::var("DB_STUDIO_TEST_MYSQL_URL").expect("disposable MySQL database");
+    let pool = Pool::new(Opts::from_url(&url).unwrap());
+    let mut conn = pool.get_conn().await.unwrap();
+    conn.query_drop("CREATE TABLE edit_source_orders (id bigint PRIMARY KEY, name varchar(30))").await.unwrap();
+    conn.query_drop("INSERT INTO edit_source_orders VALUES (1, 'before')").await.unwrap();
+    conn.query_drop("CREATE VIEW edit_source_view AS SELECT * FROM edit_source_orders").await.unwrap();
+    drop(conn);
+    for (sql, relation, expected) in [
+        ("SELECT * FROM edit_source_orders WHERE id = 1", "edit_source_orders", true),
+        ("SELECT id, upper(name) AS name FROM edit_source_orders", "edit_source_orders", false),
+        ("SELECT * FROM edit_source_view", "edit_source_view", false),
+    ] {
+        let response = mysql::execute_read_only_with_source(&pool, sql, "editable-mysql", Instant::now(), Some(&[relation.to_string()])).await.unwrap();
+        assert_eq!(response.edit_source.map(|source| source.attributes), expected.then(|| vec![Value::from("id"), Value::from("name")]));
+    }
+    pool.disconnect().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires a disposable PostgreSQL, never a user database"]
 async fn postgres_catalog_write_timeout_runtime_contract() {
     let client = connect().await;
     client.batch_execute("CREATE TEMP TABLE timeout_probe (id integer)").await.unwrap();
@@ -175,6 +226,12 @@ async fn mysql_transaction_script_runtime_contract() {
     assert_eq!(result.transaction_script, Some(transaction_script::End::Commit));
     assert_eq!(result.statement_count, 2);
     assert_eq!(result.rows, vec![vec![serde_json::json!("a;b")]]);
+    assert_eq!(result.statement_summaries.len(), 4);
+    assert!(result.statement_summaries[1].sql.ends_with("VALUES (1, 'a;b')"));
+    assert_eq!(result.statement_summaries[1].row_count, Some(1));
+    assert!(!result.statement_summaries[1].has_result_set);
+    assert!(result.statement_summaries[2].has_result_set);
+    assert_eq!(result.statement_summaries[3].sql, "COMMIT");
     let failed_sql = format!("INSERT INTO {name} VALUES (1, 'duplicate');");
     let before_failure = format!("/* BEGIN */; BEGIN; UPDATE {name} SET label='changed'; -- 🐬
   {failed_sql} COMMIT;");
@@ -341,6 +398,64 @@ async fn mysql_reconnect_runtime_contract() -> Result<(), String> {
     admin.disconnect().await.unwrap();
     pool.disconnect().await.unwrap();
     Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires DB_STUDIO_TEST_MYSQL_URL pointing to a disposable MySQL database"]
+async fn mysql_catalog_filters_names_without_database_access() {
+    use mysql_async::{prelude::Queryable, Opts, OptsBuilder, Pool};
+    let opts = Opts::from_url(&std::env::var("DB_STUDIO_TEST_MYSQL_URL").unwrap()).unwrap();
+    let admin = Pool::new(opts.clone());
+    let mut connection = admin.get_conn().await.unwrap();
+    let suffix = uuid::Uuid::new_v4().simple().to_string();
+    let allowed = format!("catalog_allowed_{suffix}");
+    let blocked = format!("catalog_blocked_{suffix}");
+    let user = format!("catalog_{}", &suffix[..20]);
+    connection.query_drop(format!("CREATE DATABASE `{allowed}`")).await.unwrap();
+    connection.query_drop(format!("CREATE DATABASE `{blocked}`")).await.unwrap();
+    connection.query_drop(format!("CREATE TABLE `{allowed}`.`item` (id INT)")).await.unwrap();
+    connection.query_drop(format!("CREATE USER '{user}'@'%'")).await.unwrap();
+    connection.query_drop(format!("GRANT SHOW DATABASES ON *.* TO '{user}'@'%'")).await.unwrap();
+    connection.query_drop(format!("GRANT SELECT ON `{allowed}`.`item` TO '{user}'@'%'")).await.unwrap();
+    let limited = Pool::new(OptsBuilder::from_opts(opts).user(Some(user.clone())).pass(Some("")).db_name(None::<String>));
+    let mut catalog = limited.get_conn().await.unwrap();
+    let visible: Vec<String> = catalog.query("SELECT SCHEMA_NAME FROM information_schema.SCHEMATA").await.unwrap();
+    assert!(visible.contains(&blocked));
+    drop(catalog);
+    let databases = mysql::list_databases(&limited).await.unwrap();
+    assert!(databases.iter().any(|database| database.name == allowed && database.allow_connections));
+    assert!(databases.iter().any(|database| database.name == "information_schema"));
+    assert!(!databases.iter().any(|database| database.name == blocked));
+    assert!(databases.iter().all(|database| !database.current));
+    let mut catalog = limited.get_conn().await.unwrap();
+    let current: Option<Option<String>> = catalog.query_first("SELECT DATABASE()").await.unwrap();
+    assert_eq!(current, Some(None));
+    drop(catalog);
+    limited.disconnect().await.unwrap();
+    connection.query_drop(format!("DROP USER '{user}'@'%'")).await.unwrap();
+    connection.query_drop(format!("DROP DATABASE `{allowed}`")).await.unwrap();
+    connection.query_drop(format!("DROP DATABASE `{blocked}`")).await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires a disposable PostgreSQL, never a user database"]
+async fn postgres_catalog_filters_databases_without_connect_privilege() {
+    let client = connect().await;
+    let suffix = uuid::Uuid::new_v4().simple().to_string();
+    let allowed = format!("catalog_allowed_{suffix}");
+    let blocked = format!("catalog_blocked_{suffix}");
+    let role = format!("catalog_role_{suffix}");
+    client.batch_execute(&format!("CREATE DATABASE {allowed}")).await.unwrap();
+    client.batch_execute(&format!("CREATE DATABASE {blocked}")).await.unwrap();
+    client.batch_execute(&format!("CREATE ROLE {role}; REVOKE CONNECT ON DATABASE {blocked} FROM PUBLIC; SET ROLE {role}")).await.unwrap();
+    let databases = catalog::list_databases(&client).await.unwrap();
+    assert!(databases.iter().any(|database| database.name == allowed && database.allow_connections));
+    assert!(!databases.iter().any(|database| database.name == blocked));
+    assert!(!databases.iter().any(|database| database.name == "template1"));
+    client.batch_execute("RESET ROLE").await.unwrap();
+    client.batch_execute(&format!("DROP DATABASE {allowed}")).await.unwrap();
+    client.batch_execute(&format!("DROP DATABASE {blocked}")).await.unwrap();
+    client.batch_execute(&format!("DROP ROLE {role}")).await.unwrap();
 }
 
 #[tokio::test]
@@ -742,6 +857,13 @@ async fn postgres_transaction_script_runtime_contract() {
     assert_eq!(result.transaction_script, Some(transaction_script::End::Commit));
     assert_eq!(result.statement_count, 2);
     assert_eq!(result.rows, vec![vec![serde_json::json!("a;b")]]);
+    assert_eq!(result.statement_summaries.len(), 4);
+    assert_eq!(result.statement_summaries[0].row_count, None);
+    assert!(result.statement_summaries[1].sql.ends_with("VALUES (1, $$a;b$$)"));
+    assert_eq!(result.statement_summaries[1].row_count, Some(1));
+    assert!(!result.statement_summaries[1].has_result_set);
+    assert!(result.statement_summaries[2].has_result_set);
+    assert_eq!(result.statement_summaries[3].row_count, None);
     let failed_sql = "INSERT INTO script_probe.items VALUES (1, 'duplicate');";
     let failing_script = format!("BEGIN;\n UPDATE script_probe.items SET label='变更 🐘'; -- 注释\n {failed_sql}\n COMMIT;");
     let error = query::execute_transaction_script(&client, &failing_script,
@@ -1115,6 +1237,11 @@ async fn postgres_catalog_and_query_runtime_contract() {
     .await
     .unwrap();
     assert!(final_ddl.columns.is_empty() && final_ddl.rows.is_empty());
+    assert_eq!(final_ddl.statement_summaries.len(), 2);
+    assert!(final_ddl.statement_summaries[0].has_result_set);
+    assert_eq!(final_ddl.statement_summaries[0].row_count, Some(1));
+    assert!(!final_ddl.statement_summaries[1].has_result_set);
+    assert_eq!(final_ddl.statement_summaries[1].row_count, Some(0));
     let control = query::execute_write(
         &client,
         "CREATE TABLE app.must_not_exist (id int); COMMIT;",

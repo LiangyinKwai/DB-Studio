@@ -133,9 +133,9 @@
             ><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4.5 4.5"/></svg
             ><select id="redisSearchDatabase" aria-label="选择 Key 搜索范围" title="搜索当前 DB 或当前实例的全部 DB" hidden></select><input
               id="objectSearch"
-              aria-label="搜索表、字段或 schema"
+              aria-label="搜索数据库、Schema 或对象"
               type="search"
-              placeholder="搜索表、字段或 schema…"
+              placeholder="搜索数据库、Schema 或对象…"
               autocomplete="off"
             /><kbd title="聚焦对象树筛选">⌘ ⇧ K</kbd></label
           >
@@ -171,7 +171,7 @@
           <div class="query-toolbar" id="queryToolbar">
             <div class="query-schema-control" id="queryTargetBar" hidden>
               <button id="querySchema" class="schema-select-trigger" type="button" aria-label="查询 Schema" aria-haspopup="listbox" aria-expanded="false" aria-controls="querySchemaList">
-                <svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3 7 4v10l-7 4-7-4V7l7-4Z M5 7l7 4 7-4 M12 11v10"/></svg>
+                <span id="queryTargetIcon" aria-hidden="true"></span>
                 <span id="querySchemaLabel"></span><span class="theme-chevron" aria-hidden="true"></span>
               </button>
               <div id="querySchemaMenu" class="schema-select-menu" hidden>
@@ -181,7 +181,6 @@
                 <div class="schema-select-footer"><span id="querySchemaCount"></span><span aria-hidden="true">↑↓ 选择 · ↵ 确认</span></div>
               </div>
               <span id="queryTargetContext" class="query-target-context" hidden></span>
-              <button id="refreshQueryTarget" class="icon-btn" type="button" title="刷新 Schema 列表" aria-label="刷新 Schema 列表"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.34 5.66M20 4v7h-7"/></svg></button>
             </div>
             <button class="primary-btn" id="runQuery">
               <svg class="ui-icon run-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M7.5 5.5v13l10.5-6.5-10.5-6.5Z" fill="currentColor" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/></svg><span class="run-spinner" aria-hidden="true"></span><span id="runLabel">执行</span
@@ -213,10 +212,6 @@
               aria-label="SQL 编辑区"
             >
               <div id="sqlEditor"></div>
-              <div class="editor-footer">
-                <span id="editorHint">PostgreSQL · 选中 SQL 可单独执行</span
-                ><span id="cursorPosition">Ln 1, Col 1</span>
-              </div>
             </section>
             <div
               class="splitter horizontal"
@@ -229,9 +224,9 @@
             <section class="results-pane" id="resultsPane" aria-label="查询结果区">
               <div class="result-heading">
                 <div class="result-tabs" role="tablist" aria-label="查询输出">
-                  <button class="result-tab active" id="resultTab" role="tab">
+                  <button class="result-tab active" id="resultTab" role="tab" aria-controls="resultGrid">
                     数据 <span id="resultCount">—</span></button
-                  ><button class="result-tab" id="messageTab" role="tab">
+                  ><button class="result-tab" id="messageTab" role="tab" aria-controls="messagePanel">
                     消息
                   </button><button class="result-tab active" id="objectDetailTab" type="button" role="tab" aria-selected="true" aria-controls="structurePanel" hidden>详情</button>
                 </div>
@@ -275,16 +270,19 @@
                   class="structure-panel scroll-area"
                   hidden
                 ></div>
-                <pre
-                  id="messagePanel"
-                  class="message-panel scroll-area"
-                  hidden
-                ></pre>
+                <div id="messagePanel" class="query-output scroll-area" role="tabpanel" aria-labelledby="messageTab" tabindex="0" hidden>
+                  <table class="query-summary" id="executionSummary" aria-label="执行摘要" hidden>
+                    <colgroup><col class="summary-index"><col><col class="summary-time"><col class="summary-status"><col class="summary-result"></colgroup>
+                    <thead><tr><th scope="col">#</th><th scope="col">SQL</th><th scope="col">耗时</th><th scope="col">状态</th><th scope="col">结果</th></tr></thead>
+                    <tbody id="executionSummaryRows"></tbody>
+                  </table>
+                  <pre id="queryMessage" class="message-panel"></pre>
+                </div>
               </div>
               <div class="result-footer" id="resultFooter">
                 <div class="table-transaction-actions" id="tableTransactionActions" hidden></div>
-                <div class="result-footer-status">
-                  <div class="result-context" id="resultMeta">尚未执行查询</div>
+                <div class="result-footer-status" id="resultFooterStatus">
+                  <div class="result-context" id="resultMeta" role="status">尚未执行查询</div>
                   <div class="result-selection" id="resultSelection" hidden>
                     <span class="selection-count" id="selectionCount" role="status" aria-live="polite"></span>
                     <button class="quiet-btn" id="editRow" type="button" hidden disabled>编辑选中</button>
@@ -299,6 +297,12 @@
                 </div>
               </div>
             </section>
+            <div class="editor-footer" id="editorFooter">
+              <span id="editorHint">PostgreSQL · 选中 SQL 可单独执行</span>
+              <div class="query-footer-status" id="queryFooterStatus" hidden></div>
+              <div class="query-footer-grid" id="queryFooterGrid" hidden></div>
+              <span id="cursorPosition">Ln 1, Col 1</span>
+            </div>
           </div>
           <section class="redis-console" id="redisConsolePanel" hidden aria-label="Redis 命令工作区">
             <div class="redis-workspace-toolbar">
@@ -471,25 +475,47 @@
         <div class="dialog-actions"><span class="toolbar-spacer"></span><button class="secondary-btn" id="confirmActionCancel" value="cancel" autofocus>取消</button><button class="primary-btn" id="confirmActionAccept" value="accept">确认执行</button></div>
       </form>
     </dialog>
+    <dialog id="executionDetailsModal" class="execution-details-dialog" aria-labelledby="executionDetailsTitle">
+      <form method="dialog" class="connection-form">
+        <div class="dialog-header">
+          <h2 id="executionDetailsTitle">查看 SQL</h2>
+          <p id="executionDetailsTarget" class="selectable-text" hidden></p>
+        </div>
+        <div class="execution-details-body scroll-area" id="executionDetailsBody">
+          <div id="executionDiagnostic" hidden>
+            <h3>错误详情</h3>
+            <pre class="definition selectable-text" id="executionErrorMessage"></pre>
+          </div>
+          <h3>SQL</h3>
+          <pre class="definition selectable-text" id="executionDetailsSql"></pre>
+        </div>
+        <div class="dialog-actions">
+          <span class="toolbar-spacer"></span>
+          <button class="secondary-btn" type="button" id="copyExecutionError" hidden>复制错误</button>
+          <button class="secondary-btn" type="button" id="copyExecutionSql">复制 SQL</button>
+          <button class="primary-btn" id="closeExecutionDetails" type="submit" autofocus>关闭</button>
+        </div>
+      </form>
+    </dialog>
     <div class="context-menu" id="objectContextMenu" hidden role="menu">
       <div class="context-menu-title" id="objectContextTitle"></div>
       <button type="button" data-context-action="open-data"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 5h7l2 3h9v12H3z"/></svg><span data-context-label>打开表数据</span></button>
       <button type="button" data-context-action="open-structure"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="4" width="16" height="16" rx="1"/><path d="M4 10h16M10 10v10"/></svg><span data-context-label>查看表结构</span></button>
-      <button type="button" data-context-action="create-view"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 5h13v14H3zM3 9h13m3 0v8m-4-4h8"/></svg><span data-context-label>新建视图…</span></button>
-      <button type="button" data-context-action="create-materialized-view"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m3 8 8-4 8 4-8 4zM3 12l8 4 2-1M3 16l8 4 2-1m6-6v8m-4-4h8"/></svg><span data-context-label>新建物化视图…</span></button>
-      <button type="button" data-context-action="create-function"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M13 5h-2a3 3 0 0 0-3 3v9a3 3 0 0 1-3 3H3m2-9h7m6-1v8m-4-4h8"/></svg><span data-context-label>新建函数…</span></button>
-      <button type="button" data-context-action="create-procedure"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5l9 6-9 6zM18 12v8m-4-4h8"/></svg><span data-context-label>新建存储过程…</span></button>
+      <button type="button" data-context-action="create-view"><span class="catalog-create-icon" data-catalog-icon="view" aria-hidden="true"></span><span data-context-label>新建视图…</span></button>
+      <button type="button" data-context-action="create-materialized-view"><span class="catalog-create-icon" data-catalog-icon="materialized_view" aria-hidden="true"></span><span data-context-label>新建物化视图…</span></button>
+      <button type="button" data-context-action="create-function"><span class="catalog-create-icon" data-catalog-icon="function" aria-hidden="true"></span><span data-context-label>新建函数…</span></button>
+      <button type="button" data-context-action="create-procedure"><span class="catalog-create-icon" data-catalog-icon="procedure" aria-hidden="true"></span><span data-context-label>新建存储过程…</span></button>
       <button type="button" data-context-action="edit-view"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m14 5 5 5M5 14l10-10a2 2 0 0 1 3 0l2 2a2 2 0 0 1 0 3L10 19l-6 1z"/></svg><span data-context-label>编辑视图定义…</span></button>
       <button type="button" data-context-action="refresh-matview"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.34 5.66M20 4v7h-7"/></svg><span data-context-label>刷新物化视图…</span></button>
       <button type="button" data-context-action="edit-routine"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m14 5 5 5M5 14l10-10a2 2 0 0 1 3 0l2 2a2 2 0 0 1 0 3L10 19l-6 1z"/></svg><span data-context-label>编辑定义…</span></button>
       <button type="button" data-context-action="call-routine"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m8 6 10 6-10 6z"/></svg><span data-context-label>生成调用 SQL</span></button>
       <button type="button" data-context-action="edit-structure"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h9M4 12h6M4 18h6m3-2 7-7 2 2-7 7h-2z"/></svg><span data-context-label>编辑表结构…</span></button>
-      <button type="button" data-context-action="new-query"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m4 7 5 5-5 5m8 0h8"/></svg><span data-context-label>新建查询</span></button>
-      <button type="button" role="menuitem" data-context-action="new-database-query"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m4 7 5 5-5 5m8 0h8"/></svg><span data-context-label>新建查询</span></button>
+      <button type="button" data-context-action="new-query"><span class="catalog-create-icon" data-catalog-icon="query" aria-hidden="true"></span><span data-context-label>新建查询</span></button>
+      <button type="button" role="menuitem" data-context-action="new-database-query"><span class="catalog-create-icon" data-catalog-icon="query" aria-hidden="true"></span><span data-context-label>新建查询</span></button>
       <button type="button" data-context-action="save-tree-query"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4h13l3 3v13H4zM8 4v6h8V4M8 20v-6h8v6"/></svg><span data-context-label>保存当前 SQL 到查询</span></button>
-      <button type="button" role="menuitem" data-context-action="create-table"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="14" height="14" rx="1"/><path d="M3 9h14M9 9v9m10-4v8m-4-4h8"/></svg><span data-context-label>新建表…</span></button>
-      <button type="button" role="menuitem" data-context-action="create-schema"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 5h7l2 3h7v5M3 5v14h10m5-4v7m-4-3h8"/></svg><span data-context-label>新建 schema…</span></button>
-      <button type="button" role="menuitem" data-context-action="create-database"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><ellipse cx="10" cy="5" rx="7" ry="3"/><path d="M3 5v12c0 2 3 3 7 3m0-10c-4 0-7-1-7-3m14-2v7m2 2v8m-4-4h8"/></svg><span data-context-label>新建数据库…</span></button>
+      <button type="button" role="menuitem" data-context-action="create-table"><span class="catalog-create-icon" data-catalog-icon="table" aria-hidden="true"></span><span data-context-label>新建表…</span></button>
+      <button type="button" role="menuitem" data-context-action="create-schema"><span class="catalog-create-icon" data-catalog-icon="schema" aria-hidden="true"></span><span data-context-label>新建 schema…</span></button>
+      <button type="button" role="menuitem" data-context-action="create-database"><span class="catalog-create-icon" data-catalog-icon="database" aria-hidden="true"></span><span data-context-label>新建数据库…</span></button>
       <button type="button" data-context-action="rename-table"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m4 16 12-12 4 4-12 12H4zm10-10 4 4"/></svg><span data-context-label>重命名表…</span></button>
       <button type="button" data-context-action="mysql-characters"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m3 19 5-14 5 14M5 15h6m5-8h5m-2.5-2v2c0 5-2 8-5 10m2-7c1 3 3 5 6 7"/></svg><span data-context-label>查看字符集和排序规则…</span></button>
       <button type="button" role="menuitem" data-context-action="refresh-object"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.34 5.66M20 4v7h-7"/></svg><span data-context-label>刷新对象</span></button>
@@ -630,7 +656,7 @@
         <div class="dialog-actions">
           <span class="toolbar-spacer"></span>
           <button class="secondary-btn" id="cancelMutation" type="button">取消</button>
-          <button class="primary-btn" id="applyMutation" type="submit">执行</button>
+          <button class="primary-btn" id="applyMutation" type="submit">下一步</button>
         </div>
       </form>
     </dialog>

@@ -66,8 +66,17 @@ test("opening Redis history uses its database even with another active query", (
   assert.equal(runtime.redisTabDatabase(tab), 1);
 });
 
-test("SQL tabs retain their database and schema inheritance", () => {
+test("new queries follow the browser when the active tab uses another instance", () => {
   const runtime = fixture({ connectionId: "pg", database: "commerce", schema: "sales" });
+  const tab = runtime.addTab();
+  assert.equal(tab.connectionId, "redis");
+  assert.equal(tab.database, "0");
+  assert.equal(tab.schema, null);
+});
+
+test("without a browser selection, new SQL tabs reuse the current tab destination", () => {
+  const runtime = fixture({ connectionId: "pg", database: "commerce", schema: "sales" });
+  runtime.state.activeConnectionId = null;
   const tab = runtime.addTab();
   assert.equal(tab.connectionId, "pg");
   assert.equal(tab.database, "commerce");

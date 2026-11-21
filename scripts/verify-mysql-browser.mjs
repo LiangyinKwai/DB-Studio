@@ -110,7 +110,7 @@ try {
   const editor = page.locator('.structure-editor-dialog'); await editor.waitFor();
   assert.deepEqual(await editor.getByRole('tab').allInnerTexts(), ['字段', '索引', '约束', '触发器', '定义']);
   assert.equal(await page.locator('#resultFooter').isVisible(), false);
-  const apply = editor.getByRole('button', { name: '预览并应用' });
+  const apply = editor.getByRole('button', { name: '下一步' });
   assert.ok(await apply.isDisabled());
   await editor.getByRole('button', { name: 'status · 上移' }).click();
   assert.ok(await apply.isEnabled());

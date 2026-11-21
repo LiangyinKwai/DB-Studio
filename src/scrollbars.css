@@ -19,7 +19,7 @@ body .command-palette-results {
 body .db-grid-viewport,
 body .cm-scroller,
 body .structure-panel,
-body .message-panel,
+body .query-output,
 body .definition,
 body .redis-console-output,
 body .cell-dialog pre,

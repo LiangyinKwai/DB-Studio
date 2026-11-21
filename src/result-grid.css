@@ -93,6 +93,7 @@ body .db-grid-cell > .db-grid-edit-input.db-grid-edit-null::placeholder { color:
 .db-grid-cell-menu-item { display: block; width: 100%; padding: 7px 10px; border: 0; border-radius: 4px; background: transparent; color: inherit; text-align: left; font: inherit; cursor: pointer; }
 .db-grid-cell-menu-item:hover, .db-grid-cell-menu-item:focus-visible { outline: none; background: var(--selected-bg, #28283e); color: var(--accent-muted, #b9b1ff); }
 .db-grid-cell-menu-item:disabled { color: var(--app-muted, #8b97a9); opacity: .5; cursor: default; background: transparent; }
+.db-grid-menu-divider { height: 1px; margin: 4px; background: var(--app-border); }
 
 /* Column labels select data; sorting arrows never paint a button rectangle. */
 body .db-grid-column > .db-grid-column-name {

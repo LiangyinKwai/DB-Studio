@@ -224,21 +224,21 @@ try {
     await contrast(['.structure-editor-target', '.structure-editor-dialog .form-note', '.structure-editor-table input[type=text]:not(:disabled)', '.structure-editor-table .changed [data-column-status]', '.structure-sql-preview pre']);
     await page.screenshot({ path: resolve(evidence, `structure-editor-${theme}.png`) });
   }
-  await editor.getByRole('button', { name: '预览并应用', exact: true }).click();
+  await editor.getByRole('button', { name: '下一步', exact: true }).click();
   assert.match(await page.locator('#confirmActionModal').innerText(), /开发库 \/ app \/ public \/ orders/);
   await page.locator('#confirmActionModal [value="cancel"]').click();
   assert.equal(mutations.length, 0);
   assert.equal(await editor.locator('[data-field-row="3"][data-field="name"]').inputValue(), 'note');
   failMutation = true;
-  await editor.getByRole('button', { name: '预览并应用', exact: true }).click(); await confirm();
+  await editor.getByRole('button', { name: '下一步', exact: true }).click(); await confirm();
   await wait(async () => (await editor.locator('.dialog-feedback').innerText()).includes('类型转换失败'));
   assert.equal(await editor.locator('[data-field-row="3"][data-field="name"]').inputValue(), 'note');
   assert.equal(mutations.length, 1);
   staleCatalog = true; failMutation = false;
-  await editor.getByRole('button', { name: '预览并应用', exact: true }).click(); await confirm();
+  await editor.getByRole('button', { name: '下一步', exact: true }).click(); await confirm();
   await wait(async () => (await editor.locator('.dialog-feedback').innerText()).includes('其他操作修改'));
   assert.equal(mutations.length, 1); staleCatalog = false;
-  await editor.getByRole('button', { name: '预览并应用', exact: true }).click(); await confirm();
+  await editor.getByRole('button', { name: '下一步', exact: true }).click(); await confirm();
   await editor.waitFor({ state: 'detached' });
   assert.equal(mutations.length, 2);
   assert.equal(mutations[1].connectionId, 'conn-dev'); assert.equal(mutations[1].database, 'app'); assert.equal(mutations[1].schema, 'public');
@@ -276,7 +276,7 @@ try {
   await editor.locator('[data-field-row="4"][data-field="name"]').fill('remark');
   assert.match(await editor.locator('.structure-sql-preview pre').innerText(), /RENAME COLUMN `status` TO `state`,/);
   assert.match(await editor.locator('.structure-sql-preview pre').innerText(), /ADD COLUMN `remark` varchar\(255\)/);
-  await editor.getByRole('button', { name: '预览并应用', exact: true }).click(); await confirm();
+  await editor.getByRole('button', { name: '下一步', exact: true }).click(); await confirm();
   await editor.waitFor({ state: 'detached' });
   assert.equal(mutations.at(-1).connectionId, 'mysql-local');
   assert.deepEqual(errors, []);

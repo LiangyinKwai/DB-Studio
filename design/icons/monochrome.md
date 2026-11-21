@@ -1,4 +1,4 @@
-# DB Studio monochrome app icon
+# Keybay monochrome app icon
 
 Generated with built-in ImageGen using the existing icon as the edit target; exported using sips and the Tauri icon generator. The previous color PNG is preserved alongside the new source.
 

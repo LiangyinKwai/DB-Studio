@@ -2,8 +2,8 @@ export const MAX_RESULT_BYTES = 24 * 1024 * 1024;
 export const MAX_CACHED_RESULTS = 6;
 
 /** Approximate retained JSON values without creating a second serialized copy. */
-export function estimateResultBytes(result) {
-  const pending = [result?.columns, result?.rows];
+export function estimateResultBytes(result, statements) {
+  const pending = [result?.columns, result?.rows, statements];
   const seen = new WeakSet();
   let bytes = 0;
   while (pending.length) {
