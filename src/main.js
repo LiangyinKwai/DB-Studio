@@ -46,7 +46,7 @@ import { isQueryCancellation } from "./query-status.js";
 import { canHandleGlobalShortcut } from "./keyboard-shortcuts.js";
 import { isCurrentConnectionRequest } from "./request-state.js";
 import { initWorkspaceLayout } from "./workspace-layout.js";
-import { buildCompletionSchema, catalogCompletionSource, matchingColumns, mysqlCompletionDatabases, objectMatchesSearch, queryStructureObjects } from "./sql-catalog.js";
+import { buildCompletionSchema, catalogCompletionSource, matchingColumns, sqlCompletionNamespaces, objectMatchesSearch, queryStructureObjects } from "./sql-catalog.js";
 import { createConfirmationDialog } from "./confirmation-dialog.js";
 import { initDialogBackdropDismissal } from "./dialog-backdrop.js";
 import { queryEditRelation, sqlExecutionInfo, sqlTransactionAction } from "./sql-execution.js";
@@ -137,11 +137,21 @@ const textInputIme = initTextInputIme();
 const querySchemaSelect = createSchemaSelect({
   trigger: refs.querySchema, label: refs.querySchemaLabel, panel: refs.querySchemaMenu,
   search: refs.querySchemaSearch, list: refs.querySchemaList, empty: refs.querySchemaEmpty,
-  count: refs.querySchemaCount, onChange: changeQueryTarget,
+  count: refs.querySchemaCount, backButton: refs.querySchemaBack, onChange: changeQueryTarget,
+  onClose: () => {
+    if (!state.queryTargetNavigation) return;
+    state.queryTargetNavigation = null;
+    queueMicrotask(() => renderQueryTarget());
+  },
   onOpen: () => {
     const tab = activeTab();
     if (queryTargetLocked(tab)) return;
-    void loadQueryTarget(tab, true);
+    if (driverForTab(tab) === "postgres") {
+      const database = postgresMenuDatabase(tab);
+      const profile = state.profiles.find(item => item.id === tab.connectionId);
+      if (database) void loadQueryTarget({ connectionId: tab.connectionId, database }, true);
+      else if (profile && !queryDatabaseOptions(profile.id)) void loadQueryDatabaseList(profile, true);
+    } else void loadQueryTarget(tab, true);
     renderQueryTarget(tab);
   },
 });
@@ -287,7 +297,9 @@ function readTabs() {
         sql: tab.sql,
         connectionId: tab.connectionId || null,
         database: tab.database || tab.browse?.database || tab.openedObject?.database || null,
+        awaitingDatabase: tab.awaitingDatabase === true,
         schema: Object.hasOwn(tab, "schema") ? tab.schema : tab.browse?.schema ?? tab.openedObject?.schema ?? null,
+        awaitingSchema: tab.awaitingSchema === true,
         mode: tab.readOnly === true || tab.mode === "read" ? "read" : "write",
         browse: normalizedBrowse,
         openedObject: savedObject ? objectTabTarget(savedObject, savedObject.connectionId || tab.connectionId) : null,
@@ -319,13 +331,15 @@ function persistTabs() {
   state.persistTimer = null;
   return draftPersistence.save(() => {
     const tabs = restorableWorkspaceTabs(
-        state.tabs.map(({ id, title, sql, connectionId, database, schema, mode, browse, openedObject, openedObjectView, redisKey, redisDb, console, consoleHistory, tableView }) => ({
+        state.tabs.map(({ id, title, sql, connectionId, database, schema, awaitingDatabase, awaitingSchema, mode, browse, openedObject, openedObjectView, redisKey, redisDb, console, consoleHistory, tableView }) => ({
           id,
           title,
           sql,
           connectionId,
           database,
           schema,
+          ...(awaitingDatabase ? { awaitingDatabase: true } : {}),
+          ...(awaitingSchema ? { awaitingSchema: true } : {}),
           readOnly: mode === "read",
           redisKey: redisKey || null,
           redisDb: Number.isInteger(redisDb) ? redisDb : null,
@@ -450,6 +464,7 @@ function closeRedisConsole({ render = true } = {}) {
   if (render) { renderTabs(); renderOutput(); }
 }
 function tabDatabase(tab = activeTab()) {
+  if (tab?.awaitingDatabase) return "";
   return tab?.browse?.database || tab?.database || state.profiles.find((p) => p.id === tab?.connectionId)?.database || "";
 }
 function tabSchema(tab = activeTab()) {
@@ -461,19 +476,106 @@ function queryTargetKey(tab) {
 function queryTargetData(tab = activeTab()) {
   return state.queryTargets.get(queryTargetKey(tab));
 }
+function queryTreeSession(connectionId) {
+  return connectionId === state.activeConnectionId ? state : state.treeSessions.get(connectionId);
+}
+function queryDatabaseVisibility(connectionId) {
+  const tree = queryTreeSession(connectionId);
+  return tree?.databasesLoaded ? tree.visibleDatabases : readVisibleDatabases(connectionId);
+}
+function queryNamespaceVisibility(tab, database) {
+  const { connectionId } = tab;
+  if (driverForTab(tab) === "mysql")
+    return queryDatabaseVisibility(connectionId);
+  return queryTreeSession(connectionId)?.visibleSchemasByDatabase.get(database) || readVisibleSchemas(connectionId, database);
+}
 function queryTargetLocked(tab = activeTab()) {
   return !tab || Boolean(tab.structureOnly || (tab.browse && tab.tableView !== false) || tab.redisKey || tab.console || tab.running || tab.confirming || tab.resolvingTarget || tab.changingTransaction ||
-    tab.refreshing || cellWritePending(tab) || state.transactionKeys.has(queryTargetKey(tab)));
+    tab.refreshing || cellWritePending(tab) || (!tab.awaitingSchema && state.transactionKeys.has(queryTargetKey(tab))));
 }
-function queryTargetDescription(tab = activeTab()) {
+function queryTargetDescription(tab = activeTab(), { showVisibility = false } = {}) {
   const profile = state.profiles.find((item) => item.id === tab?.connectionId);
   const data = queryTargetData(tab);
   const database = tabDatabase(tab) || data?.context?.database || "未选择数据库";
-  const schema = tabSchema(tab) || (data?.context?.searchPath || []).join(" → ") || "无默认 schema";
-  return `${profile?.name || (tab?.connectionId ? "原连接不可用" : "未选择连接")} / ${database}${profile?.driver === "postgres" || !profile?.driver ? ` / ${schema}${tabSchema(tab) ? "" : "（默认搜索路径）"}` : ""}`;
+  const fixedSchema = tabSchema(tab);
+  const searchPath = data?.context?.searchPath || [];
+  const schema = fixedSchema || searchPath.join(" → ") || "无默认 schema";
+  const postgres = !profile?.driver || profile.driver === "postgres";
+  const visibleDatabases = showVisibility && tab?.connectionId && postgres ? queryDatabaseVisibility(tab.connectionId) : null;
+  const databaseHidden = !tab?.awaitingDatabase && visibleDatabases && !visibleDatabases.has(database);
+  const location = `${profile?.name || (tab?.connectionId ? "原连接不可用" : "未选择连接")} / ${database}${databaseHidden ? "（数据库已隐藏）" : ""}`;
+  if (postgres && tab?.awaitingDatabase) return location;
+  if (postgres && tab?.awaitingSchema) return `${location} / 未选择 Schema`;
+  const visible = showVisibility && tab && postgres ? queryNamespaceVisibility(tab, database) : null;
+  const hidden = visible && (fixedSchema ? !visible.has(fixedSchema) : searchPath.some(name => !visible.has(name)));
+  return `${location}${postgres ? ` / ${schema}${fixedSchema ? "" : "（默认搜索路径）"}${hidden ? " · 含已隐藏 Schema" : ""}` : ""}`;
+}
+function visibleQueryNamespaces(catalog, visible) {
+  return catalog.map(item => item.name).filter(name => !visible || visible.has(name));
+}
+function queryDatabaseOptions(connectionId) {
+  const tree = queryTreeSession(connectionId);
+  if (tree?.databasesLoaded) return visibleQueryNamespaces(tree.databases, tree.visibleDatabases);
+  const catalog = state.queryDatabaseLists.get(connectionId)?.databases;
+  if (!catalog) return null;
+  const visible = visibleQueryNamespaces(catalog, readVisibleDatabases(connectionId));
+  return visible.length ? visible : catalog.map(item => item.name);
+}
+function prepareInitialQuerySchema(tab) {
+  if (tab.schema) return;
+  tab.awaitingSchema = true;
+  tab.chooseInitialSchema = true;
+  const target = queryTargetData(tab);
+  if (target && !target.pending) initializeQuerySchema(tab, target);
+}
+function bindNewQueryDatabase(tab, database) {
+  tab.database = database;
+  tab.schema = null;
+  tab.awaitingDatabase = false;
+  tab.chooseInitialDatabase = false;
+  prepareInitialQuerySchema(tab);
+}
+function resolveInitialQueryDatabases(profile, visible) {
+  const database = visible.length === 1 ? visible[0] : null;
+  let changed = false;
+  for (const tab of state.tabs) {
+    if (tab.connectionId !== profile.id || !tab.chooseInitialDatabase) continue;
+    tab.chooseInitialDatabase = false;
+    if (!database) continue;
+    bindNewQueryDatabase(tab, database);
+    changed = true;
+  }
+  if (changed) persistTabs();
+}
+async function loadQueryDatabaseList(profile, retry = false) {
+  const { id } = profile;
+  const cached = state.queryDatabaseLists.get(id);
+  if (cached && (cached.loading || !retry)) return;
+  const entry = { loading: true };
+  state.queryDatabaseLists.set(id, entry);
+  try {
+    entry.databases = (await call("list_databases", { connectionId: id })).filter(database => database.allowConnections !== false);
+  } catch (error) {
+    entry.error = errorText(error);
+  }
+  if (state.queryDatabaseLists.get(id) !== entry) return;
+  entry.loading = false;
+  const visible = queryDatabaseOptions(id);
+  if (visible) resolveInitialQueryDatabases(profile, visible);
+  renderTabs();
+}
+function initializeQuerySchema(tab, data) {
+  if (data.catalogError) return false;
+  tab.chooseInitialSchema = false;
+  const visible = queryNamespaceVisibility(tab, tabDatabase(tab) || data.context?.database);
+  const schemas = visibleQueryNamespaces(data.catalog, visible);
+  if (schemas.length !== 1) return false;
+  tab.schema = schemas[0];
+  tab.awaitingSchema = false;
+  return true;
 }
 async function loadQueryTarget(tab = activeTab(), force = false) {
-  if (!tab?.connectionId || driverForTab(tab) === "redis") return null;
+  if (!tab?.connectionId || tab.awaitingDatabase || driverForTab(tab) === "redis") return null;
   const key = queryTargetKey(tab);
   const cached = state.queryTargets.get(key);
   if (cached?.pending) return cached.pending;
@@ -504,81 +606,135 @@ async function loadQueryTarget(tab = activeTab(), force = false) {
     else entry.catalogError = errorText(catalog.reason);
     entry.loading = false;
     entry.pending = null;
+    let initialized = false;
+    for (const candidate of state.tabs) {
+      if (candidate.chooseInitialSchema && queryTargetKey(candidate) === key) {
+        initialized = initializeQuerySchema(candidate, entry) || initialized;
+      }
+    }
+    if (initialized) persistTabs();
     renderTabs();
     return entry;
   })();
   return entry.pending;
 }
+function postgresMenuDatabase(tab) {
+  const navigation = state.queryTargetNavigation;
+  if (navigation?.tabId === tab.id) return navigation.database;
+  const database = tabDatabase(tab);
+  const visible = queryDatabaseVisibility(tab.connectionId);
+  return database && (!visible || visible.has(database)) ? database : null;
+}
+function selectPostgresMenuDatabase(tab, database) {
+  if (activeTab() !== tab || queryTargetLocked(tab) || !queryDatabaseOptions(tab.connectionId)?.includes(database)) return;
+  if (tab.awaitingDatabase || (tab.awaitingSchema && database !== tabDatabase(tab))) {
+    bindNewQueryDatabase(tab, database);
+    persistTabs();
+    renderTabs();
+  } else {
+    state.queryTargetNavigation = { tabId: tab.id, database };
+    renderQueryTarget(tab);
+  }
+}
+function renderPostgresQueryTarget(tab, profile) {
+  const database = tabDatabase(tab);
+  const schema = tabSchema(tab);
+  const visibleDatabases = queryDatabaseVisibility(profile.id);
+  const hiddenDatabase = database && visibleDatabases && !visibleDatabases.has(database);
+  const visibleSchemas = queryNamespaceVisibility(tab, database);
+  const hiddenSchema = schema && visibleSchemas && !visibleSchemas.has(schema);
+  const menuDatabase = postgresMenuDatabase(tab);
+  if (database && !queryTargetData(tab)) void loadQueryTarget(tab);
+  const menuTarget = menuDatabase ? { connectionId: profile.id, database: menuDatabase } : null;
+  if (menuTarget && !queryTargetData(menuTarget)) void loadQueryTarget(menuTarget);
+  const target = menuTarget ? queryTargetData(menuTarget) : null;
+  const databases = menuDatabase ? null : queryDatabaseOptions(profile.id);
+  if (!menuDatabase && !databases && !state.queryDatabaseLists.has(profile.id)) void loadQueryDatabaseList(profile);
+  const databaseList = state.queryDatabaseLists.get(profile.id);
+  const names = menuDatabase
+    ? visibleQueryNamespaces(target?.catalog || [], queryNamespaceVisibility(tab, menuDatabase))
+    : databases || [];
+  const label = !database || hiddenDatabase
+    ? "选择数据库"
+    : `${database} / ${schema && !hiddenSchema ? schema : tab.awaitingSchema || hiddenSchema ? "选择 Schema" : "默认路径"}`;
+  const currentSchema = menuDatabase === database ? schema : null;
+  querySchemaSelect.update({
+    contextKey: tab.id, level: menuDatabase, hidden: false, disabled: queryTargetLocked(tab),
+    refreshing: menuDatabase ? Boolean(target?.pending) : !databases && databaseList?.loading,
+    noun: menuDatabase ? "Schema" : "数据库",
+    value: currentSchema, selectedValue: menuDatabase ? currentSchema : database,
+    label, ariaLabel: `查询目标：${label}`,
+    options: names.map(name => ({ value: name, label: name })),
+    navigate: menuDatabase ? null : name => selectPostgresMenuDatabase(tab, name),
+    selectOption: menuDatabase ? name => changeQueryTarget(name, menuDatabase) : null,
+  });
+  refs.querySchemaPath.hidden = !menuDatabase;
+  refs.querySchemaDatabase.textContent = menuDatabase || "";
+  refs.querySchemaDatabase.title = menuDatabase || "";
+  refs.queryTargetContext.hidden = true;
+  const iconKind = !database || hiddenDatabase ? "database" : "schema";
+  if (refs.queryTargetIcon.dataset.kind !== iconKind) {
+    refs.queryTargetIcon.dataset.kind = iconKind;
+    refs.queryTargetIcon.innerHTML = iconKind === "database" ? databaseIcon : schemaIcon;
+  }
+  const detail = queryTargetDescription(tab, { showVisibility: true });
+  refs.querySchema.title = refs.queryTargetBar.title = refs.editorHint.title = refs.tableToolbarTitle.title = detail;
+  const error = menuDatabase ? target?.catalogError || target?.error : !databases && databaseList?.error;
+  refs.queryTargetDetail.textContent = error ? `读取${menuDatabase ? " Schema" : "数据库"}失败：${error} · 重新打开下拉列表重试` : "";
+  refs.queryTargetDetail.hidden = !error;
+  refs.queryTargetDetail.dataset.error = String(Boolean(error));
+}
 function renderQueryTarget(tab = activeExecutionTab()) {
   refs.queryTargetBar.hidden = !tab || Boolean(tab.console);
   refs.queryTargetDetail.hidden = true;
   if (!tab) {
+    refs.querySchemaPath.hidden = true;
     querySchemaSelect.update({ contextKey: null, hidden: true, disabled: true, options: [], value: "", label: "Schema" });
     return;
   }
-  const profile = state.profiles.find((item) => item.id === tab.connectionId);
-  const isRedis = profile?.driver === "redis";
+  const profile = state.profiles.find(item => item.id === tab.connectionId);
+  refs.queryTargetBar.dataset.driver = profile ? profile.driver || "postgres" : "";
+  if (profile && (profile.driver || "postgres") === "postgres") {
+    renderPostgresQueryTarget(tab, profile);
+    return;
+  }
+  refs.querySchemaPath.hidden = true;
   const isMysql = profile?.driver === "mysql";
-  const isPostgres = Boolean(profile && !isRedis && !isMysql);
-  let data = queryTargetData(tab);
-  if (profile && !isRedis && !data) {
-    void loadQueryTarget(tab);
-    data = queryTargetData(tab);
-  }
-  const selectedDatabase = tabDatabase(tab) || data?.context?.database || "";
-  const database = isRedis ? `DB ${redisTabDatabase(tab)}` : selectedDatabase || "未选择数据库";
-  const searchPath = data?.context?.searchPath || [];
-  const defaultPath = searchPath.join(" → ") || "无可用 schema";
-  const singleDefault = searchPath.length === 1 ? searchPath[0] : null;
-  const schema = tabSchema(tab);
-  const catalog = (data?.catalog || []).map(item => item.name);
-  const schemas = [...new Set([schema, ...catalog].filter(Boolean))];
-  const defaultLabel = data?.context ? `默认（${defaultPath}）` : data?.error ? "读取失败" : "读取中…";
-  // An existing fixed tab can share the default row without changing its binding.
-  const selectedValue = schema === singleDefault ? "" : schema || "";
+  if (isMysql && !queryTargetData(tab)) void loadQueryTarget(tab);
+  const data = queryTargetData(tab);
+  const database = tabDatabase(tab) || data?.context?.database || "";
+  const tree = queryTreeSession(tab.connectionId);
+  const visible = tree?.databasesLoaded && !tree.databaseVisibilityCustomized ? null : queryDatabaseVisibility(tab.connectionId);
+  const catalog = visibleQueryNamespaces((data?.catalog || []).filter(item => item.allowConnections !== false), visible);
+  const databases = [...new Set([database, ...catalog].filter(Boolean))];
   querySchemaSelect.update({
-    contextKey: `${tab.id}:${queryTargetKey(tab)}`, hidden: !profile || isRedis,
-    disabled: queryTargetLocked(tab) || !profile || Boolean(data?.loading),
+    contextKey: `${tab.id}:${queryTargetKey(tab)}`, hidden: !isMysql,
+    disabled: queryTargetLocked(tab) || Boolean(data?.loading),
     refreshing: Boolean(data?.pending && !data.loading),
-    noun: isMysql ? "数据库" : "Schema",
-    value: isMysql ? selectedDatabase : schema || "",
-    selectedValue: isMysql ? selectedDatabase : selectedValue,
-    label: isMysql ? selectedDatabase || "选择数据库" : selectedValue || defaultLabel,
-    options: isMysql ? [...new Set([selectedDatabase, ...catalog].filter(Boolean))].map(name => ({ value: name, label: name })) : [
-      singleDefault
-        ? { value: "", label: defaultLabel, countsAsSchema: true }
-        : { value: "", label: "跟随连接默认路径", detail: defaultPath },
-      ...schemas.filter((name) => name !== singleDefault).map((name) => ({
-        value: name,
-        label: name,
-        detail: searchPath.includes(name) ? "固定使用此 Schema" : "",
-      })),
-    ],
+    noun: "数据库", value: database, label: database || "选择数据库",
+    options: databases.map(name => ({
+      value: name, label: name, detail: visible && !visible.has(name) ? "当前数据库已在对象树中隐藏" : "",
+    })),
   });
-  const source = profile ? `${profile.name} / ${database}` : "请先从左侧选择连接";
-  const endpoint = profile ? `${profile.host}:${profile.port}${profile.user ? ` · ${profile.user}` : ""}` : "";
-  const scope = isPostgres ? `Schema：${schema ? `固定使用 ${schema}` : defaultLabel}\n未限定的表名按搜索路径解析，可用 Schema.表名访问同一数据库的其他 Schema。`
-    : isMysql ? "所选数据库用于解析未限定的表名，可用 数据库.表名 访问同一连接上的其他数据库。" : "";
-  const detail = [source, endpoint, scope].filter(Boolean).join("\n");
-  const iconKind = isMysql ? "database" : "schema";
-  if (refs.queryTargetIcon.dataset.kind !== iconKind) {
-    refs.queryTargetIcon.dataset.kind = iconKind;
-    refs.queryTargetIcon.innerHTML = isMysql ? databaseIcon : schemaIcon;
+  if (isMysql && refs.queryTargetIcon.dataset.kind !== "database") {
+    refs.queryTargetIcon.dataset.kind = "database";
+    refs.queryTargetIcon.innerHTML = databaseIcon;
   }
-  refs.querySchema.title = detail;
-  refs.queryTargetContext.hidden = isPostgres || isMysql;
-  refs.queryTargetContext.textContent = profile ? database : "未绑定连接";
+  const source = profile ? `${profile.name} / ${isMysql ? database || "未选择数据库" : `DB ${redisTabDatabase(tab)}`}` : "请先从左侧选择连接";
+  const endpoint = profile ? `${profile.host}:${profile.port}${profile.user ? ` · ${profile.user}` : ""}` : "";
+  const scope = isMysql ? "所选数据库用于解析未限定的表名，可用 数据库.表名 访问同一连接上的其他数据库。" : "";
+  const detail = [source, endpoint, scope].filter(Boolean).join("\n");
+  refs.querySchema.title = refs.queryTargetBar.title = refs.editorHint.title = refs.tableToolbarTitle.title = detail;
+  refs.queryTargetContext.hidden = isMysql;
+  refs.queryTargetContext.textContent = profile ? `DB ${redisTabDatabase(tab)}` : "未绑定连接";
   refs.queryTargetContext.title = detail;
-  refs.queryTargetBar.title = detail;
   refs.queryTargetDetail.textContent = !profile ? tab.connectionId ? "原连接已不可用。SQL 草稿已保留，可复制到新建查询中继续。" : "从左侧选择连接，或在 Schema 上右键新建查询。"
     : data?.error ? `无法确认执行位置：${data.error} · 重新打开下拉列表重试`
-    : data?.catalogError ? `${isMysql ? "数据库" : "Schema"} 列表读取失败：${data.catalogError} · 重新打开下拉列表重试` : "";
+    : data?.catalogError ? `数据库列表读取失败：${data.catalogError} · 重新打开下拉列表重试` : "";
   refs.queryTargetDetail.hidden = !refs.queryTargetDetail.textContent || Boolean(tab.console);
   refs.queryTargetDetail.dataset.error = String(Boolean(data?.error || data?.catalogError));
-  refs.tableToolbarTitle.title = detail;
-  refs.editorHint.title = detail;
 }
-async function changeQueryTarget(value) {
+async function changeQueryTarget(value, database = null) {
   const tab = activeTab();
   const driver = driverForTab(tab);
   if (queryTargetLocked(tab) || !["postgres", "mysql"].includes(driver)) return renderQueryTarget(tab);
@@ -600,7 +756,16 @@ async function changeQueryTarget(value) {
     }
     if (!accepted || activeTab() !== tab || queryTargetLocked(tab) || !discardCellDrafts(drafts)) return;
   }
+  if (driver === "postgres") {
+    const visibleDatabases = queryDatabaseVisibility(tab.connectionId);
+    const target = queryTargetData({ connectionId: tab.connectionId, database });
+    const schemas = visibleQueryNamespaces(target?.catalog || [], queryNamespaceVisibility(tab, database));
+    if (!database || (visibleDatabases && !visibleDatabases.has(database)) || !schemas.includes(value)) return renderQueryTarget(tab);
+    tab.database = database;
+  }
   if (driver === "mysql") tab.database = value;
+  tab.chooseInitialSchema = false;
+  tab.awaitingSchema = false;
   tab.schema = driver === "postgres" ? value || null : null;
   tab.browse = null;
   tab.openedObject = null;
@@ -744,6 +909,8 @@ const state = {
   treeSessions: new Map(),
   transactionKeys: new Set(),
   queryTargets: new Map(),
+  queryDatabaseLists: new Map(),
+  queryTargetNavigation: null,
   redisDatabases: [],
   redisDatabaseError: null,
   redisExpanded: new Set(),
@@ -813,17 +980,22 @@ function nextQueryNumber() {
   return state.tabs.length + 1;
 }
 const schemaCompartment = new Compartment();
-function completionConfig(tab = activeTab(), additionalObjects = []) {
-  const profile = state.profiles.find((item) => item.id === tab?.connectionId);
+function completionConfig(tab, explicitNamespaces, additionalObjects) {
+  const driver = driverForTab(tab);
   const target = queryTargetData(tab);
   const database = tabDatabase(tab) || target?.context?.database;
   const catalog = target?.objects || (tab?.connectionId === state.activeConnectionId ? [...state.objectsBySchema.values()].flat() : []);
-  const schema = buildCompletionSchema([...catalog, ...additionalObjects], database, profile?.driver,
-    (target?.catalog || []).map(({ name }) => name));
+  const defaultSchema = driver === "mysql" ? database : tabSchema(tab) || (tab.awaitingSchema ? undefined : target?.context?.defaultSchema);
+  const visibleNamespaces = queryNamespaceVisibility(tab, database);
+  const usableNamespace = name => !visibleNamespaces || visibleNamespaces.has(name) ||
+    name === defaultSchema || explicitNamespaces.includes(name);
+  const schema = buildCompletionSchema(
+    [...catalog, ...additionalObjects].filter(object => usableNamespace(object.schema)),
+    database, driver, target.catalog.map(({ name }) => name).filter(usableNamespace),
+  );
   return { schema,
-    defaultSchema: profile?.driver === "mysql" ? database : tabSchema(tab) || target?.context?.defaultSchema,
-    driver: profile?.driver,
-    dialect: profile?.driver === "mysql" ? MySQL : PostgreSQL };
+    defaultSchema, visibleNamespaces, driver,
+    dialect: driver === "mysql" ? MySQL : PostgreSQL };
 }
 
 async function loadQueryCatalog(tab) {
@@ -856,10 +1028,12 @@ async function completeCatalog(context) {
   const current = () => !context.aborted && activeTab() === tab && queryTargetKey(tab) === key &&
     tabSchema(tab) === schema && queryTargetData(tab) === data;
   if (!data?.context || !current()) return null;
+  const driver = driverForTab(tab);
+  const explicitNamespaces = sqlCompletionNamespaces(context, driver);
   let additionalObjects = [];
-  if (driverForTab(tab) === "mysql") {
+  if (driver === "mysql") {
     const selectedDatabase = tabDatabase(tab) || data.context.database;
-    const databases = mysqlCompletionDatabases(context).filter(name =>
+    const databases = explicitNamespaces.filter(name =>
       name !== selectedDatabase && data.catalog.some(item => item.name === name));
     data.mysqlCompletionObjects ??= new Map();
     additionalObjects = (await Promise.all(databases.map(database => {
@@ -875,7 +1049,7 @@ async function completeCatalog(context) {
       return data.mysqlCompletionObjects.get(database);
     }))).flat();
   }
-  return current() ? catalogCompletionSource(completionConfig(tab, additionalObjects))(context) : null;
+  return current() ? catalogCompletionSource(completionConfig(tab, explicitNamespaces, additionalObjects))(context) : null;
 }
 function makeEditorState(tab) {
   return EditorState.create({
@@ -1308,7 +1482,9 @@ async function selectConnection(id) {
     const customized = available.filter(name => saved?.has(name));
     state.databaseVisibilityCustomized = customized.length > 0 && customized.length < available.length;
     state.visibleDatabases = new Set(state.databaseVisibilityCustomized ? customized : available);
+    if (profile.driver !== "mysql") resolveInitialQueryDatabases(profile, [...state.visibleDatabases]);
     renderTree();
+    renderTabs();
     return request === state.schemaRequest && state.activeConnectionId === id;
   } catch (error) {
     if (request !== state.schemaRequest || state.activeConnectionId !== id)
@@ -1344,10 +1520,12 @@ function renderDatabasePicker() {
   }
   if (refs.databaseSelectionCount)
     refs.databaseSelectionCount.textContent = `${visible.size} 个已显示`;
+  if (visible.size) refs.databasePickerError.textContent = "";
 }
 function openDatabasePicker() {
   if (!state.databases.length) return;
   state.databasePickerDraft = new Set(state.visibleDatabases);
+  refs.databasePickerError.textContent = "";
   renderDatabasePicker();
   refs.databaseModal?.showModal();
   refs.databaseSearch?.focus({ preventScroll: true });
@@ -1358,7 +1536,7 @@ function applyDatabasePicker() {
     [...draft].filter((name) => state.databases.some((database) => database.name === name)),
   );
   if (!selected.size) {
-    showToast("至少选择一个要显示的数据库", "error");
+    refs.databasePickerError.textContent = "至少选择一个要显示的数据库";
     return;
   }
   state.visibleDatabases = selected;
@@ -1366,7 +1544,9 @@ function applyDatabasePicker() {
   state.databasePickerDraft = null;
   persistVisibleDatabases(state.activeConnectionId);
   refs.databaseModal.close();
+  if (state.editor) closeCompletion(state.editor);
   renderTree();
+  renderTabs();
 }
 function renderSchemaPicker() {
   const database = state.schemaPickerDatabase;
@@ -1395,6 +1575,7 @@ function renderSchemaPicker() {
   }
   if (refs.schemaSelectionCount)
     refs.schemaSelectionCount.textContent = `${visible.size} 个已显示`;
+  if (visible.size) refs.schemaPickerError.textContent = "";
 }
 function openSchemaPicker(database) {
   if (driverForConnection(state.activeConnectionId) === "mysql") return;
@@ -1405,6 +1586,7 @@ function openSchemaPicker(database) {
     state.visibleSchemasByDatabase.get(database) || schemas.map((schema) => schema.name),
   );
   if (refs.schemaSearch) refs.schemaSearch.value = "";
+  refs.schemaPickerError.textContent = "";
   renderSchemaPicker();
   refs.schemaModal?.showModal();
   refs.schemaSearch?.focus({ preventScroll: true });
@@ -1417,7 +1599,7 @@ async function applySchemaPicker() {
     [...draft].filter((name) => schemas.some((schema) => schema.name === name)),
   );
   if (!selected.size) {
-    showToast("至少选择一个要显示的 schema", "error");
+    refs.schemaPickerError.textContent = "至少选择一个要显示的 Schema";
     return;
   }
   state.visibleSchemasByDatabase.set(database, selected);
@@ -1425,6 +1607,8 @@ async function applySchemaPicker() {
   state.schemaPickerDraft = null;
   state.schemaPickerDatabase = null;
   refs.schemaModal?.close();
+  if (state.editor) closeCompletion(state.editor);
+  renderTabs();
   for (const key of [...state.objectsBySchema.keys()]) {
     if (key.startsWith(`${database}\u0000`) && !selected.has(key.slice(database.length + 1)))
       state.objectsBySchema.delete(key);
@@ -2443,7 +2627,7 @@ function renderTabs() {
   renderQueryTarget(tab);
   const activeDriver = state.profiles.find((profile) => profile.id === tab?.connectionId)?.driver;
   if (tab && activeDriver !== "redis") {
-    refs.editorHint.textContent = `${activeDriver === "mysql" ? "MySQL" : "PostgreSQL"} · ${queryTargetDescription(tab)} · 选中 SQL 可单独执行`;
+    refs.editorHint.textContent = `${activeDriver === "mysql" ? "MySQL" : "PostgreSQL"} · ${queryTargetDescription(tab, { showVisibility: true })} · 选中 SQL 可单独执行`;
   }
   const isRedis = activeDriver === "redis";
   refs.transactionState.hidden = true;
@@ -2467,7 +2651,7 @@ function renderTabs() {
     return;
   }
   refs.resultTab.disabled = refs.messageTab.disabled = false;
-  refs.structureTab.disabled = !tab.connectionId;
+  refs.structureTab.disabled = !tab.connectionId || Boolean(tab.awaitingDatabase);
   if (refs.formatQuery) {
     refs.formatQuery.disabled = activeDriver === "redis";
     refs.formatQuery.title = activeDriver === "redis" ? "Redis 命令不使用 SQL 格式化" : "格式化 SQL";
@@ -2488,11 +2672,11 @@ function renderTabs() {
   refs.commitTransaction.hidden = isRedis || !txOpen;
   refs.rollbackTransaction.hidden = isRedis || !txOpen;
   const busy = Boolean(tab?.paging || tab?.running || tab?.confirming || tab?.resolvingTarget || tab?.changingTransaction || cellWritePending(tab));
-  if (refs.beginTransaction) refs.beginTransaction.disabled = !tab.connectionId || !database || txOpen || mode === "read" || busy || Boolean(queryTargetData(tab)?.loading || queryTargetData(tab)?.error);
+  if (refs.beginTransaction) refs.beginTransaction.disabled = !tab.connectionId || !database || txOpen || mode === "read" || busy || Boolean(tab.awaitingSchema || queryTargetData(tab)?.loading || queryTargetData(tab)?.error);
   if (refs.commitTransaction) refs.commitTransaction.disabled = !txOpen || busy;
   if (refs.rollbackTransaction) refs.rollbackTransaction.disabled = !txOpen || busy;
   const target = queryTargetData(tab);
-  refs.runQuery.disabled = Boolean(busy || (!isRedis && (target?.loading || target?.error || !tab?.connectionId)));
+  refs.runQuery.disabled = Boolean(busy || (!isRedis && (tab.awaitingDatabase || tab.awaitingSchema || target?.loading || target?.error || !tab?.connectionId)));
   refs.stopQuery.disabled = !tab?.running;
 }
 // Objects with nothing to browse or run show one page, named for what it holds.
@@ -2557,9 +2741,6 @@ function renderWorkspaceMode(tab = activeExecutionTab()) {
     refs.tableToolbarMeta.textContent = tab.redisKey ? `DB ${redisTabDatabase(tab)} · ${redisKeyTypePresentation(tab.redisType).label}` : browse.pageSize ? `${browse.pageSize} 行/页` : '';
     if (refs.openTableSql) refs.openTableSql.hidden = Boolean(tab.redisKey);
     refs.viewTableDdl.hidden = !canViewObjectDdl(browse);
-    if (refs.newRow) refs.newRow.hidden = Boolean(tab.redisKey);
-    if (refs.editRow) refs.editRow.hidden = Boolean(tab.redisKey);
-    if (refs.deleteRows) refs.deleteRows.hidden = Boolean(tab.redisKey);
     if (refs.refreshTableData) {
       refs.refreshTableData.disabled = Boolean(tab.running || tab.refreshing || tab.structurePending || cellWritePending(tab));
       refs.refreshTableData.title = tab.outputTab === 'structure' ? `刷新${structureNoun(browse)}` : '刷新数据';
@@ -2639,6 +2820,7 @@ function addTab(sql = "", connectionId, browse = null, options = {}) {
   }
   let defaultDatabase;
   let defaultSchema;
+  const newQuery = connectionId === undefined || options.newQuery;
   if (connectionId === undefined) {
     // A blank query starts from the browser's current destination. Existing
     // tabs can remain bound to a different connection.
@@ -2671,7 +2853,8 @@ function addTab(sql = "", connectionId, browse = null, options = {}) {
     : null;
   const openedObject = objectTabTarget(options.openedObject || tabBrowse, connectionId);
   const structureOnly = Boolean(openedObject && options.openedObjectView === "structure" && !tabBrowse);
-  const database = options.database ?? browse?.database ?? defaultDatabase ?? profile?.database ?? null;
+  const requestedDatabase = options.database ?? browse?.database ?? defaultDatabase;
+  const database = requestedDatabase ?? profile?.database ?? null;
   const redisDb = profile?.driver === "redis" ? resolveRedisDatabase({ database }, profile) : null;
   const tab = {
     id: makeId("query"),
@@ -2695,6 +2878,19 @@ function addTab(sql = "", connectionId, browse = null, options = {}) {
     console: false,
     consoleHistory: [],
   };
+  if (newQuery && !openedObject && !tabBrowse && profile && (profile.driver || "postgres") === "postgres") {
+    const visible = queryDatabaseOptions(connectionId);
+    const contextualDatabase = options.database ?? (state.activeConnectionId === connectionId ? defaultDatabase : null);
+    if (contextualDatabase && (!visible || visible.includes(contextualDatabase))) {
+      prepareInitialQuerySchema(tab);
+    } else {
+      tab.database = visible?.length === 1 ? visible[0] : null;
+      tab.schema = null;
+      tab.awaitingDatabase = !tab.database;
+      tab.chooseInitialDatabase = !visible;
+      if (tab.database) prepareInitialQuerySchema(tab);
+    }
+  }
   state.tabs.push(tab);
   activateTab(tab.id);
   return tab;
@@ -4177,7 +4373,7 @@ async function editTableStructure(tab) {
 
 function openDatabaseContextQuery(target) {
   if (!target?.database || !target.connectionId) return;
-  addTab("", target.connectionId, null, { database: target.database, schema: target.schema || null, title: `查询 · ${target.schema || target.database}` });
+  addTab("", target.connectionId, null, { database: target.database, schema: target.schema || null, title: `查询 · ${target.schema || target.database}`, newQuery: true });
 }
 
 function refreshTreeCategory(target) {
@@ -4304,8 +4500,8 @@ async function refreshDatabaseList(target, { notify = true } = {}) {
           entry.catalogError = null;
         }
       }
-      renderTabs();
     }
+    renderTabs();
     if (notify) showToast("数据库列表已刷新");
     return true;
   } catch (error) {
@@ -4394,7 +4590,7 @@ function applyTabContextAction(action) {
   hideContextMenus();
 }
 const discardDraftMessage = "继续执行会放弃当前结果中尚未保存的单元格修改。";
-async function confirmWrite(sql, tab = activeTab(), { hasDrafts = false } = {}) {
+async function confirmWrite(sql, { hasDrafts = false } = {}) {
   return !hasDrafts || confirmAction(discardDraftMessage, { title: "执行 SQL？", detail: sql, acceptLabel: "放弃并执行" });
 }
 function firstRedisCommand(sql) {
@@ -4765,6 +4961,7 @@ async function runQuery({ preserveResult = false, pagingRequest = null, preserve
     showToast(tab.connectionId ? "原连接已不可用，请复制 SQL 到新建查询并选择连接" : "请先从左侧选择此查询使用的连接", "error");
     return;
   }
+  if (tab.awaitingDatabase) { querySchemaSelect.open(); return; }
   if (profile?.driver === "redis") {
     if (tab.console) return runRedisCommand(tab, sqlText, connectionId);
     const drafts = cellDraftsForTabs([tab]);
@@ -4791,6 +4988,7 @@ async function runQuery({ preserveResult = false, pagingRequest = null, preserve
     return;
   }
   if (activeExecutionTab() !== tab) { renderTabs(); return; }
+  if (tab.awaitingSchema) { renderTabs(); querySchemaSelect.open(); return; }
   if (cellWritePending(tab)) { renderTabs(); return; }
   if (runningViewWrites.has(transactionKey(connectionId, tabDatabase(tab)))) {
     renderTabs();
@@ -4824,7 +5022,7 @@ async function runQuery({ preserveResult = false, pagingRequest = null, preserve
   tab.confirming = true;
   renderTabs();
   try {
-    if (!await confirmWrite(sqlText, tab, { hasDrafts: drafts.length > 0, transactionScript })) {
+    if (!await confirmWrite(sqlText, { hasDrafts: drafts.length > 0 })) {
       showToast("已取消执行");
       return;
     }
@@ -5049,6 +5247,7 @@ function revealFailedStatement(tab) {
 
 async function changeTransaction(action, { tab = activeTab(), database = tabDatabase(tab) || queryTargetData(tab)?.context?.database, sql = null } = {}) {
   if (!tab || tab.running || tab.confirming || tab.resolvingTarget || tab.changingTransaction || cellWritePending(tab)) return;
+  if (action === "begin" && (tab.awaitingDatabase || tab.awaitingSchema)) { querySchemaSelect.open(); return; }
   const connectionId = tab.connectionId;
   if (!connectionId || !database) {
     showToast(connectionId ? "请先选择数据库" : "请先选择数据库连接", "error");
@@ -6220,12 +6419,16 @@ async function saveConnection(event) {
     state.connectionStatuses[saved.id] = "idle";
     state.treeSessions.delete(saved.id);
     state.queryTargets.clear();
+    state.queryDatabaseLists.delete(saved.id);
     // The profile has been saved even if establishing the connection fails.
     await loadConnections({ restore: false });
     const tab = activeTab();
     if (tab && !tab.connectionId && !tab.sql.trim() && !tab.browse && !tab.redisKey) {
       tab.connectionId = saved.id;
-      tab.database = saved.database || null;
+      const postgres = (saved.driver || "postgres") === "postgres";
+      tab.database = postgres ? null : saved.database || null;
+      tab.awaitingDatabase = postgres;
+      tab.chooseInitialDatabase = postgres;
       tab.schema = null;
     }
     persistTabs();
@@ -6270,6 +6473,7 @@ async function deleteConnection() {
   try {
     await call("delete_connection", { connectionId: id });
     state.treeSessions.delete(id);
+    state.queryDatabaseLists.delete(id);
     delete state.connectionStatuses[id];
     refs.connectionModal.close();
     if (state.activeConnectionId === id) {
@@ -7006,6 +7210,13 @@ function bindEvents() {
   });
   refs.redisSearchDatabase.addEventListener('change', () => changeRedisSearchScope(refs.redisSearchDatabase.value));
   refs.addQueryTab.addEventListener("click", () => addTab());
+  refs.querySchemaBack.addEventListener("click", () => {
+    const tab = activeTab();
+    if (queryTargetLocked(tab)) return;
+    state.queryTargetNavigation = { tabId: tab.id, database: null };
+    renderQueryTarget(tab);
+    refs.querySchemaSearch.focus();
+  });
   refs.welcomeConnect.addEventListener("click", () => refs.newConnection.click());
   refs.welcomeQuery.addEventListener("click", () => addTab());
   refs.openCommands.addEventListener("click", () => commandPalette.open());
@@ -7491,7 +7702,7 @@ function bindEvents() {
       const content = await file.text();
       const current = activeExecutionTab();
       const reusable = current && !current.sql.trim() && !current.browse && !current.redisKey && !current.structureOnly && !current.console && !current.running;
-      if (!reusable && !addTab("", current?.connectionId || state.activeConnectionId)) return;
+      if (!reusable && !addTab("", current?.connectionId || state.activeConnectionId, null, { newQuery: true })) return;
       setEditorValue(content);
       const tab = activeTab();
       tab.title = file.name.replace(/\.(sql|txt)$/i, "") || "SQL 文件";
@@ -7769,7 +7980,7 @@ const desktopMenu = initDesktopMenu({
         { label: connected ? "断开连接" : "连接", disabled: state.connectionStatuses[id] === "connecting", run: () => connected ? disconnectConnection(id) : selectConnection(id) },
         { label: "编辑连接…", run: () => { fillConnection(profile); refs.connectionModal.showModal(); } },
         { label: "移动到分组…", run: () => connectionGroups.open(id) },
-        { label: "新建查询", run: () => addTab("", id) },
+        { label: "新建查询", run: () => addTab("", id, null, { newQuery: true }) },
         { label: "复制连接名称", run: () => copyText(profile.name) },
       ];
     }

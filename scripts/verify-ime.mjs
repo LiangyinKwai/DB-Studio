@@ -3,7 +3,7 @@ import { createServer } from 'node:http';
 import { readFileSync, existsSync, statSync, mkdirSync, writeFileSync } from 'node:fs';
 import { extname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { chromium } from './playwright-import.mjs';
+import { chromium, selectPostgresTarget } from './playwright-import.mjs';
 import { createWorkspaceFixture } from './fixtures/workspace-fixture.mjs';
 
 // CDP drives browser composition events; this is not a native macOS IME test.
@@ -40,6 +40,7 @@ try {
   await page.locator('[data-connection-id="conn-dev"]').click();
   await page.locator('#connectionMode').getByText('已连接', { exact: true }).waitFor();
   await page.locator('#addQueryTab').click();
+  await selectPostgresTarget(page, 'app', 'public');
   let editor = page.locator('#sqlEditor .cm-content');
   const sqlEditor = editor;
   const cdp = await context.newCDPSession(page);

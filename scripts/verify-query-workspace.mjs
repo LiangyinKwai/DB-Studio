@@ -3,7 +3,7 @@ import { createReadStream, existsSync, mkdirSync, statSync, writeFileSync } from
 import { extname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import assert from "node:assert/strict";
-import { chromium } from "./playwright-import.mjs";
+import { chromium, selectPostgresTarget } from "./playwright-import.mjs";
 import { createWorkspaceFixture } from "./fixtures/workspace-fixture.mjs";
 
 const root = resolve(fileURLToPath(new URL("..", import.meta.url)));
@@ -72,6 +72,7 @@ try {
 
   await page.locator("[data-connection-id='conn-dev']").click();
   await page.locator("#addQueryTab").click();
+  await selectPostgresTarget(page, "app", "public");
   const historyToggle = page.locator("#toggleHistory");
   assert.equal(await historyToggle.getAttribute("aria-expanded"), "false");
   for (const selector of ["#historySearchBox", "#recentQueries", "#clearHistory"]) assert.ok(await page.locator(selector).isHidden());

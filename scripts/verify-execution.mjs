@@ -2,7 +2,7 @@ import { createServer } from "node:http";
 import { createReadStream, existsSync, mkdirSync, statSync } from "node:fs";
 import { extname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { chromium } from "./playwright-import.mjs";
+import { chromium, selectPostgresTarget } from "./playwright-import.mjs";
 import { createWorkspaceFixture } from "./fixtures/workspace-fixture.mjs";
 
 // Fixture data verifies visual states, not database runtime behavior.
@@ -338,6 +338,7 @@ try {
   expect(await modal.isHidden(), "read-only selection unexpectedly prompted");
 
   await page.locator("#addQueryTab").click();
+  await selectPostgresTarget(page, "app_reporting", "reporting");
   await editor.fill("SELECT /* fixture_delay */ 1;");
   await page.locator("#runQuery").click();
   await page.waitForFunction(() => !document.querySelector("#stopQuery").disabled);
@@ -356,6 +357,7 @@ try {
   await analytics.locator(".tree-category[data-kind='table'] .category-summary").click();
   expect(await page.locator(".query-tab.active").getAttribute("data-tab-id") === originalTabId, "tree selection changed the active query before opening a new tab");
   await page.locator("#addQueryTab").click();
+  expect(await page.locator('#querySchema').getAttribute('value') === 'analytics', "new query did not inherit the selected Schema");
   await editor.fill("SELECT 43;");
   await page.locator("#runQuery").click();
   await page.locator("#resultGrid").waitFor();

@@ -2,7 +2,7 @@ import { createServer } from "node:http";
 import { createReadStream, existsSync, mkdirSync, statSync, writeFileSync } from "node:fs";
 import { extname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { chromium } from "./playwright-import.mjs";
+import { chromium, selectPostgresTarget } from "./playwright-import.mjs";
 import { createWorkspaceFixture } from "./fixtures/workspace-fixture.mjs";
 
 // Fixture data verifies visual states, not database runtime behavior.
@@ -39,6 +39,7 @@ try {
   await page.locator("[data-connection-id='conn-dev']").click();
   await page.locator("#connectionMode").getByText("已连接", { exact: true }).waitFor();
   await page.locator("#addQueryTab").click();
+  await selectPostgresTarget(page, "app", "public");
   const editor = page.locator("#sqlEditor .cm-content");
   async function typeSql(text) {
     await editor.click();

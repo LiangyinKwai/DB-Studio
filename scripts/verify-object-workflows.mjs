@@ -75,6 +75,7 @@ async function invoke(command, args) {
     if (args.kind === 'sequence') return { ...sequence, sequence: { ownedBy: 'public.orders.id', dataType: 'bigint', start: '9007199254740993', increment: '2', cache: '1', lastValue: null }, definition: 'CREATE SEQUENCE "public"."orders_seq" AS bigint START WITH 9007199254740993;' };
     if (args.kind === 'event') return { ...event, event: { status: 'DISABLED', scheduler: 'ON', schedule: 'EVERY 1 DAY', timeZone: 'SYSTEM' }, definition: 'CREATE EVENT cleanup ON SCHEDULE EVERY 1 DAY DISABLE DO SELECT 1' };
     if (args.kind === 'trigger') return { definition: 'CREATE TRIGGER before_order BEFORE INSERT ON orders FOR EACH ROW SET @seen=1' };
+    if (args.kind === 'function' && isMysql) return { ...mysqlFunction, signature: 'recount(IN value bigint)', parameters: [{ name: 'value', dataType: 'bigint', mode: 'IN' }], definition: 'CREATE FUNCTION recount(value bigint) RETURNS bigint DETERMINISTIC RETURN value + 7', mysql: { sqlMode: '' } };
     if (args.kind === 'procedure' && isMysql) return { ...routine, signature: 'recount(IN value bigint, OUT result int)', parameters: [{ name: 'value', dataType: 'bigint', mode: 'IN' }, { name: 'result', dataType: 'int', mode: 'OUT' }], definition: mysqlProcedureDefinition, mysql: { sqlMode: '' } };
     if (args.kind === 'materialized_view') return { ...matview, definition: 'SELECT id FROM public.orders;' };
     if (!isMysql && args.kind === 'procedure') return { ...await fixture.invoke('get_object_details', args), ...(savedPgRoutine ? { definition: savedPgRoutine } : {}) };
@@ -182,14 +183,6 @@ async function verifyScriptExecution(connectionId, database, fail = false) {
     assert.equal(await page.locator('#runLabel').innerText(), '执行选中');
   }
   await page.locator('#runQuery').click();
-  await page.getByRole('dialog', { name: '确认执行事务脚本' }).waitFor();
-  assert.equal(await page.locator('#confirmActionModal [data-confirm-detail]').innerText(), sql.trim());
-  await page.locator('#confirmActionCancel').click();
-  await page.locator('#confirmActionModal').waitFor({ state: 'hidden' });
-  assert.equal(transactionScripts.length, count);
-  assert.equal(await sqlEditor.innerText(), source);
-  await page.locator('#runQuery').click();
-  await confirm();
   await transactionState('事务脚本执行中');
   assert.ok(await page.locator('#confirmActionModal').isHidden());
   assert.equal(transactionScripts.length, count + 1);
@@ -202,15 +195,22 @@ async function verifyScriptExecution(connectionId, database, fail = false) {
   await transactionState('自动提交');
   if (fail) {
     const status = fail === 'unconfirmed' ? /回滚结果无法确认/ : /回滚成功/;
-    await page.locator('#messagePanel').getByText(status).waitFor();
-    assert.ok((await page.locator('#messagePanel').innerText()).includes(`第 3 条 SQL（第 ${prefix ? 4 : 3} 行）失败`));
-    if (fail === 'unconfirmed') assert.match(await page.locator('#messagePanel').innerText(), /fixture rollback timeout/);
+    const row = page.locator('#executionSummaryRows tr');
+    await row.waitFor();
+    assert.equal(await row.locator('td').first().innerText(), '3');
+    await row.getByRole('button', { name: '详情' }).click();
+    const diagnostic = page.locator('#executionDiagnostic');
+    assert.match(await diagnostic.innerText(), status);
+    if (fail === 'unconfirmed') assert.match(await diagnostic.innerText(), /fixture rollback timeout/);
+    await page.locator('#executionDetailsModal').getByRole('button', { name: '关闭', exact: true }).click();
     const marked = await sqlEditor.locator('.sql-failed-statement').allTextContents();
     assert.equal(marked.join(''), `SELECT status FROM ${table};`);
     assert.equal(await page.locator('#runLabel').innerText(), prefix ? '执行选中' : '执行');
     assert.equal(await sqlEditor.innerText(), source);
   } else {
-    await page.waitForFunction(() => document.querySelector('#messagePanel').textContent.includes('事务脚本已提交'));
+    await page.locator('#messageTab').click();
+    await page.locator('#resultMeta').getByText(/事务脚本已提交/).waitFor();
+    await page.locator('#resultTab').click();
     assert.equal(await page.locator('#resultGrid .db-grid-cell').first().innerText(), 'updated');
   }
 }
@@ -413,6 +413,7 @@ try {
   await setTabReadOnly(page, false);
   await executeTransaction('-- start\nBEGIN;', 'begin', '事务中 · 未提交', 'conn-dev', 'app');
   await page.locator('#addQueryTab').click();
+  assert.equal(await page.locator('#querySchema').getAttribute('value'), 'public');
   await transactionState('事务中 · 未提交');
   await executeTransaction('COMMIT;', 'commit', '自动提交', 'conn-dev', 'app');
   await verifyScriptExecution('conn-dev', 'app');
@@ -432,12 +433,10 @@ try {
   const query = form.getByRole('textbox', { name: '查询 SQL' });
   await query.fill('SELECT 1 AS id');
   await form.getByRole('button', { name: '下一步' }).click();
-  await confirm();
   await form.getByRole('alert').filter({ hasText: 'fixture rejected view' }).waitFor();
   assert.equal(await query.inputValue(), 'SELECT 1 AS id');
   failView = false;
   await form.getByRole('button', { name: '下一步' }).click();
-  await confirm();
   await form.waitFor({ state: 'hidden' });
   assert.equal(mutations.at(-1).sql, 'CREATE VIEW "public"."new_view" AS\nSELECT 1 AS id');
 
@@ -529,7 +528,7 @@ try {
     await page.locator('#themeButton').click();
     await page.locator(`[data-theme-option="${theme}"]`).click();
     await mysqlRoutines.locator('.category-summary .tree-label').click();
-    const procedureIcons = await page.locator('[data-catalog-icon="procedure"]').evaluateAll(nodes =>
+    const procedureIcons = await page.locator('[data-catalog-icon="procedure"]:visible').evaluateAll(nodes =>
       nodes.map(node => ({ color: getComputedStyle(node).color, icon: node.querySelector('svg')?.outerHTML })));
     assert.equal(procedureIcons.length, 3);
     assert.ok(procedureIcons[0].icon);
@@ -616,10 +615,29 @@ try {
   await form.getByRole('textbox', { name: '视图名称' }).fill('new_view');
   await query.fill('SELECT 1 AS id');
   await form.getByRole('button', { name: '下一步' }).click();
-  await confirm();
   await form.waitFor({ state: 'hidden' });
   await treeObject('warehouse.new_view').waitFor();
   assert.equal(mutations.at(-1).sql, 'CREATE VIEW `warehouse`.`new_view` AS\nSELECT 1 AS id');
+
+  await page.locator('.query-tab.active .tab-select').click({ button: 'right' });
+  await page.locator('[data-tab-context-action="close-all"]').click();
+  await page.locator('.query-tab').first().waitFor({ state: 'detached' });
+  const functionRow = treeObject(mysqlFunction.id);
+  await revealObject(functionRow);
+  await functionRow.click();
+  await routineDefinition.getByText(/CREATE FUNCTION/).waitFor();
+  const functionTabId = await page.locator('.query-tab.active').getAttribute('data-tab-id');
+  const rowActions = page.locator('#newRow, #deleteRows');
+  for (const action of [page.locator('#openTableSql'), page.locator('#structurePanel').getByRole('button', { name: '生成调用 SQL' })]) {
+    await action.click();
+    await page.locator('#sqlEditor').waitFor();
+    assert.notEqual(await page.locator('.query-tab.active').getAttribute('data-tab-id'), functionTabId);
+    await page.locator('.query-tab.active .tab-close').click();
+    await routineDefinition.getByText(/CREATE FUNCTION/).waitFor();
+    assert.equal(await page.locator('.query-tab.active').getAttribute('data-tab-id'), functionTabId);
+    assert.equal(await rowActions.filter({ visible: true }).count(), 0, 'function definition exposed table row actions after closing SQL');
+    assert.ok(await page.locator('#refreshTableData').isVisible());
+  }
   assert.deepEqual(errors, []);
   console.log('PASS: both view editors, both routine editors, PG sequence and materialized refresh, MySQL triggers/routines/events.');
 } finally {

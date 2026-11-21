@@ -54,9 +54,15 @@ const expect = (ok, message) => { if (!ok) throw new Error(message); };
 const editor = page.locator("#sqlEditor .cm-content");
 const targetHint = () => page.locator("#editorHint").innerText();
 const schema = page.locator("#querySchema");
+const menu = page.locator("#querySchemaMenu");
 const selectSchema = async (value) => {
-  await schema.click();
+  if (await menu.isHidden()) await schema.click();
   await page.locator(`#querySchemaList [role='option'][data-value='${value}']`).click();
+};
+const selectDatabase = async (value) => {
+  if (await menu.isHidden()) await schema.click();
+  await page.locator(`#querySchemaList [role='option'][data-value='${value}']`).click();
+  await page.locator('#querySchemaBack').waitFor();
 };
 const run = page.locator("#runQuery");
 const until = async (fn) => {
@@ -138,21 +144,16 @@ try {
   await page.reload({ waitUntil: "networkidle" });
   await page.locator("[data-connection-id='conn-dev']").click();
   await page.locator("#addQueryTab").click();
-  await ready();
-  expect((await targetHint()).includes("开发库 / app"), "new query target incorrect");
-  expect(await page.locator("#queryConnection, #queryDatabase").count() === 0, "connection/database pickers still present");
-  expect(await page.locator("#queryToolbar [aria-haspopup='listbox']").count() === 1, "toolbar should have only one schema selector");
+  expect((await targetHint()).includes("开发库 / 未选择数据库") && await run.isDisabled(), "new query preselected the connection's default database");
+  expect(await editor.isVisible(), "target selection hid the SQL editor");
+  expect(await page.locator("#queryToolbar [aria-haspopup='listbox']").count() === 1, "toolbar should have one target selector");
   expect(await page.locator("#modeToggle").count() === 0, "duplicate toolbar write lock is still present");
   expect(await page.locator("#modeBadge").count() === 0, "header still exposes the read-only switch");
   expect(await page.locator("#queryTargetDetail").isHidden(), "healthy queries still have a separate context row");
-  expect((await schema.innerText()).includes("默认（public）"), "server default not visible");
-  await schema.click();
+  await selectDatabase("app");
   const options = page.locator("#querySchemaList");
-  const followedPath = options.locator('[data-value=""]');
-  expect(await followedPath.getByText("默认（public）", { exact: true }).isVisible() &&
-    await options.locator('[data-value="public"]').count() === 0, "a sole default public was shown twice");
-  expect(await options.locator('[data-value="analytics"]').isVisible(), "merging the default removed a different schema");
-  await page.keyboard.press("Escape");
+  await options.locator('[data-value="analytics"]').waitFor();
+  expect(await options.locator('[data-value="public"]').isVisible() && await options.locator('[data-value=""]').count() === 0 && await run.isDisabled(), "new query selected or offered the default search path");
   const firstId = await page.locator(".query-tab.active").getAttribute("data-tab-id");
   await selectSchema("analytics");
   await page.locator("[data-connection-id='conn-stage']").click();
@@ -160,15 +161,9 @@ try {
   const first = await execute("SELECT 1");
   expect(first.connectionId === "conn-dev" && first.database === "app" && first.schema === "analytics", "query destination differs from visible target");
   await page.locator("#addQueryTab").click();
-  await ready();
-  expect((await targetHint()).includes("预发布库 / app_stage") && await schema.getAttribute("value") === "", "new tab ignored the browser's connection or reused the old schema");
+  expect((await targetHint()).includes("预发布库 / 未选择数据库"), "new tab ignored the browser's connection or picked its default database");
   const secondId = await page.locator(".query-tab.active").getAttribute("data-tab-id");
-  await schema.click();
-  expect(await followedPath.getByText("跟随连接默认路径", { exact: true }).isVisible() &&
-    await followedPath.getByText("public → analytics", { exact: true }).isVisible(), "multi-schema default did not show the complete path");
-  expect(await options.locator('[data-value="public"]').getByText("固定使用此 Schema", { exact: true }).isVisible(),
-    "multi-schema default did not offer a separate fixed public");
-  await page.keyboard.press("Escape");
+  await selectDatabase("app_stage");
   await selectSchema("public");
   const second = await execute("SELECT 1");
   expect(second.connectionId === "conn-stage" && second.database === "app_stage" && second.schema === "public", "second query did not use the browser's connection and its own schema");
@@ -176,7 +171,7 @@ try {
   await page.locator(`.query-tab[data-tab-id='${firstId}'] .tab-select`).click();
   expect(await schema.getAttribute("value") === "analytics", "tabs share a schema binding");
   await page.locator(`.query-tab[data-tab-id='${secondId}'] .tab-select`).click();
-  // Changing database means opening a new query from that database in the tree.
+  // A database context action can start the new tab at the Schema level.
   await page.locator("[data-connection-id='conn-dev']").click();
   await page.locator("[data-display-databases]").click();
   await page.locator("#databaseList input[value='app_reporting']").check();
@@ -184,25 +179,25 @@ try {
   await page.locator(".tree-database[data-database='app_reporting'] > summary").click({ button: "right" });
   await page.locator("[data-context-action='new-database-query']").click();
   await ready();
-  expect((await targetHint()).includes("开发库 / app_reporting") && await schema.getAttribute("value") === "" && (await schema.innerText()).includes("默认（reporting）"), "new database query inherited an unrelated schema");
+  expect((await targetHint()).includes("开发库 / app_reporting") && await schema.getAttribute("value") === "reporting", "new database query did not select the sole visible schema");
   holdQuery = true;
   await editor.fill("ALTER TABLE reporting.orders ADD COLUMN flag bool;");
   await run.click();
   await until(() => Boolean(releaseQuery));
   const mutation = fixture.callsFor("execute_mutation").at(-1).args.request;
-  expect(mutation.connectionId === "conn-dev" && mutation.database === "app_reporting" && mutation.schema === null, "mutation lost its database or default schema");
+  expect(mutation.connectionId === "conn-dev" && mutation.database === "app_reporting" && mutation.schema === "reporting", "mutation lost its database or selected schema");
   expect(await schema.isDisabled(), "running a mutation permits a target switch");
   releaseQuery();
   releaseQuery = undefined;
   await ready();
   await schema.click();
   expect(await options.getByRole("option").count() === 1 &&
-    await followedPath.getByText("默认（reporting）", { exact: true }).isVisible() &&
+    await options.locator('[data-value="reporting"][aria-selected="true"]').isVisible() &&
     await page.locator("#querySchemaCount").innerText() === "1 个 Schema", "a one-schema catalog should have one option and a count of one");
   await page.keyboard.press("Escape");
   await page.reload({ waitUntil: "networkidle" });
   await ready();
-  expect((await targetHint()).includes("开发库 / app_reporting") && await schema.getAttribute("value") === "", "default target not persisted");
+  expect((await targetHint()).includes("开发库 / app_reporting") && await schema.getAttribute("value") === "reporting", "sole schema selection not persisted");
   holdQuery = true;
   await editor.fill("SELECT 1");
   await run.click();
@@ -219,6 +214,7 @@ try {
   await page.locator("[data-connection-id='conn-stage']").click();
   await page.locator(".tree-database[data-database='app_stage'] > summary").click({ button: "right" });
   await page.locator("[data-context-action='new-database-query']").click();
+  await selectSchema("analytics");
   await ready();
   releaseContext();
   await page.waitForTimeout(80);
@@ -283,6 +279,20 @@ try {
   await selectSchema("analytics");
   const fromTable = await execute("SELECT * FROM events;");
   expect(fromTable.database === "app_stage" && fromTable.connectionId === "conn-stage" && fromTable.schema === "analytics", "table editor schema switch changed fixed database");
+  const analyticsSchema = stageDatabase.locator('.tree-schema[data-schema="analytics"]');
+  if (await analyticsSchema.getAttribute('open') === null) await analyticsSchema.locator(':scope > summary [data-tree-toggle]').click();
+  for (const [objectId, expectedSchema] of [['analytics.events', 'analytics'], ['public.orders_view', 'public'], ['public.refresh_proc', 'public']]) {
+    const object = stageDatabase.locator(`[data-object-id="${objectId}"]`);
+    await revealObject(object);
+    await object.locator('.object-main').click();
+    expect(await object.getAttribute('aria-current') === 'true', `object ${objectId} was not selected`);
+    await page.locator('#addQueryTab').click();
+    await ready();
+    expect(await schema.getAttribute('value') === expectedSchema && (await targetHint()).includes(`app_stage / ${expectedSchema}`),
+      `new query did not inherit the database and Schema of ${objectId}`);
+    await page.locator('.query-tab.active .tab-close').click();
+  }
+  await page.locator(`[data-tab-id='${queryId}'] .tab-select`).click();
   // Upgrade an editor persisted by the old in-place table-to-SQL action.
   // Seed after pagehide persistence so the restored app receives legacy data.
   await page.addInitScript(({ tableId, queryId }) => {
@@ -303,11 +313,19 @@ try {
   expect(await schema.getAttribute("value") === "analytics" && await page.locator("#queryToolbar").isVisible(), "restoring a generic query rebound its table");
   expect(/^查询 \d+$/.test(await page.locator(".query-tab.active .tab-label").innerText()), "legacy editor retained its table title");
   expect(fixture.callsFor("execute_query").length === readsBeforeRestore, "restoring a generic query automatically executed table browsing SQL");
-  // Opening with no active tabs can also inherit a selected schema directly.
+  // New queries use the database or Schema explicitly selected in the tree.
   await page.locator(".query-tab.active").click({ button: "right" });
   await page.locator("[data-tab-context-action='close-all']").click();
   const restoredDatabase = page.locator(".tree-database[data-database='app_stage']");
   if (await restoredDatabase.getAttribute("open") === null) await restoredDatabase.locator(" > summary [data-tree-toggle]").click();
+  await restoredDatabase.locator(':scope > summary .tree-label').click();
+  await page.locator("#addQueryTab").click();
+  expect((await targetHint()).includes("app_stage / 未选择 Schema") && await run.isDisabled(), "a highlighted database still asks the user to select it again");
+  await schema.click();
+  await page.locator('#querySchemaBack').waitFor();
+  expect(await page.locator('#querySchemaDatabase').innerText() === 'app_stage', "a highlighted database did not enter its Schema list");
+  await page.keyboard.press("Escape");
+  await page.locator('.query-tab.active .tab-close').click();
   await page.locator(".tree-schema[data-schema='analytics'] > summary").click();
   await page.locator("#addQueryTab").click();
   await ready();
@@ -317,8 +335,9 @@ try {
   // when merely browsing options or closing the menu.
   fixture.schemas.push(...["upsell", "agent_track", "aifeed", "aipage", "bestsourcing", "butler", "gift", "share", "shopify_test", "sonarfulfill", "tracking",
     ...Array.from({ length: 20 }, (_, i) => `warehouse_${i}`), 'team_<demo>_"schema"'].map((name) => ({ name })));
+  await page.locator('#refreshSchema').click();
+  await until(() => page.locator('.tree-schema[data-schema="upsell"]').count().then(count => count === 1));
   const search = page.locator("#querySchemaSearch");
-  const menu = page.locator("#querySchemaMenu");
   const list = page.locator("#querySchemaList");
   await schema.focus();
   await page.keyboard.press("ArrowDown");
@@ -343,19 +362,15 @@ try {
   await page.keyboard.press("ArrowDown");
   await page.keyboard.press("Enter");
   expect(await schema.getAttribute("value") === "warehouse_1", "arrow key navigation failed");
-  await selectSchema("");
-  expect((await schema.innerText()).includes("默认（public → analytics）"), "default search path not selectable");
   await selectSchema("public");
-  expect(await schema.innerText() === "public", "explicit public schema confused with default search path");
+  expect(await schema.innerText() === "app_stage / public", "fixed target did not display its full path");
   stageSearchPath = ["public"];
   await schema.click();
-  await until(async () => await schema.innerText() === "默认（public）");
-  expect(await followedPath.getAttribute("aria-selected") === "true" &&
-    await options.locator('[data-value="public"]').count() === 0, "the fixed tab did not share the sole default row");
+  await until(async () => !(await page.locator('#querySchemaCount').innerText()).includes('正在检查'));
+  expect(await options.locator('[data-value="public"]').getAttribute("aria-selected") === "true" &&
+    await options.locator('[data-value=""]').count() === 0, "refresh confused the fixed schema with the default path");
   await page.keyboard.press("Escape");
   expect((await execute("SELECT 21")).schema === "public", "refresh silently changed a fixed tab to follow the default");
-  await selectSchema("");
-  expect((await execute("SELECT 22")).schema === null, "choosing the merged option did not switch to following the default");
   await schema.click();
   await page.keyboard.press("Tab");
   expect(await menu.isHidden() && await run.evaluate((el) => el === document.activeElement), "Tab did not return to toolbar order");

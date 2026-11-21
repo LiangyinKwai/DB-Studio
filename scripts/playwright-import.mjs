@@ -13,3 +13,13 @@ export async function setTabReadOnly(page, readOnly) {
   if (await toggle.getAttribute("aria-checked") !== String(readOnly)) await toggle.click();
   else await page.keyboard.press("Escape");
 }
+
+export async function selectPostgresTarget(page, database, schema) {
+  await page.locator('#querySchema').click();
+  const list = page.locator('#querySchemaList');
+  const databaseOption = list.getByRole('option', { name: database, exact: true });
+  const schemaStep = page.locator('#querySchemaBack:visible');
+  await databaseOption.or(schemaStep).first().waitFor();
+  if (await schemaStep.isHidden()) await databaseOption.click();
+  await list.getByRole('option', { name: schema, exact: true }).click();
+}

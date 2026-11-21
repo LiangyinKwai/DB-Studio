@@ -21,6 +21,8 @@ function fixture(inherited = null) {
     activeTab: () => inherited,
     tabDatabase: tab => tab?.database,
     tabSchema: tab => tab?.schema ?? null,
+    queryDatabaseOptions: () => null,
+    prepareInitialQuerySchema() {},
     showToast() {}, treeTargetFromNode() {},
     objectTabTarget: object => object || null,
     makeId: () => `query-${state.tabs.length + 1}`,
@@ -74,12 +76,13 @@ test("new queries follow the browser when the active tab uses another instance",
   assert.equal(tab.schema, null);
 });
 
-test("without a browser selection, new SQL tabs reuse the current tab destination", () => {
+test("without a browser selection, new PostgreSQL tabs reuse the current connection and resolve their own target", () => {
   const runtime = fixture({ connectionId: "pg", database: "commerce", schema: "sales" });
   runtime.state.activeConnectionId = null;
   const tab = runtime.addTab();
   assert.equal(tab.connectionId, "pg");
-  assert.equal(tab.database, "commerce");
-  assert.equal(tab.schema, "sales");
+  assert.equal(tab.database, null);
+  assert.equal(tab.schema, null);
+  assert.equal(tab.awaitingDatabase, true);
   assert.equal(tab.redisDb, null);
 });

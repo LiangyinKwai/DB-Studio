@@ -47,30 +47,22 @@ test("only complete PostgreSQL and MySQL transaction commands use the managed se
 
 test("SQL executes directly unless it would discard unsaved cell edits", async () => {
   const source = readFileSync(new URL('../src/main.js', import.meta.url), 'utf8');
-  const description = source.slice(source.indexOf('function queryTargetDescription('), source.indexOf('async function loadQueryTarget('));
   const confirmation = source.slice(source.indexOf('const discardDraftMessage'), source.indexOf('function firstRedisCommand('));
-  for (const driver of ['postgres', 'mysql']) {
-    const tab = { connectionId: 'test', database: 'test', schema: 'new_schema' };
-    const calls = [];
-    const profile = { id: 'test', name: '测试环境', host: 'fixture.local', port: driver === 'postgres' ? 5432 : 3306, database: 'shopify', user: 'shopify', driver };
-    const context = vm.createContext({
-      state: { profiles: [profile] }, sqlExecutionInfo, activeTab: () => tab,
-      driverForTab: () => driver, queryTargetData: () => null,
-      tabDatabase: value => value.database, tabSchema: value => value.schema,
-      confirmAction: async (message, options) => { calls.push({ message, options }); return true; },
-    });
-    vm.runInContext(description + confirmation, context);
-    const sql = 'INSERT INTO example (id) VALUES (1)';
-    assert.equal(await context.confirmWrite(sql, tab), true);
-    assert.equal(calls.length, 0);
-    await context.confirmWrite('SELECT 1', tab);
-    assert.equal(calls.length, 0);
-    await context.confirmWrite(sql, tab, { hasDrafts: true });
-    assert.equal(calls.length, 1);
-    assert.match(calls[0].message, /尚未保存的单元格修改/u);
-    assert.equal(calls[0].options.detail, sql);
-    assert.equal(calls[0].options.acceptLabel, "放弃并执行");
+  const calls = [];
+  const context = vm.createContext({
+    confirmAction: async (message, options) => { calls.push({ message, options }); return false; },
+  });
+  vm.runInContext(confirmation, context);
+  const script = 'BEGIN; INSERT INTO example (id) VALUES (1); COMMIT;';
+  for (const sql of ['SELECT 1', 'INSERT INTO example (id) VALUES (1)', script]) {
+    assert.equal(await context.confirmWrite(sql), true);
   }
+  assert.equal(calls.length, 0);
+  assert.equal(await context.confirmWrite(script, { hasDrafts: true }), false);
+  assert.equal(calls.length, 1);
+  assert.match(calls[0].message, /尚未保存的单元格修改/u);
+  assert.equal(calls[0].options.detail, script);
+  assert.equal(calls[0].options.acceptLabel, "放弃并执行");
 });
 
 test("a pending cancel request cannot hide an uncertain PostgreSQL write outcome", async () => {

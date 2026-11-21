@@ -48,6 +48,9 @@ try {
   await page.locator("[data-connection-id='conn-dev']").click();
   await page.locator("#connectionMode").getByText("已连接", { exact: true }).waitFor();
   await page.locator("#addQueryTab").click();
+  await page.locator("#querySchema").click();
+  await page.locator('#querySchemaList [data-value="app"]').click();
+  await page.locator('#querySchemaList [data-value="public"]').click();
   const editor = page.locator("#sqlEditor .cm-content");
   const selectedOption = page.locator(".cm-tooltip-autocomplete li[aria-selected='true']");
   async function suggest(sql) {
@@ -156,6 +159,14 @@ try {
   await suggest("SELECT * FROM empty_s");
   expect(await selectedOption.locator(".cm-completionLabel").innerText() === "empty_schema", "empty PostgreSQL schema not suggested");
   await page.keyboard.press("Escape");
+  await page.locator(".tree-database[data-database='app'] > summary [data-tree-toggle]").click();
+  await page.locator('[data-display-schemas="app"]').click();
+  await page.locator('#schemaList input[value="public"]').uncheck();
+  await page.locator('#applySchemaPicker').click();
+  await suggest("SELECT * FROM or");
+  expect(await page.locator(".cm-completionLabel").getByText("public.orders", { exact: true }).count() === 0, "hidden PostgreSQL schema still suggests qualified tables");
+  await suggest("SELECT * FROM public.or");
+  expect(await selectedOption.locator(".cm-completionLabel").innerText() === "orders", "explicit hidden PostgreSQL schema lost its tables");
 
   await page.locator("[data-connection-id='mysql-local']").click();
   await page.locator(".tree-database[data-database='warehouse'] > summary").click({ button: "right" });
@@ -181,6 +192,13 @@ try {
   expect(await selectedOption.locator(".cm-completionLabel").innerText() === "private_inventory", "qualified MySQL table is missing");
   await suggest("SELECT * FROM warehouse_reporting.private_inventory p WHERE p.priv");
   expect(await selectedOption.locator(".cm-completionLabel").innerText() === "private_sku", "cross-database alias lost its fields");
+  await page.locator('[data-display-databases]').click();
+  await page.locator('#databaseList input[value="warehouse_reporting"]').uncheck();
+  await page.locator('#applyDatabasePicker').click();
+  await suggest("SELECT * FROM ");
+  expect(await page.locator(".cm-completionLabel").getByText("warehouse_reporting", { exact: true }).count() === 0, "hidden MySQL database still appears in SQL suggestions");
+  await suggest("SELECT * FROM warehouse_reporting.");
+  expect(await selectedOption.locator(".cm-completionLabel").innerText() === "private_inventory", "explicit hidden MySQL database lost its tables");
   expect(!failures.length, failures.join("\n"));
   writeFileSync(resolve(evidence, "report.json"), JSON.stringify({ measurements, failures }, null, 2));
   console.log("PASS: blank editor dismissal, Schema/database hints, qualified tables and alias fields, lazy cross-database metadata and keyboard acceptance.");

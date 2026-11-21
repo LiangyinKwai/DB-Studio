@@ -2,7 +2,7 @@ import { createServer } from "node:http";
 import { createReadStream, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { extname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { chromium, revealObject, setTabReadOnly } from "./playwright-import.mjs";
+import { chromium, revealObject, selectPostgresTarget, setTabReadOnly } from "./playwright-import.mjs";
 import { createWorkspaceFixture } from "./fixtures/workspace-fixture.mjs";
 
 const root = resolve(fileURLToPath(new URL("..", import.meta.url)));
@@ -311,6 +311,7 @@ await check("write mode executes SQL directly and supports transaction rollback"
   expect((await page.locator(".tab-label").innerText()).trim() === "查询 1", "query numbering did not restart at the first available number");
   expect(await page.locator(".tab-close").count() === 1, "single query tab is missing its close button");
   await ensureConnection("conn-dev");
+  await selectPostgresTarget(page, "app", "public");
   await expandDatabase("app");
   const editor = page.locator("#sqlEditor .cm-content");
   await editor.click(); await page.keyboard.press("Meta+A"); await page.keyboard.type("UPDATE public.orders SET status = 'PAID'");
@@ -470,6 +471,7 @@ await check("delayed query from another tab does not pollute the active tab", as
   await page.locator("#messageTab").click();
   const messageTabId = await page.locator(".query-tab.active").getAttribute("data-tab-id");
   await page.locator("#addQueryTab").click();
+  await selectPostgresTarget(page, "app", "public");
   await editor.click(); await page.keyboard.press("Meta+A"); await page.keyboard.type("SELECT /* fixture_delay */ 1");
   await page.locator("#runQuery").click();
   await waitFor(() => calls("execute_query").some((entry) => /fixture_delay/.test(entry.args?.request?.sql || "")), "delayed query");
@@ -489,6 +491,7 @@ await check("late errors remain attached to the background tab", async () => {
   await page.locator("#messageTab").click();
   const activeBeforeError = await page.locator(".query-tab.active").getAttribute("data-tab-id");
   await page.locator("#addQueryTab").click();
+  await selectPostgresTarget(page, "app", "public");
   const editor = page.locator("#sqlEditor .cm-content");
   if (await page.locator("#openTableSql").isVisible()) await page.locator("#openTableSql").click();
   await editor.click(); await page.keyboard.press("Meta+A"); await page.keyboard.type("SELECT /* fixture_delay_error */ 1");

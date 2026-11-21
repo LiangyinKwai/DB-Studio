@@ -1826,13 +1826,21 @@ export class ResultGrid {
         return row;
       }));
       const rect = operator.getBoundingClientRect();
-      const below = window.innerHeight - rect.bottom - 14;
-      const above = rect.top - 14;
-      const upward = below < 240 && above > below;
-      menu.style.maxHeight = `${Math.max(0, Math.min(260, upward ? above : below))}px`;
-      menu.style.top = upward ? 'auto' : 'calc(100% + 5px)';
-      menu.style.bottom = upward ? 'calc(100% + 5px)' : 'auto';
+      const panelRect = panel.getBoundingClientRect();
+      const margin = 8;
+      const gap = 6;
+      const right = panelRect.right + gap;
+      const left = panelRect.left - gap - rect.width;
+      const beside = right + rect.width <= window.innerWidth - margin ? right : left >= margin ? left : null;
+      const availableHeight = beside === null ? rect.top - gap - margin : window.innerHeight - 2 * margin;
+      menu.style.width = `${rect.width}px`;
+      menu.style.maxHeight = `${Math.max(0, Math.min(260, availableHeight))}px`;
       menu.hidden = false;
+      // Keep the value and action controls clickable while the list is open.
+      const top = beside === null ? rect.top - gap - menu.offsetHeight
+        : Math.max(margin, Math.min(rect.top, window.innerHeight - margin - menu.offsetHeight));
+      menu.style.left = `${(beside ?? rect.left) - rect.left}px`;
+      menu.style.top = `${top - rect.top}px`;
       operator.setAttribute('aria-expanded', 'true');
       menu.focus({ preventScroll: true });
       highlightOperator();

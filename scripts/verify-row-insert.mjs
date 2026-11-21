@@ -176,6 +176,8 @@ try {
   assert.match(await submit(), new RegExp(`VALUES \\(CURRENT_DATE, E'2026-11-20 10:11:12\\+00:00', false, E'\\{\\}', E'${uuid}', NULL, E''\\);`));
 
   await page.locator('[data-connection-id="row-mysql"]').click();
+  await page.locator('.mysql-database[data-database="warehouse"] > summary [data-tree-toggle]').click();
+  await page.locator('[data-object-id="mysql-shortcuts"]').waitFor({ state: 'attached' });
   await verifyCopy("mysql", mysqlShortcuts);
   await page.getByText("选择日期时间", { exact: true }).click();
   await dateTime.fill("2026-11-20T14:30");

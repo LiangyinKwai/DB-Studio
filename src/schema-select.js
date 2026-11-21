@@ -1,8 +1,9 @@
 /** Searchable Schema picker. Browsing options never changes the execution target. */
-export function createSchemaSelect({ trigger, label, panel, search, list, empty, count, onChange, onOpen, manageTrigger = true }) {
+export function createSchemaSelect({ trigger, label, panel, search, list, empty, count, backButton, onChange, onOpen, onClose, manageTrigger = true }) {
   let options = [], value = "", selectedValue = "", contextKey, activeValue;
   let noun = "Schema";
   let refreshing = false;
+  let navigate, selectOption, level;
   count.setAttribute("role", "status");
   count.setAttribute("aria-live", "polite");
   count.setAttribute("aria-atomic", "true");
@@ -11,11 +12,13 @@ export function createSchemaSelect({ trigger, label, panel, search, list, empty,
     `${option.label} ${option.detail || ""}`.toLowerCase().includes(search.value.trim().toLowerCase()));
 
   function close(restoreFocus = false) {
+    const wasOpen = isOpen();
     panel.hidden = true;
     trigger.setAttribute("aria-expanded", "false");
     search.setAttribute("aria-expanded", "false");
     search.removeAttribute("aria-activedescendant");
     if (restoreFocus && !trigger.disabled && !trigger.hidden) trigger.focus();
+    if (wasOpen) onClose?.();
   }
   function position() {
     if (!isOpen()) return;
@@ -89,8 +92,14 @@ export function createSchemaSelect({ trigger, label, panel, search, list, empty,
   }
   function choose(nextValue) {
     if (!options.some((option) => option.value === nextValue)) return;
+    if (navigate) {
+      navigate(nextValue);
+      return;
+    }
+    const change = selectOption || onChange;
+    const changed = nextValue !== value;
     close(true);
-    if (nextValue !== value) onChange(nextValue);
+    if (changed) change(nextValue);
   }
   if (manageTrigger) trigger.addEventListener("click", () => isOpen() ? close(true) : open());
   if (manageTrigger) trigger.addEventListener("keydown", (event) => {
@@ -116,7 +125,18 @@ export function createSchemaSelect({ trigger, label, panel, search, list, empty,
       event.preventDefault();
       event.stopPropagation();
       close(true);
-    } else if (event.key === "Tab") close(true);
+    } else if (event.key === "Tab") {
+      if (event.shiftKey && backButton && level) {
+        event.preventDefault();
+        backButton.focus();
+      } else close(true);
+    }
+  });
+  backButton?.addEventListener("keydown", event => {
+    if (event.key !== "Escape") return;
+    event.preventDefault();
+    event.stopPropagation();
+    close(true);
   });
   list.addEventListener("pointermove", (event) => {
     const row = event.target.closest('[role="option"]');
@@ -147,6 +167,13 @@ export function createSchemaSelect({ trigger, label, panel, search, list, empty,
     close,
     update(next) {
       if (next.contextKey !== contextKey || next.disabled || next.hidden) close();
+      if (level !== next.level) {
+        search.value = "";
+        activeValue = next.selectedValue ?? next.value;
+      }
+      level = next.level;
+      navigate = next.navigate;
+      selectOption = next.selectOption;
       options = next.options;
       noun = next.noun || "Schema";
       refreshing = Boolean(next.refreshing);
@@ -157,12 +184,12 @@ export function createSchemaSelect({ trigger, label, panel, search, list, empty,
       value = next.value;
       selectedValue = next.selectedValue ?? value;
       contextKey = next.contextKey;
-      trigger.value = value;
+      trigger.value = value ?? "";
       trigger.disabled = next.disabled;
       trigger.hidden = next.hidden;
       if (label) {
         label.textContent = next.label;
-        trigger.setAttribute("aria-label", `查询 ${noun}：${next.label}`);
+        trigger.setAttribute("aria-label", next.ariaLabel || `查询 ${noun}：${next.label}`);
       }
       if (isOpen()) { render(); position(); }
     },

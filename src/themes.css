@@ -541,6 +541,7 @@ body .cm-editor.cm-editor .cm-selectionMatch {
 #queryTargetIcon { display: flex; flex: none; color: var(--accent-muted); }
 #queryTargetIcon .ui-icon { width: 15px; height: 15px; }
 #querySchemaLabel { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.query-schema-control[data-driver="postgres"] .schema-select-trigger { width: 204px; }
 .schema-select-trigger > .theme-chevron { flex: none; margin: 0 1px 3px 0; }
 .query-schema-control .schema-select-trigger:focus-visible { outline: 2px solid var(--accent-focus); outline-offset: 2px; }
 .query-schema-control .schema-select-trigger[aria-expanded="true"] { border-color: var(--accent-line); background: var(--selected-bg); }
@@ -560,6 +561,9 @@ body .cm-editor.cm-editor .cm-selectionMatch {
   font-size: 12px;
 }
 .schema-select-search { flex: none; padding: 10px; border-bottom: 1px solid var(--app-border); }
+.schema-select-path { display: flex; flex: none; align-items: center; gap: 8px; padding: 6px 10px 0; }
+.schema-select-path button { flex: none; }
+.schema-select-path span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 body .schema-select-search input {
   width: 100%; height: 32px; padding: 6px 9px;
   background: var(--input-bg); color: var(--app-text);
@@ -583,6 +587,7 @@ body .schema-select-search input:focus { outline: 2px solid var(--accent-focus);
 .query-target-feedback[data-error="true"] { color: var(--error); }
 @media (max-width: 1200px) {
   .query-schema-control .schema-select-trigger { width: 150px; }
+  .query-schema-control[data-driver="postgres"] .schema-select-trigger { width: 176px; }
 }
 
 /* Column filters live beside sorting and retain the original row identities. */
@@ -612,7 +617,7 @@ body .db-grid-filter-operator:hover { border-color: var(--accent-line); backgrou
 body .db-grid-filter-operator[aria-expanded="true"] { border-color: var(--accent-line); background: var(--selected-bg); }
 body .db-grid-filter-operator[aria-expanded="true"] .theme-chevron { transform: rotate(225deg); margin-bottom: -3px; }
 body .db-grid-filter-panel input:focus, body .db-grid-filter-operator:focus-visible { outline: 2px solid var(--accent-focus); outline-offset: 1px; border-color: var(--accent-focus); }
-body .db-grid-filter-operators { position: absolute; z-index: 1; left: 0; right: 0; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; padding: 4px; border: 1px solid var(--app-border); border-radius: 7px; background: var(--app-surface); color: var(--app-text); box-shadow: 0 10px 30px var(--shadow); outline: none; }
+body .db-grid-filter-operators { position: absolute; z-index: 1; box-sizing: border-box; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; padding: 4px; border: 1px solid var(--app-border); border-radius: 7px; background: var(--app-surface); color: var(--app-text); box-shadow: 0 10px 30px var(--shadow); outline: none; }
 body .db-grid-filter-option { display: flex; align-items: center; gap: 8px; min-height: 30px; padding: 6px 8px; border-radius: 4px; cursor: pointer; }
 body .db-grid-filter-option.active { background: var(--hover-bg); outline: 1px solid var(--accent-line); outline-offset: -1px; }
 body .db-grid-filter-option[aria-selected="true"] { background: var(--selected-bg); }

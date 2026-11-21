@@ -175,6 +175,10 @@
                 <span id="querySchemaLabel"></span><span class="theme-chevron" aria-hidden="true"></span>
               </button>
               <div id="querySchemaMenu" class="schema-select-menu" hidden>
+                <div id="querySchemaPath" class="schema-select-path" hidden>
+                  <button id="querySchemaBack" class="quiet-btn" type="button">← 数据库</button>
+                  <span id="querySchemaDatabase"></span>
+                </div>
                 <div class="schema-select-search"><input id="querySchemaSearch" type="text" placeholder="搜索 Schema…" aria-label="搜索 Schema" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="querySchemaList" autocomplete="off" spellcheck="false" /></div>
                 <div id="querySchemaList" class="schema-select-list" role="listbox" aria-label="查询 Schema"></div>
                 <div id="querySchemaEmpty" class="schema-select-empty" role="status" hidden>没有匹配的 Schema</div>
@@ -438,6 +442,7 @@
           <label class="database-select-all"><input id="databaseSelectAll" type="checkbox" /><span>全选</span><small id="databaseSelectionCount">0 个已显示</small></label>
         </div>
         <div class="database-list" id="databaseList"></div>
+        <p id="databasePickerError" class="dialog-feedback error" role="alert"></p>
         <div class="dialog-actions">
           <span class="toolbar-spacer"></span>
           <button class="secondary-btn" id="cancelDatabasePicker" type="button">取消</button>
@@ -460,6 +465,7 @@
           <label class="database-select-all"><input id="schemaSelectAll" type="checkbox" /><span>全选</span><small id="schemaSelectionCount">0 个已显示</small></label>
         </div>
         <div class="database-list" id="schemaList"></div>
+        <p id="schemaPickerError" class="dialog-feedback error" role="alert"></p>
         <div class="dialog-actions">
           <span class="toolbar-spacer"></span>
           <button class="secondary-btn" id="cancelSchemaPicker" type="button">取消</button>

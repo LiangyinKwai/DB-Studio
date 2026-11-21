@@ -117,7 +117,7 @@ export function buildCompletionSchema(objects, database, driver = "postgres", na
   const namespace = Object.create(null);
   const addNamespace = name => {
     return namespace[namespaceKey(name)] ??= {
-      self: { label: name, apply: identifier(name), type: "namespace",
+      self: { label: name, apply: identifier(name), type: "namespace", namespaceName: name,
         kindLabel: driver === "mysql" ? "数据库" : "Schema" },
       children: Object.create(null),
     };
@@ -147,19 +147,20 @@ export function buildCompletionSchema(objects, database, driver = "postgres", na
   return namespace;
 }
 
-// Read metadata only for a database actually named in the current statement.
-export function mysqlCompletionDatabases(context) {
+// Retain completions for namespaces explicitly named in the current statement.
+export function sqlCompletionNamespaces(context, driver) {
   let statement = syntaxTree(context.state).resolveInner(context.pos, -1);
   while (statement && statement.name !== "Statement") statement = statement.parent;
-  const databases = new Set();
+  const namespaces = new Set();
   statement?.cursor().iterate(node => {
     if (node.name !== "CompositeIdentifier") return;
     const first = node.node.firstChild;
     if (!first || first.nextSibling?.name !== ".") return;
     const name = context.state.sliceDoc(first.from, first.to);
-    databases.add(name.startsWith("`") ? name.slice(1, -1).replaceAll("``", "`") : name);
+    if (driver === "mysql") namespaces.add(name.startsWith("`") ? name.slice(1, -1).replaceAll("``", "`") : name);
+    else namespaces.add(name.startsWith('"') ? name.slice(1, -1).replaceAll('""', '"') : name.toLowerCase());
   });
-  return [...databases];
+  return [...namespaces];
 }
 
 /** Prefer the active namespace, with fields scoped to the SQL's FROM/JOIN relations. */
@@ -167,8 +168,9 @@ export function catalogCompletionSource(config) {
   // An editor has no default table, even when opened from a table browser.
   const complete = schemaCompletionSource({ ...config, defaultTable: undefined });
   const quoteIdentifier = config.dialect === MySQL ? "`" : '"';
+  const namespaceVisible = name => !config.visibleNamespaces || config.visibleNamespaces.has(name);
   const secondaryRelations = Object.values(config.schema || {})
-    .filter((scope) => scope.self.label !== config.defaultSchema)
+    .filter((scope) => scope.self.label !== config.defaultSchema && namespaceVisible(scope.self.label))
     .flatMap((scope) => Object.values(scope.children).map(({ self }) => ({
       ...self,
       label: `${scope.self.label}.${self.label}`,
@@ -188,7 +190,8 @@ export function catalogCompletionSource(config) {
     if (!result || context.state.sliceDoc(result.from - 1, result.from) === ".") return result;
     const quote = context.state.sliceDoc(result.from, result.from + 1).match(/^["`]/)?.[0];
     result = { ...result, options: [
-      ...result.options.map((option) => option.type === "class" ? { ...option, boost: 25 } : option),
+      ...result.options.filter(option => option.type !== "namespace" || namespaceVisible(option.namespaceName ?? option.label))
+        .map((option) => option.type === "class" ? { ...option, boost: 25 } : option),
       ...secondaryRelations.map((option) => quote ? { ...option, label: option.quotedLabel, apply: option.quotedLabel } : option),
     ] };
     if (!node) return result;

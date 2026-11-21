@@ -3,7 +3,7 @@ import { createServer } from "node:http";
 import { createReadStream, existsSync, statSync } from "node:fs";
 import { extname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { chromium } from "./playwright-import.mjs";
+import { chromium, selectPostgresTarget } from "./playwright-import.mjs";
 import { createWorkspaceFixture } from "./fixtures/workspace-fixture.mjs";
 
 // Query output and dedicated table structure use the browser fixture.
@@ -39,6 +39,7 @@ try {
   await page.goto(`http://127.0.0.1:${server.address().port}`, { waitUntil: "networkidle" });
   await page.locator("[data-connection-id='conn-dev']").click();
   await page.locator("#addQueryTab").click();
+  await selectPostgresTarget(page, "app", "public");
   await page.locator("#runQuery").waitFor();
   await page.waitForFunction(() => !document.querySelector("#runQuery").disabled);
   const queryId = await page.locator(".query-tab.active").getAttribute("data-tab-id");
