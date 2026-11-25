@@ -92,7 +92,7 @@ dependencies = [
 
 [[package]]
 name = "async-trait"
-version = "0.1.92"
+version = "0.1.102"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "82f6aeea286b8eb4dd3431a1be1b59d290ace00f5bfd8e2a159bc2a05e2c1667"
 dependencies = [
@@ -322,7 +322,7 @@ dependencies = [
 
 [[package]]
 name = "cargo-platform"
-version = "0.1.9"
+version = "0.1.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e35af189006b9c0f00a064685c727031e3ed2d8020f7ba284d78cc2671bd36ea"
 dependencies = [
@@ -702,7 +702,7 @@ dependencies = [
 
 [[package]]
 name = "db-studio"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "arboard",
  "futures-util",
@@ -3384,7 +3384,7 @@ dependencies = [
 
 [[package]]
 name = "serde-untagged"
-version = "0.1.9"
+version = "0.1.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f9faf48a4a2d2693be24c6289dbe26552776eb7737074e6722891fadbe6c5058"
 dependencies = [
@@ -4125,7 +4125,7 @@ dependencies = [
 
 [[package]]
 name = "time-core"
-version = "0.1.9"
+version = "0.1.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9e1c906769ad99c88eaa54e728060edef082f8e358ff32030cb7c7d315e81109"
 

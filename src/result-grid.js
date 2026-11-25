@@ -243,7 +243,7 @@ export class ResultGrid {
     this.viewport = element('div', 'db-grid-viewport');
     this.viewport.tabIndex = 0;
     this.viewport.setAttribute('role', 'grid');
-    this.viewport.setAttribute('aria-label', '查询结果。方向键浏览，输入文字直接编辑，双击、F2 或 Enter 编辑，右键查看详情，空格选择行，Control 或 Command 加 C 复制。表头可排序和筛选。');
+    this.viewport.setAttribute('aria-label', '查询结果。方向键浏览，双击或 Enter 打开单元格，可编辑字段可用 F2 编辑，右键查看详情，空格选择行，Control 或 Command 加 C 复制。表头可排序和筛选。');
     this.viewport.setAttribute('aria-multiselectable', 'true');
     this.viewport.setAttribute('aria-readonly', String(!onCommitCell));
     this.canvas = element('div', 'db-grid-canvas');
@@ -268,7 +268,7 @@ export class ResultGrid {
     this.filterBar = element('div', 'db-grid-filter-bar');
     this.filterBar.hidden = true;
     this.footer = element('div', 'db-grid-footer');
-    this.footerHint = element('span', 'db-grid-footer-hint', '输入文字直接编辑 · 双击 / Enter 编辑 · 右键详情');
+    this.footerHint = element('span', 'db-grid-footer-hint', '双击或 Enter 打开单元格 · 右键详情');
     this.footerHint.title = '空格选择当前行 · Shift + 点击连续选择 · ⌘/Ctrl A 全选 · Esc 清除选择 · 双击列边缘自动调整列宽';
     this.footerStatus = element('span', 'db-grid-footer-status');
     this.footerStatus.setAttribute('role', 'status');
@@ -296,7 +296,7 @@ export class ResultGrid {
     this.viewport.addEventListener('dblclick', (event) => {
       const resize = event.target.closest('[data-resize-column]');
       if (resize) this.fitColumn(Number(resize.dataset.resizeColumn));
-      else if (event.target !== this.editorInput) this.handleCellDoubleClick(event.target.closest('[data-grid-cell]'));
+      else if (event.target !== this.editorInput) this.openCell(event.target.closest('[data-grid-cell]'));
     }, options);
     this.viewport.addEventListener('contextmenu', (event) => {
       const header = event.target.closest('[data-column-header]');
@@ -612,7 +612,7 @@ export class ResultGrid {
         cell.textContent = value === '' ? '空字符串' : text.length > 1000 ? `${text.slice(0, 1000)}…` : text;
         // Keep large text/JSON out of native tooltip buffers. The inspector
         // receives the original value without truncation.
-        cell.title = `${value === '' ? '空字符串（长度为 0）' : text.length > 400 ? `${text.slice(0, 400)}…` : text}\n${draft ? draft.pending ? '保存中 · ' : '未保存草稿 · ' : ''}输入文字直接编辑 · 双击查看 JSON 或编辑 · Enter 编辑 · 右键查看详情`;
+        cell.title = `${value === '' ? '空字符串（长度为 0）' : text.length > 400 ? `${text.slice(0, 400)}…` : text}\n${draft ? draft.pending ? '保存中 · ' : '未保存草稿 · ' : ''}双击或 Enter 打开 · 右键查看详情`;
         row.append(cell);
       }
       fragment.append(row);
@@ -885,11 +885,14 @@ export class ResultGrid {
     this.notifySelection();
   }
 
-  handleCellDoubleClick(cell) {
+  openCell(cell) {
     const payload = this.cellPayload(cell);
     if (!payload) return;
-    if (this.onInspect && this.shouldInspectCell?.(payload)) this.inspectCell(cell);
-    else this.startCellEdit(cell);
+    if (this.onInspect && (this.shouldInspectCell?.(payload) || !this.onCommitCell || !this.getCellEditState?.(payload)?.editable)) {
+      this.inspectCell(cell);
+      return;
+    }
+    this.startCellEdit(cell);
   }
 
   inspectCell(cell) {
@@ -983,7 +986,7 @@ export class ResultGrid {
     cell.classList.toggle('db-grid-boolean', typeof value === 'boolean');
     cell.classList.toggle('db-grid-boolean-true', value === true);
     cell.classList.toggle('db-grid-boolean-false', value === false);
-    cell.title = `${value === '' ? '空字符串（长度为 0）' : text.length > 400 ? `${text.slice(0, 400)}…` : text}\n${draft ? draft.pending ? '保存中 · ' : '未保存草稿 · ' : ''}输入文字直接编辑 · 双击查看 JSON 或编辑 · Enter 编辑 · 右键查看详情`;
+    cell.title = `${value === '' ? '空字符串（长度为 0）' : text.length > 400 ? `${text.slice(0, 400)}…` : text}\n${draft ? draft.pending ? '保存中 · ' : '未保存草稿 · ' : ''}双击或 Enter 打开 · 右键查看详情`;
   }
 
   updateActiveCellDisplay() {
@@ -1536,7 +1539,12 @@ export class ResultGrid {
       this.openSelectedRowMenu(event.target.closest('.db-grid-selector'), event);
       return;
     }
-    if (cell && (event.key === 'F2' || event.key === 'Enter') && !event.ctrlKey && !event.metaKey) { event.preventDefault(); event.stopPropagation?.(); this.startCellEdit(cell); return; }
+    if (cell && (event.key === 'F2' || event.key === 'Enter') && !event.ctrlKey && !event.metaKey) {
+      event.preventDefault(); event.stopPropagation?.();
+      if (event.key === 'Enter') this.openCell(cell);
+      else this.startCellEdit(cell);
+      return;
+    }
     if (cell && event.key.length === 1 && event.key !== ' ' && !event.ctrlKey && !event.metaKey && !event.altKey) {
       event.preventDefault(); event.stopPropagation?.();
       this.startCellEdit(cell, { replaceValue: event.key });
@@ -1614,7 +1622,8 @@ export class ResultGrid {
     const drafts = this.getCellEditDrafts().filter((draft) => draft.pending || draft.dirty);
     this.onDraftChange?.({ rows: this.rows, dirtyCount: drafts.filter(draft => draft.dirty).length, pending: drafts.some(draft => draft.pending) });
     const unsaved = drafts.length ? `未保存 ${drafts.length} 格` : '';
-    this.footerHint.textContent = session ? 'Enter 保存当前格 · Esc 取消当前格 · ⌘/Ctrl S 保存修改' : '点击列名选列 · 输入文字编辑 · 右键详情';
+    this.footerHint.textContent = session ? 'Enter 保存当前格 · Esc 取消当前格 · ⌘/Ctrl S 保存修改' : this.viewport.getAttribute('aria-readonly') === 'true'
+      ? '只读结果 · 双击或 Enter 查看详情' : '双击或 Enter 打开单元格 · F2 编辑';
     this.footerActions.hidden = Boolean(this.externalEditActions);
     const dirty = drafts.filter(draft => draft.dirty);
     const pending = drafts.some(draft => draft.pending);

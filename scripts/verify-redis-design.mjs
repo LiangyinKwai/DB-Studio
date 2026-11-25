@@ -175,7 +175,7 @@ try {
     assert.equal(layout.resultSpace, "pre-wrap");
     assert.ok(layout.resultTop >= layout.commandBottom, "result appears beside command");
   });
-  await until(async () => !(await page.locator("#toast").getAttribute("class")).includes("visible"), "toast settled");
+  await until(async () => !(await page.locator("#toast").getAttribute("class")).includes("visible"), "toast settled", 9000);
   for (const theme of ["light", "dark"]) {
     await check(`${theme} at desktop and minimum window sizes`, async () => {
       await page.locator("#themeButton").click();

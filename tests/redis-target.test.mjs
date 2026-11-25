@@ -50,13 +50,15 @@ test("invalid or absent Redis targets fall back to the saved profile", () => {
   assert.equal(resolveRedisDatabase(null, null), 0);
 });
 
-test("new queries inherit a Redis key or console database and retain it after restoration", () => {
+test("blank consoles always use the profile default even after browsing DB 1", () => {
   for (const source of [{ redisKey: "shared:key" }, { console: true }]) {
-    const runtime = fixture({ ...source, connectionId: "redis", redisDb: 1, database: "0" });
-    const tab = runtime.addTab();
-    assert.equal(tab.database, "1");
-    assert.equal(tab.redisDb, 1);
-    assert.equal(runtime.redisTabDatabase({ ...tab, redisDb: null }), 1);
+    const runtime = fixture({ ...source, connectionId: "redis", redisDb: 1, database: "1" });
+    runtime.state.redisActiveDatabase = 1;
+    runtime.state.redisConsole = { connectionId: "redis", redisDb: 1 };
+    assert.equal(runtime.addTab().redisDb, 0);
+    runtime.state.profiles[0] = { ...profile, redisDb: 5 };
+    assert.equal(runtime.addTab().redisDb, 5);
+    assert.equal(runtime.addTab("", "redis", null, { newQuery: true, database: 0 }).redisDb, 0);
   }
 });
 

@@ -87,7 +87,7 @@ test('space and Shift + space select contiguous visible rows', () => {
 
 test('query execution shortcuts do not also start cell editing', () => {
   const grid = gridState();
-  const cell = { matches() { return false; } };
+  const cell = { dataset: { position: '0', columnIndex: '1' }, matches() { return false; } };
   cell.closest = (selector) => selector === '[data-grid-cell]' ? cell : null;
   let editing = false;
   grid.startCellEdit = () => { editing = true; };

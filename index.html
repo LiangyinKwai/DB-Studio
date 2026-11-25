@@ -82,11 +82,11 @@
                 </button>
                 <button class="quiet-btn" id="clearHistory" type="button" hidden>清空</button>
               </div>
-              <label class="sidebar-search history-search" id="historySearchBox" hidden><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4.5 4.5"/></svg><input id="historySearch" type="search" placeholder="搜索 SQL 或连接…" aria-label="搜索最近查询" autocomplete="off" /></label>
+              <label class="sidebar-search history-search" id="historySearchBox" hidden><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4.5 4.5"/></svg><input id="historySearch" type="search" placeholder="搜索 SQL、Redis 命令或连接…" aria-label="搜索最近查询" autocomplete="off" /></label>
               <div class="recent-queries scroll-area" id="recentQueries" hidden></div>
             </section>
           </div>
-          <div class="pane-footnote" id="draftSaveStatus" data-state="idle" role="status" aria-live="polite" aria-atomic="true"><span class="save-indicator" aria-hidden="true"></span><span id="draftSaveLabel">编辑后自动保存 SQL 草稿</span></div>
+          <div class="pane-footnote" id="draftSaveStatus" data-state="idle" role="status" aria-live="polite" aria-atomic="true"><span class="save-indicator" aria-hidden="true"></span><span id="draftSaveLabel">编辑后自动保存 SQL 草稿</span><span class="console-session-note">命令输入仅保留在当前会话</span></div>
         </aside>
         <div
           class="splitter vertical"
@@ -108,8 +108,9 @@
           aria-label="数据库对象浏览器"
         >
           <div class="pane-heading">
-            <span>数据库对象</span>
+            <span id="objectsHeading">数据库对象</span>
             <div>
+              <button class="icon-btn" id="newRedisKey" type="button" title="新建键" aria-label="新建键" hidden>＋</button>
               <button class="icon-btn" id="openObjectQuick" type="button" aria-label="快速打开对象" title="快速打开对象（⌘ K）"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4.5 4.5"/></svg></button>
               <button class="icon-btn pane-hide" type="button" data-hide-pane="objects" title="隐藏数据库对象" aria-label="隐藏数据库对象"><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="3"/><path d="M9 3v18m7-6-3-3 3-3"/></svg></button>
               <button
@@ -158,7 +159,7 @@
               class="query-tabs"
               id="queryTabs"
               role="tablist"
-              aria-label="SQL 查询标签"
+              aria-label="工作区标签"
             ></div>
             <button
               class="icon-btn add-tab"
@@ -167,6 +168,7 @@
             >
               <svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
             </button>
+            <button class="icon-btn" id="showWorkspaceTabs" type="button" title="查看所有标签" aria-label="查看所有标签" aria-haspopup="dialog" hidden><svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg></button>
           </div>
           <div class="query-toolbar" id="queryToolbar">
             <div class="query-schema-control" id="queryTargetBar" hidden>
@@ -261,11 +263,11 @@
                   <div class="welcome-eyebrow">YOUR DATA, IN FOCUS</div>
                   <h2>从一个查询开始</h2>
                   <p>连接数据库，或从对象树打开一张表。</p>
-                  <div class="empty-actions" id="emptyActions"><button class="primary-btn" id="welcomeConnect" type="button">＋ 新建连接</button><button class="secondary-btn" id="welcomeQuery" type="button">新建查询 <kbd>⌘ T</kbd></button></div>
+                  <div class="empty-actions" id="emptyActions"><button class="primary-btn" id="welcomeConnect" type="button">＋ 新建连接</button><button class="secondary-btn" id="welcomeQuery" type="button"><span id="welcomeQueryLabel">新建查询</span> <kbd>⌘ T</kbd></button></div>
                   <div class="welcome-features" id="welcomeFeatures"><span>PostgreSQL</span><span>MySQL</span><span>Redis</span></div>
                   <button class="quiet-btn empty-next" id="emptyNextAction" type="button" hidden>开始编写 SQL</button>
                   <span class="empty-shortcuts"
-                    ><kbd>⌘ T</kbd> 新建查询 <kbd>⌘ ↵</kbd> 执行</span
+                    ><kbd>⌘ T</kbd> <span id="welcomeShortcutLabel">新建查询</span> <kbd>⌘ ↵</kbd> 执行</span
                   >
                 </div>
                 <div id="resultGrid" hidden></div>
@@ -310,7 +312,7 @@
           </div>
           <section class="redis-console" id="redisConsolePanel" hidden aria-label="Redis 命令工作区">
             <div class="redis-workspace-toolbar">
-              <div class="redis-workspace-title"><span class="redis-workspace-mark" aria-hidden="true">R</span><strong>命令工作区</strong><span class="redis-target-label" id="redisConsoleContext">DB 0</span></div>
+              <div class="redis-workspace-title"><span class="redis-workspace-mark" aria-hidden="true">R</span><strong>命令工作区</strong><span class="redis-target-label" id="redisConsoleContext"><span id="redisConsoleConnection"></span><select id="redisConsoleDatabase" aria-label="切换命令台逻辑库"></select></span></div>
               <div class="redis-workspace-actions"><button class="quiet-btn" id="redisClearEditor" type="button">清空输入</button><button class="primary-btn" id="redisConsoleRun" type="button">执行 <kbd>⌘ ↵</kbd></button><button class="icon-btn" id="closeRedisConsole" type="button" title="关闭命令工作区" aria-label="关闭命令工作区">×</button></div>
             </div>
             <div class="redis-command-editor-shell"><div id="redisCommandEditor"></div></div>
@@ -668,7 +670,7 @@
     </dialog>
     <dialog id="shortcutsModal" class="shortcuts-dialog" aria-labelledby="shortcutsTitle">
       <div class="dialog-header"><div><div class="eyebrow">WORK FASTER</div><h2 id="shortcutsTitle">键盘快捷键</h2></div><button class="icon-btn" id="closeShortcuts" type="button" aria-label="关闭快捷键">×</button></div>
-      <dl class="shortcut-list"><div><dt>快速操作 / 切换标签与连接</dt><dd><kbd>⌘ P</kbd></dd></div><div><dt>新建查询</dt><dd><kbd>⌘ T</kbd></dd></div><div><dt>执行 SQL / 所选语句</dt><dd><kbd>⌘ ↵</kbd></dd></div><div><dt>快速打开表 / Redis Key</dt><dd><kbd>⌘ K</kbd></dd></div><div><dt>搜索并定位结果列</dt><dd><kbd>⌘ J</kbd></dd></div><div><dt>筛选左侧对象树</dt><dd><kbd>⌘ ⇧ K</kbd></dd></div><div><dt>保存表修改 / SQL 文件</dt><dd><kbd>⌘ S</kbd></dd></div><div><dt>搜索编辑器内容</dt><dd><kbd>⌘ F</kbd></dd></div><div><dt>在标签之间移动</dt><dd><kbd>←</kbd> <kbd>→</kbd></dd></div><div><dt>编辑选中单元格</dt><dd><kbd>Enter</kbd> <kbd>F2</kbd></dd></div><div><dt>单元格操作 / 查看详情</dt><dd><kbd>Shift F10</kbd></dd></div></dl>
+      <dl class="shortcut-list"><div><dt>快速操作 / 切换标签与连接</dt><dd><kbd>⌘ P</kbd></dd></div><div><dt>新建查询或 Redis 命令台</dt><dd><kbd>⌘ T</kbd></dd></div><div><dt>执行 SQL 或 Redis 命令（支持选区）</dt><dd><kbd>⌘ ↵</kbd></dd></div><div><dt>快速打开表 / Redis Key</dt><dd><kbd>⌘ K</kbd></dd></div><div><dt>搜索并定位结果列</dt><dd><kbd>⌘ J</kbd></dd></div><div><dt>筛选左侧对象树</dt><dd><kbd>⌘ ⇧ K</kbd></dd></div><div><dt>保存表修改 / SQL 文件</dt><dd><kbd>⌘ S</kbd></dd></div><div><dt>搜索编辑器内容</dt><dd><kbd>⌘ F</kbd></dd></div><div><dt>在已聚焦的标签之间移动</dt><dd><kbd>←</kbd> <kbd>→</kbd></dd></div><div><dt>打开选中单元格</dt><dd><kbd>Enter</kbd></dd></div><div><dt>编辑单元格</dt><dd><kbd>F2</kbd></dd></div><div><dt>单元格操作 / 查看详情</dt><dd><kbd>Shift F10</kbd></dd></div></dl>
       <p class="form-note">方向键切换需先聚焦查询标签。Windows / Linux 使用 Ctrl 代替 ⌘。</p>
     </dialog>
     <div class="context-menu result-more-menu" id="resultMoreMenu" role="menu" aria-label="导出与复制" hidden>

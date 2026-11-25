@@ -2,7 +2,7 @@ import { createServer } from "node:http";
 import { createReadStream, existsSync, mkdirSync, statSync } from "node:fs";
 import { extname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { chromium } from "./playwright-import.mjs";
+import { chromium, revealObject } from "./playwright-import.mjs";
 import { createWorkspaceFixture } from "./fixtures/workspace-fixture.mjs";
 
 // Fixture data verifies visual states, not database runtime behavior.
@@ -11,6 +11,8 @@ const dist = resolve(root, "dist");
 const evidence = resolve(root, "output/playwright/redis-navigation");
 mkdirSync(evidence, { recursive: true });
 const fixture = createWorkspaceFixture();
+const connectionName = "Redis 数据平台 · 生产环境 · 亚太地区 · 只读副本";
+fixture.profiles.find(profile => profile.id === "redis-local").name = connectionName;
 fixture.profiles.push({ ...fixture.profiles.find((profile) => profile.id === "redis-local"), id: "redis-second", name: "第二个 Redis" });
 const server = createServer((req, res) => {
   const relative = decodeURIComponent((req.url || "/").split("?")[0]).replace(/^\//, "") || "index.html";
@@ -81,10 +83,70 @@ const assertCollapsed = async (scanCount) => {
 };
 try {
   await page.goto(`http://127.0.0.1:${server.address().port}`, { waitUntil: "networkidle" });
+  // Starting from an unbound query exercises a different path from opening
+  // a console on an already selected connection.
+  for (const entry of ["card", "palette", "save"]) {
+    await page.locator("#addQueryTab").click();
+    const original = await page.locator(".query-tab.active").getAttribute("data-tab-id");
+    if (entry !== "card") await page.locator("#sqlEditor .cm-content").fill("SELECT 42");
+    if (entry === "card") await connect("redis-local");
+    if (entry === "palette") {
+      await page.locator("#openCommands").click();
+      await page.locator("dialog.command-palette[open] [role='option']").filter({ hasText: connectionName }).click();
+    }
+    if (entry === "save") {
+      await page.locator("[data-edit-id='redis-local']").click();
+      await page.locator("#saveConnection").click();
+      await until(() => page.locator("#connectionModal").isHidden(), "save Redis profile");
+    }
+    await page.locator("#redisConsolePanel").waitFor();
+    expect(await page.locator("#redisConsoleDatabase").inputValue() === "0", entry + " bound the wrong DB");
+    if (entry === "card") {
+      expect(await page.locator(".query-tab.active").getAttribute("data-tab-id") === original, "empty draft opened duplicate tab");
+    } else {
+      const saved = await page.evaluate(() => JSON.parse(localStorage.getItem("db-studio.workspace-tabs.v2")));
+      expect(saved.some(tab => tab.id === original && tab.sql === "SELECT 42" && !tab.connectionId), entry + " lost the persisted SQL draft");
+      await page.locator(`.query-tab[data-tab-id='${original}'] .tab-select`).click();
+      expect(await page.locator("#sqlEditor .cm-content").innerText() === "SELECT 42", entry + " overwrote SQL text");
+    }
+    while (await page.locator(".tab-close").count()) await page.locator(".tab-close").last().click();
+    await page.reload({ waitUntil: "networkidle" });
+  }
+  await connect("redis-local");
+  await page.locator("#welcomeQuery").getByText("新建命令台").waitFor();
+  await page.locator("#welcomeQuery").click();
+  await page.locator("#redisConsolePanel").waitFor();
+  await page.locator("#closeRedisConsole").click();
+  await expand(1);
+  await page.locator("#addQueryTab").click();
+  expect((await page.locator("#redisConsoleContext").innerText()).includes("DB 0"), "new console ignored connection default");
+  await page.locator('#redisCommandEditor .cm-content').fill("PING");
+  await page.locator("#redisConsoleRun").click();
+  await until(() => calls("execute_redis_command").length > 0);
+  await until(() => page.locator("#redisConsoleRun").isEnabled());
+  await page.locator(".redis-database[data-redis-db='1'] > summary .tree-label").click();
+  expect((await page.locator("#redisConsoleContext").innerText()).includes("DB 0"), "tree selection retargeted the console");
+  await page.getByRole("button", { name: /切换命令台逻辑库/ }).click();
+  await page.getByRole("option", { name: /DB 1$/ }).click();
+  await until(() => page.locator("#redisConsoleContext").innerText().then(text => text.includes("DB 1")), "switch console to DB 1");
+  expect(calls("execute_redis_command").at(-1).args.request.sql === "SELECT 1", "server session did not switch DB");
+  expect((await page.locator("#redisCommandEditor .cm-content").innerText()).includes("PING"), "DB switch erased input");
+  await page.locator("#redisConsoleRun").click();
+  await until(() => calls("execute_redis_command").at(-1).args.request.sql === "PING");
+  expect(calls("execute_redis_command").at(-1).args.request.database === 1, "next command used the previous DB");
+  await page.keyboard.press("Control+t");
+  await until(() => page.locator(".query-tab").count().then(count => count === 2), "second console tab");
+  expect(await page.locator('#redisCommandEditor .cm-placeholder').isVisible(), "new console reused the previous input");
+  await page.locator("#closeRedisConsole").click();
+  expect((await page.locator('#redisCommandEditor .cm-content').innerText()).includes("PING"), "switching tabs lost the command");
+  await page.locator("#closeRedisConsole").click();
+  await page.locator("[data-connection-toggle='redis-local']").click();
   await connect("conn-dev");
   await page.locator(".tree-database[data-database='app'] > summary [data-tree-toggle]").click();
   await page.locator(".tree-schema[data-schema='public'] > summary [data-tree-toggle]").click();
-  await page.locator("[data-object-id='public.orders'] .object-main").dblclick();
+  const orders = page.locator("[data-object-id='public.orders'] .object-main");
+  await revealObject(orders);
+  await orders.dblclick();
   await page.locator("#resultGrid .db-grid-cell").first().waitFor();
   const tableId = await page.locator(".query-tab.active").getAttribute("data-tab-id");
   const tableTab = page.locator(`.query-tab[data-tab-id='${tableId}'] .tab-select`);
@@ -98,7 +160,11 @@ try {
   expect(await page.locator("#queryToolbar").isHidden(), "SQL toolbar appears over Redis console");
   expect(await page.locator(".query-tab.active").count() === 0, "SQL tab still marked selected under Redis console");
   expect(await page.locator("#queryTargetBar").isHidden(), "SQL schema selector appears over Redis console");
-  expect((await page.locator("#redisConsoleContext").innerText()).includes("本地 Redis · DB 1"), "console connection/DB unclear");
+  await page.setViewportSize({ width: 1060, height: 680 });
+  expect(await page.locator("#redisConsoleConnection").getAttribute("title") === connectionName, "full Redis connection name missing");
+  const dbLabel = page.locator("#redisConsoleContext .app-select-value");
+  expect(await dbLabel.innerText() === "DB 1" && await dbLabel.evaluate(node => node.scrollWidth <= node.clientWidth), "Redis DB label truncated at minimum width");
+  await page.setViewportSize({ width: 1440, height: 900 });
   const sqlCalls = calls("execute_query").length;
   const redisCalls = calls("execute_redis_command").length;
   await page.locator("#redisCommandEditor .cm-content").fill("PING");

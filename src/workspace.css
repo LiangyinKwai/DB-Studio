@@ -114,6 +114,9 @@ body .recent-query small { display: block; margin-top: 4px; font-size: 10px; ove
 .recent-query .ui-icon { width: 14px; height: 14px; margin-top: 3px; }
 body .pane-footnote { display: flex; align-items: center; gap: 7px; height: 37px; min-height: 37px; padding: 0 14px; border-color: var(--hairline); color: var(--subtle-text); }
 .save-indicator { width: 5px; height: 5px; border-radius: 50%; background: var(--success); opacity: .8; }
+#draftSaveStatus .console-session-note { display: none; }
+#draftSaveStatus.console-session:not([data-state="error"]) .console-session-note { display: inline; }
+#draftSaveStatus.console-session:not([data-state="error"]) :is(#draftSaveLabel, .save-indicator) { display: none; }
 #draftSaveStatus .save-indicator { flex: none; background: var(--app-muted); }
 #draftSaveStatus[data-state="saved"] .save-indicator { background: var(--success); }
 #draftSaveStatus[data-state="pending"] .save-indicator { background: var(--warning); }
@@ -251,6 +254,13 @@ body #objectTree .object-main:hover { background: transparent; }
 body #objectTree :is(.tree-root-action, .tree-database-action) { flex: none; margin-left: 0; }
 body #objectTree :is(.tree-root-action, .tree-database-action) .ui-icon,
 body #objectTree .redis-key-info .ui-icon { width: 14px; height: 14px; }
+/* At the minimum sidebar width, keep every action reachable without wrapping its label. */
+.objects-pane { container-type: inline-size; }
+@container (max-width: 225px) {
+  #objectsPane .pane-heading { flex-wrap: wrap; height: auto; min-height: 48px; gap: 2px 6px; padding: 6px 8px; }
+  #objectsHeading { white-space: nowrap; }
+  #objectsPane .pane-heading > div { margin-left: auto; }
+}
 /* Heading actions share one box and an even icon size so every glyph lands on whole pixels. */
 body .pane-heading > div { display: flex; align-items: center; gap: 2px; }
 body .pane-heading .icon-btn, body #addQueryTab {
@@ -305,6 +315,7 @@ body .splitter:hover::after { transition-delay: .12s; }
 body .splitter.dragging::after { transition-delay: 0s; }
 body #editorSplitter:focus:not(:focus-visible):not(:hover):not(.dragging)::after { background: transparent; }
 body .tabbar { min-height: 42px; height: 42px; background: var(--app-panel); border-color: var(--hairline); }
+body #showWorkspaceTabs { align-self: center; flex: 0 0 32px; }
 body .query-tab {
   min-width: 140px; max-width: 250px; border-right-color: var(--hairline);
   transition: background-color .12s ease, color .12s ease;

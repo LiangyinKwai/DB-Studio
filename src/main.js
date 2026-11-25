@@ -97,7 +97,7 @@ import { boundConsoleHistory, consoleOutputNotice, consoleOutputForCopy } from '
 import { redisKeySearchPattern, redisKeyMatchesSearch, searchRedisDatabases } from './redis-search.js';
 import { createConnectionGroups } from "./connection-groups-ui.js";
 import { initConnectionReorder, moveConnection, orderConnections, readConnectionOrder, saveConnectionOrder } from "./connection-order.js";
-import { isRoutine, isSystemDatabase, orderedObjectGroups, syncTreeToggle, setTreeRowExpanded, treeBranchForDoubleClick } from "./object-tree.js";
+import { isRoutine, isSystemDatabase, orderedObjectGroups, syncTreeToggle, setTreeRowExpanded, treeBranchForDoubleClick, navigateTreeRows } from "./object-tree.js";
 
 const shortcutPlatform = navigator.userAgentData?.platform || navigator.platform || '';
 const refreshIcon = '<svg class="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.34 5.66M20 4v7h-7"/></svg>';
@@ -495,6 +495,7 @@ function queryTargetLocked(tab = activeTab()) {
 }
 function queryTargetDescription(tab = activeTab(), { showVisibility = false } = {}) {
   const profile = state.profiles.find((item) => item.id === tab?.connectionId);
+  if (profile?.driver === "redis") return `${profile.name} / DB ${redisTabDatabase(tab)}`;
   const data = queryTargetData(tab);
   const database = tabDatabase(tab) || data?.context?.database || "未选择数据库";
   const fixedSchema = tabSchema(tab);
@@ -821,7 +822,7 @@ function driverForConnection(connectionId) {
   return state.profiles.find((profile) => profile.id === connectionId)?.driver || "postgres";
 }
 function driverForTab(tab = activeTab()) {
-  return driverForConnection(tab?.connectionId || state.activeConnectionId);
+  return driverForConnection(tab ? tab.connectionId : state.activeConnectionId);
 }
 function driverForBrowse(browse) {
   return driverForConnection(browse?.connectionId || state.activeConnectionId);
@@ -1239,6 +1240,15 @@ function renderConnections() {
     : "未连接";
   refs.statusDot.className = `status-dot ${state.connectionStatuses[state.activeConnectionId] || ""}`;
   const active = state.profiles.find((p) => p.id === state.activeConnectionId);
+  const isRedis = active?.driver === "redis";
+  refs.newRedisKey.hidden = !isRedis;
+  refs.newRedisKey.disabled = state.connectionStatuses[state.activeConnectionId] !== "connected";
+  refs.objectsHeading.textContent = isRedis ? "Redis 键" : "数据库对象";
+  refs.objectsPane.setAttribute("aria-label", isRedis ? "Redis 键浏览器" : "数据库对象浏览器");
+  const actionLabel = newWorkspaceLabel();
+  refs.addQueryTab.title = shortcut(`${actionLabel} (⌘ T)`);
+  refs.addQueryTab.setAttribute("aria-label", actionLabel);
+  refs.welcomeQueryLabel.textContent = refs.welcomeShortcutLabel.textContent = actionLabel;
   const activeDriverLabel = active?.driver === "redis" ? "Redis" : active?.driver === "mysql" ? "MySQL" : "PostgreSQL";
   refs.headerContext.textContent = active
     ? `浏览实例：${active.name} · ${activeDriverLabel}`
@@ -1256,7 +1266,7 @@ function renderConnections() {
       ? "MySQL · 选中 SQL 可单独执行"
       : "PostgreSQL · 选中 SQL 可单独执行";
   if (refs.collapseTree) {
-    refs.collapseTree.hidden = false;
+    refs.collapseTree.disabled = state.connectionStatuses[state.activeConnectionId] !== "connected";
     const label = active?.driver === "redis" ? "收起所有 Redis 数据库" : "收起所有数据库和 Schema";
     refs.collapseTree.title = label;
     refs.collapseTree.setAttribute("aria-label", label);
@@ -1272,7 +1282,7 @@ function renderConnections() {
     refs.objectSearch.setAttribute("aria-label", label);
     refs.objectSearch.title = active?.driver === "redis" ? "" : "展开数据库后可搜索库内对象";
     refs.redisSearchDatabase.hidden = active?.driver !== 'redis';
-    refs.objectSearch.disabled = active?.driver === 'redis' && state.connectionStatuses[state.activeConnectionId] !== 'connected';
+    refs.objectSearch.disabled = state.connectionStatuses[state.activeConnectionId] !== "connected";
     if (active?.driver === 'redis') syncRedisSearchScope();
   }
   refs.refreshSchema.disabled = state.connectionStatuses[state.activeConnectionId] !== "connected";
@@ -1287,6 +1297,7 @@ async function loadConnections({ restore = true } = {}) {
   }
   try {
     state.profiles = orderConnections(await call("list_connections"), readConnectionOrder());
+    if (!state.activeConnectionId) renderTree();
     // Missing profiles must never delete restored SQL drafts. Their original
     // binding stays visible and runQuery refuses to execute until it exists.
     renderConnections();
@@ -1413,7 +1424,7 @@ async function selectConnection(id) {
   state.redisSearches.clear();
   state.redisSearchScope = 'db'; state.redisGlobalSearch = ''; state.redisLocalExpanded = null; state.redisSearchEpoch++;
   refs.objectSearch.value = "";
-  refs.objectSelection.textContent = driverForConnection(state.activeConnectionId) === "mysql" ? "展开数据库，浏览表和视图" : "展开数据库和 schema，浏览对象";
+  refs.objectSelection.textContent = treeBrowsingHint();
   state.visibleDatabases.clear();
   state.visibleSchemasByDatabase.clear();
   state.expandedDatabases.clear();
@@ -1623,7 +1634,7 @@ async function applySchemaPicker() {
   ) {
     state.selectedObject = null;
     state.selectedTreeKey = null;
-    refs.objectSelection.textContent = driverForConnection(state.activeConnectionId) === "mysql" ? "展开数据库，浏览表和视图" : "展开数据库和 schema，浏览对象";
+    refs.objectSelection.textContent = treeBrowsingHint();
   }
   updateEditorSchema();
   renderTree();
@@ -1687,7 +1698,7 @@ async function disconnectConnection(connectionId = state.activeConnectionId) {
     state.expandedSchemas.clear();
     state.selectedObject = null;
     state.selectedTreeKey = null;
-    refs.objectSelection.textContent = driverForConnection(state.activeConnectionId) === "mysql" ? "展开数据库，浏览表和视图" : "展开数据库和 schema，浏览对象";
+    refs.objectSelection.textContent = treeBrowsingHint();
     state.schemaPickerDatabase = null;
     state.schemaPickerDraft = null;
     state.schemasByDatabase.clear();
@@ -1827,6 +1838,28 @@ function mysqlDatabaseTree(database, query) {
 function postgresTreeObjects(database, schema) {
   return state.objectsBySchema.get(schemaKey(database, schema))?.filter(object => object.kind !== 'sequence');
 }
+function treeBrowsingHint() {
+  const driver = driverForConnection(state.activeConnectionId);
+  if (driver === "redis") return "展开逻辑库，浏览 Redis 键";
+  return driver === "mysql" ? "展开数据库，浏览表和视图" : "展开数据库和 schema，浏览对象";
+}
+function replaceObjectTreeRows(html) {
+  const tree = refs.objectTree;
+  const focus = document.activeElement;
+  const selector = '.tree-root, summary, .category-summary, .object-main, [data-tree-toggle]';
+  const restore = tree.contains(focus) && focus.matches(selector);
+  const key = restore ? treeTargetKey(treeTargetFromNode(focus)) : null;
+  tree.innerHTML = html;
+  if (!key) return;
+  const control = focus.matches('[data-tree-toggle]') ? '[data-tree-toggle]'
+    : focus.matches('.object-main') ? '.object-main' : '.tree-root, summary, .category-summary';
+  for (const node of tree.querySelectorAll(control)) {
+    if (treeTargetKey(treeTargetFromNode(node)) === key) {
+      node.focus({ preventScroll: true });
+      return;
+    }
+  }
+}
 function renderTree() {
   const activeProfile = state.profiles.find((profile) => profile.id === state.activeConnectionId);
   if (activeProfile?.driver === "redis") {
@@ -1836,7 +1869,8 @@ function renderTree() {
   refs.objectTree.dataset.driver = activeProfile?.driver || "";
   const query = refs.objectSearch.value.trim().toLowerCase();
   if (!activeProfile) {
-    refs.objectTree.innerHTML = `<div class="tree-welcome"><span class="database-icon">${databaseIcon}</span><strong>数据库对象</strong><p>选择左侧连接后，<br/>在这里浏览数据库、表和视图。</p><button class="quiet-btn" data-tree-connect>选择连接</button></div>`;
+    const hasProfiles = state.profiles.length > 0;
+    refs.objectTree.innerHTML = `<div class="tree-welcome"><span class="database-icon">${databaseIcon}</span><strong>数据库对象</strong><p>${hasProfiles ? "选择连接后，可浏览表、视图或 Redis 键。" : "添加连接后，可在这里浏览数据库对象。"}</p><button class="quiet-btn" data-tree-connect>${hasProfiles ? "选择连接" : "新建连接"}</button></div>`;
     return;
   }
   const driverLabel = activeProfile?.driver === "mysql" ? "MySQL" : "PostgreSQL";
@@ -1845,13 +1879,13 @@ function renderTree() {
   ];
   if (!state.activeConnectionId || state.connectionStatuses[state.activeConnectionId] !== "connected") {
     chunks.push(`<div class="tree-status">连接后加载 ${driverLabel} 数据库</div>`);
-    refs.objectTree.innerHTML = chunks.join("");
+    replaceObjectTreeRows(chunks.join(""));
     applyTreeSelection();
     return;
   }
   if (!state.databasesLoaded || !state.databases.length) {
     chunks.push(state.databasesLoaded ? '<div class="tree-status">没有可访问的数据库</div>' : '<div class="tree-status">正在读取数据库列表…</div>');
-    refs.objectTree.innerHTML = chunks.join("");
+    replaceObjectTreeRows(chunks.join(""));
     applyTreeSelection();
     return;
   }
@@ -1926,7 +1960,7 @@ function renderTree() {
     chunks.push(`<details class="system-databases"${open ? " open" : ""}><summary>${treeToggle("系统数据库", open)}<span class="tree-label">系统数据库</span><span class="count">${systemCount}</span></summary><div class="database-children">${systemRows.join("")}</div></details>`);
   }
   if (query && chunks.length === 1) chunks.push('<div class="tree-status">没有匹配的数据库或对象。<br/>可展开数据库后搜索库内对象，或<button data-clear-object-search>清除搜索</button>。</div>');
-  refs.objectTree.innerHTML = chunks.join("");
+  replaceObjectTreeRows(chunks.join(""));
   syncTreeQueries();
   applyTreeSelection();
   const connectionId = state.activeConnectionId;
@@ -2031,7 +2065,7 @@ function toggleTreeRow(row, expanded) {
 function clearTreeSelection() {
   state.selectedTreeKey = null;
   state.selectedObject = null;
-  refs.objectSelection.textContent = driverForConnection(state.activeConnectionId) === "mysql" ? "展开数据库，浏览表和视图" : "展开数据库和 schema，浏览对象";
+  refs.objectSelection.textContent = treeBrowsingHint();
   applyTreeSelection();
   if (refs.objectTree.contains(document.activeElement)) document.activeElement?.blur();
 }
@@ -2122,8 +2156,7 @@ function changeRedisSearchScope(value) {
     state.redisSearchScope = global ? 'all' : 'db';
   }
   if (!global) {
-    setRedisSearchDatabase(value);
-    selectTreeTarget({ type: 'redis-database', connectionId: state.activeConnectionId, driver: 'redis', database: state.redisActiveDatabase });
+    selectTreeTarget({ type: 'redis-database', connectionId: state.activeConnectionId, driver: 'redis', database: Number(value) });
     state.redisExpanded.add(state.redisActiveDatabase);
   }
   renderRedisTree();
@@ -2219,6 +2252,8 @@ function showRedisKeyDetails(key, database, connectionId = state.activeConnectio
   redisKeyDetails.open({ key, database: Number(database), connectionId, connectionName: profile?.name || connectionId, type: redisPageKeyType(pages?.get(Number(database)), key) ?? tab?.redisType, ttl: tab?.redisTtl });
 }
 function renderRedisTree() {
+  const consoleTab = activeExecutionTab();
+  if (consoleTab?.console) renderRedisConsoleDatabase(consoleTab);
   refs.objectTree.dataset.driver = "redis";
   syncRedisSearchScope();
   const expanded = state.redisExpanded;
@@ -2238,7 +2273,7 @@ function renderRedisTree() {
       const keys = page.keys.filter((key) => redisKeyMatchesSearch(key, query));
       const open = expanded.has(index) ? " open" : "";
       const count = query ? `${keys.length}${page.cursor ? "+" : ""} / ${database.keyCount ?? "—"}` : database.keyCount ?? (page.loaded ? `已加载 ${page.keys.length}` : "—");
-      chunks.push(`<details class="tree-database redis-database" data-redis-db="${index}"${open}><summary>${treeToggle(`DB ${index}`, Boolean(open))}<span class="database-icon redis-db-icon">${databaseIcon}</span><span class="tree-label">DB ${index}</span>${query ? '<small class="redis-search-badge">筛选中</small>' : ''}<span class="count">${escapeHtml(count)}</span></summary><div class="database-children redis-database-children">`);
+      chunks.push(`<details class="tree-database redis-database" data-redis-db="${index}"${open}><summary>${treeToggle(`DB ${index}`, Boolean(open))}<span class="database-icon redis-db-icon">${databaseIcon}</span><span class="tree-label">DB ${index}</span>${defaultDatabaseBadge(database)}${query ? '<small class="redis-search-badge">筛选中</small>' : ''}<span class="count">${escapeHtml(count)}</span></summary><div class="database-children redis-database-children">`);
       if (page.loading && !page.keys.length) chunks.push('<div class="tree-status">读取 key…</div>');
       else {
         if (page.error) chunks.push(`<div class="tree-status">刷新 key 失败，保留已加载结果：${escapeHtml(page.error)}</div>`);
@@ -2257,7 +2292,7 @@ function renderRedisTree() {
     }
     if (!loadedCount && !expanded.size) chunks.push('<div class="tree-status">选择要展开的 Redis DB</div>');
   }
-  refs.objectTree.innerHTML = chunks.join("");
+  replaceObjectTreeRows(chunks.join(""));
   applyTreeSelection();
   const connectionId = state.activeConnectionId;
   const requestId = state.redisRequest;
@@ -2563,7 +2598,7 @@ function renderHistory() {
         const time = historyTimeLabel(entry.timestamp);
         return `<button class="recent-query" data-history-index="${index}" title="${escapeHtml(`${context}\n${entry.sql}`)}"><span>${svgIcon('<circle cx="12" cy="12" r="8"/><path d="M12 7v5l3 2"/>')}</span><span class="recent-copy"><strong>${escapeHtml(entry.sql.replace(/\s+/g, " ").trim())}</strong><small>${escapeHtml(context)}${time ? ` · ${time}` : ""}</small></span></button>`;
       }).join("")
-    : `<div class="small-empty">${state.history.length ? '没有找到匹配的查询<br/><button data-clear-history-search>清除搜索</button>' : '最近执行的查询会保留在这里<br/>随时找回 SQL，继续工作'}</div>`;
+    : `<div class="small-empty">${state.history.length ? '没有找到匹配的查询<br/><button data-clear-history-search>清除搜索</button>' : '执行过的 SQL 和 Redis 命令会出现在这里'}</div>`;
 }
 function recordHistory(sql, tab = activeTab()) {
   const normalized = sql.trim();
@@ -2585,16 +2620,14 @@ function loadHistoryEntry(index) {
   openSavedQuery({ ...entry, connectionId: historyConnectionId(entry, state.profiles), database: historyDatabase(entry, state.profiles) });
 }
 function openSavedQuery(entry) {
-  closeRedisConsole();
   const connectionId = entry.connectionId || null;
+  const isRedis = driverForConnection(connectionId) === "redis";
   const tab = addTab(entry.sql, connectionId, null, {
-    title: entry.title, database: entry.database, schema: entry.schema,
+    title: entry.title, database: entry.database, schema: entry.schema, newQuery: isRedis,
   });
   if (!tab) return;
-  persistTabs();
-  state.editor?.focus();
   const missing = connectionId && !state.profiles.some(profile => profile.id === connectionId);
-  showToast(missing ? "SQL 已打开，原连接不可用；可复制 SQL 到新建查询中继续。" : "已在新标签打开查询");
+  showToast(missing ? "SQL 已打开，原连接不可用；可复制 SQL 到新建查询中继续。" : isRedis ? "命令已载入，按执行后运行" : "已在新标签打开查询");
   return tab;
 }
 function tabGlyph(tab) {
@@ -2604,6 +2637,13 @@ function tabGlyph(tab) {
     return `<span class="tab-glyph" data-catalog-icon="${kind}" title="${kindLabels[kind]}">${kindIcons[kind]}</span>`;
   }
   return `<span class="tab-glyph">${tab.console ? "CLI" : tab.structureOnly ? "DDL" : tab.browse ? "表" : "SQL"}</span>`;
+}
+function updateTabOverflow() {
+  const list = refs.queryTabs;
+  // Count the space the switcher itself occupies so the control disappears
+  // as soon as all tabs fit without it.
+  const available = list.clientWidth + refs.showWorkspaceTabs.offsetWidth;
+  refs.showWorkspaceTabs.hidden = list.scrollWidth <= available + 1;
 }
 function renderTabs() {
   syncTreeQueries();
@@ -2617,6 +2657,7 @@ function renderTabs() {
         `<div class="query-tab ${!state.redisConsole && tab.id === state.activeTabId ? "active" : ""} ${tab.running ? "running" : ""}" data-tab-id="${escapeHtml(tab.id)}" role="presentation"><button class="tab-select" data-tab-id="${escapeHtml(tab.id)}" role="tab" aria-selected="${!state.redisConsole && tab.id === state.activeTabId}" tabindex="${tab.id === state.activeTabId ? 0 : -1}" title="${escapeHtml(`${tab.title} · ${queryTargetDescription(tab)}${tab.mode === "read" ? " · 只读" : ""}`)}">${tabGlyph(tab)}<span class="tab-label">${escapeHtml(tab.title)}</span>${tab.mode === "read" ? '<span class="tab-readonly">只读</span>' : ""}</button><button class="tab-close" data-close-tab="${escapeHtml(tab.id)}" title="关闭标签" aria-label="关闭 ${escapeHtml(tab.title)}">×</button></div>`,
     )
     .join("");
+  updateTabOverflow();
   if (focusedTabId) refs.queryTabs.querySelector(`.tab-select[data-tab-id="${CSS.escape(focusedTabId)}"]`)?.focus({ preventScroll: true });
   if (focusedCloseId) {
     const target = refs.queryTabs.querySelector(`[data-close-tab="${CSS.escape(focusedCloseId)}"]`) || refs.queryTabs.querySelector('[aria-selected="true"]') || refs.addQueryTab;
@@ -2633,6 +2674,8 @@ function renderTabs() {
   refs.transactionState.hidden = true;
   if (isRedis) refs.editorHint.textContent = "Redis 命令 · 只读锁定后仅允许安全读取命令";
   const isConsole = tab?.console === true;
+  refs.draftSaveStatus.classList.toggle("console-session", isConsole);
+  if (isConsole) renderRedisConsoleDatabase(tab);
   if (refs.beginTransaction) refs.beginTransaction.hidden = isRedis;
   if (refs.commitTransaction) refs.commitTransaction.hidden = isRedis;
   if (refs.rollbackTransaction) refs.rollbackTransaction.hidden = isRedis;
@@ -2758,7 +2801,7 @@ function rememberActiveView() {
   // addTab pushes its new tab before activation. With no previous active tab,
   // activeTab's fallback would overwrite that tab with the empty editor.
   const tab = state.tabs.find((item) => item.id === state.activeTabId);
-  if (!tab || !state.editor) return;
+  if (!tab || !state.editor || state.redisConsole) return;
   state.editor.plugin(sqlIme)?.finish();
   tab.editorState = state.editor.state;
   tab.sql = tab.console && redisEditor
@@ -2813,6 +2856,33 @@ function activateTab(id, focus = true) {
     .querySelector(`[data-tab-id="${CSS.escape(id)}"]`)
     ?.scrollIntoView({ block: "nearest", inline: "nearest" });
 }
+function bindUnboundQuery(profile) {
+  const tab = activeExecutionTab();
+  if (!profile || !tab || tab.connectionId || tab.console || tab.browse || tab.redisKey != null || tab.running) return;
+  const redis = profile.driver === "redis";
+  if (redis && tab.sql.length) {
+    // A Redis session is temporary. Keep the unbound draft and its undo history.
+    if (addTab("", profile.id, null, { newQuery: true })) showToast("已打开 Redis 命令台，SQL 草稿保留在原标签");
+    return;
+  }
+  const postgres = (profile.driver || "postgres") === "postgres";
+  tab.connectionId = profile.id;
+  tab.database = postgres ? null : profile.database || null;
+  tab.awaitingDatabase = tab.chooseInitialDatabase = postgres;
+  tab.schema = null;
+  if (postgres) {
+    const visible = queryDatabaseOptions(profile.id);
+    if (visible) resolveInitialQueryDatabases(profile, visible);
+  } else if (redis) {
+    tab.console = true;
+    tab.redisDb = redisProfileDatabase(profile);
+    tab.database = String(tab.redisDb);
+    tab.title = `命令台 · DB ${tab.redisDb}`;
+  }
+}
+function newWorkspaceLabel(connectionId = state.activeConnectionId || activeExecutionTab()?.connectionId) {
+  return driverForConnection(connectionId) === "redis" ? "新建命令台" : "新建查询";
+}
 function addTab(sql = "", connectionId, browse = null, options = {}) {
   if (state.tabs.length >= MAX_QUERY_TABS) {
     showToast(`最多打开 ${MAX_QUERY_TABS} 个查询，请先关闭不需要的标签`);
@@ -2837,11 +2907,6 @@ function addTab(sql = "", connectionId, browse = null, options = {}) {
       defaultDatabase = tabDatabase(current);
       defaultSchema = tabSchema(current);
     }
-    if (current?.connectionId && current.connectionId === connectionId &&
-        (!state.activeConnectionId || defaultDatabase == null) &&
-        state.profiles.some(profile => profile.id === connectionId && profile.driver === "redis")) {
-      defaultDatabase = redisTabDatabase(current);
-    }
     const activeProfile = state.profiles.find(profile => profile.id === connectionId);
     if (!defaultDatabase && current?.connectionId === connectionId && activeProfile?.driver === "mysql" && !activeProfile.database) {
       defaultDatabase = tabDatabase(current) || queryTargetData(current)?.context?.database;
@@ -2853,12 +2918,15 @@ function addTab(sql = "", connectionId, browse = null, options = {}) {
     : null;
   const openedObject = objectTabTarget(options.openedObject || tabBrowse, connectionId);
   const structureOnly = Boolean(openedObject && options.openedObjectView === "structure" && !tabBrowse);
-  const requestedDatabase = options.database ?? browse?.database ?? defaultDatabase;
+  const redisConsole = Boolean(newQuery) && profile?.driver === "redis" && !openedObject && !tabBrowse;
+  // Blank consoles start at the connection default. Object actions and history
+  // carry an explicit database, independently of the browser's search scope.
+  const requestedDatabase = options.database ?? browse?.database ?? (redisConsole ? null : defaultDatabase);
   const database = requestedDatabase ?? profile?.database ?? null;
-  const redisDb = profile?.driver === "redis" ? resolveRedisDatabase({ database }, profile) : null;
+  const redisDb = profile?.driver === "redis" ? resolveRedisDatabase({ database: requestedDatabase }, profile) : null;
   const tab = {
     id: makeId("query"),
-    title: options.title || browse?.name || `查询 ${nextQueryNumber()}`,
+    title: options.title || browse?.name || (redisConsole ? `命令台 · DB ${redisDb}` : `查询 ${nextQueryNumber()}`),
     sql,
     connectionId,
     database: redisDb === null ? database : String(redisDb),
@@ -2875,7 +2943,7 @@ function addTab(sql = "", connectionId, browse = null, options = {}) {
     message: "",
     outputTab: structureOnly ? "structure" : "result",
     filter: "",
-    console: false,
+    console: redisConsole,
     consoleHistory: [],
   };
   if (newQuery && !openedObject && !tabBrowse && profile && (profile.driver || "postgres") === "postgres") {
@@ -2910,6 +2978,7 @@ async function closeTab(id) {
   const index = state.tabs.indexOf(target);
   if (id === state.activeTabId)
     activateTab(state.tabs[index === 0 ? 1 : index - 1].id);
+  if (target.console) void releaseRedisConsoleSession(target);
   state.tabs = state.tabs.filter((tab) => tab.id !== id);
   renderTabs();
   persistTabs();
@@ -3041,12 +3110,13 @@ function renderOutput() {
     refs.editorResult.hidden = false;
     refs.redisConsolePanel.hidden = true;
     refs.resultEmpty.hidden = false;
-    refs.resultEmpty.querySelector("h2").textContent = state.profiles.length ? "准备好，继续探索数据" : "让数据工作，更专注";
-    refs.resultEmpty.querySelector("p").textContent = state.profiles.length
+    const redisWelcome = driverForConnection(state.activeConnectionId) === "redis";
+    refs.resultEmpty.querySelector("h2").textContent = redisWelcome ? "浏览 Redis 键" : state.profiles.length ? "准备好，继续探索数据" : "让数据工作，更专注";
+    refs.resultEmpty.querySelector("p").textContent = redisWelcome ? "展开左侧逻辑库，选择键查看类型、值和过期时间，或打开命令台执行 Redis 命令。" : state.profiles.length
       ? "打开一个查询，或从左侧选择数据库中的表。你的 SQL 草稿会自动保存。"
       : "连接你的数据库，浏览数据、编写查询，在一个工作区完成。";
     refs.emptyActions.hidden = false;
-    refs.welcomeFeatures.hidden = false;
+    refs.welcomeFeatures.hidden = redisWelcome;
     refs.emptyNextAction.hidden = true;
     refs.welcomeConnect.textContent = state.profiles.length ? "＋ 新建连接" : "＋ 连接数据库";
     refs.resultEmpty.dataset.state = "welcome";
@@ -3301,11 +3371,33 @@ function redisConsoleOutput(payload) {
   for (const row of rows) lines.push(row.map((value) => cellText(value)).join(" | "));
   return lines.join("\n");
 }
+function renderRedisConsoleDatabase(tab) {
+  const database = redisTabDatabase(tab);
+  const profile = state.profiles.find(profile => profile.id === tab.connectionId);
+  const name = profile?.name || "Redis";
+  const databases = queryTreeSession(tab.connectionId)?.redisDatabases?.map(db => db.index) || [];
+  if (!databases.includes(database)) databases.push(database);
+  const picker = refs.redisConsoleDatabase;
+  refs.redisConsoleConnection.textContent = refs.redisConsoleConnection.title = name;
+  const signature = databases.join(",");
+  if (picker.dataset.options !== signature) {
+    picker.replaceChildren(...databases.map(db => new Option(`DB ${db}`, String(db))));
+    picker.dataset.options = signature;
+  }
+  picker.value = String(database);
+  const reason = tab.running || tab.confirming ? "当前命令完成后可切换逻辑库" : tab.redisMulti ? "请先结束 Redis 事务，再切换逻辑库"
+    : state.connectionStatuses[tab.connectionId] !== "connected" ? "连接实例后可切换逻辑库" : "";
+  picker.disabled = Boolean(reason);
+  picker.title = reason || `切换当前命令台的逻辑库（连接默认 DB ${redisProfileDatabase(profile)}）`;
+}
+function updateRedisInputActions(tab) {
+  refs.redisConsoleRun.disabled = Boolean(tab.running || !tab.sql?.trim());
+  refs.redisClearEditor.disabled = Boolean(tab.running || !tab.sql);
+}
 function renderRedisConsole(tab) {
-  const database = Number.isInteger(tab?.redisDb) ? tab.redisDb : redisTabDatabase(tab);
-  const profile = state.profiles.find((item) => item.id === tab.connectionId);
-  refs.redisConsoleContext.textContent = `${profile?.name || "Redis"} · DB ${database}`;
-  refs.redisConsoleRun.disabled = Boolean(tab.running);
+  const database = redisTabDatabase(tab);
+  renderRedisConsoleDatabase(tab);
+  updateRedisInputActions(tab);
   refs.closeRedisConsole.disabled = false;
   if (redisEditorSessionId !== tab.id) { redisEditor?.reset(tab.sql || ""); redisEditorSessionId = tab.id; }
   else redisEditor?.setValue(tab.sql || "");
@@ -3313,7 +3405,6 @@ function renderRedisConsole(tab) {
   const history = tab.consoleHistory || [];
   refs.redisOutputCount.textContent = history.length;
   refs.redisClearOutput.disabled = !history.length || Boolean(tab.running);
-  refs.redisClearEditor.disabled = Boolean(tab.running);
   const renderKey = `${tab.id}:${tab.consoleRevision || 0}`;
   if (refs.redisConsoleOutput.dataset.renderKey === renderKey) return;
   const output = refs.redisConsoleOutput;
@@ -4550,6 +4641,7 @@ async function closeTabsByIds(ids) {
     return;
   }
   if (!await confirmDiscardCellEdits(state.tabs.filter(tab => idSet.has(tab.id)))) return;
+  for (const tab of state.tabs) if (idSet.has(tab.id) && tab.console) void releaseRedisConsoleSession(tab);
   if (idSet.size === state.tabs.length) {
     state.tabs = [];
     state.activeTabId = null;
@@ -4810,7 +4902,7 @@ async function runRedisCommand(tab, sqlText, connectionId, drafts = []) {
         database,
         sql: sqlText,
         queryId: tab.queryId,
-        readOnly: tab.console ? false : !writeMode,
+        readOnly: !writeMode,
         console: Boolean(tab.console),
         consoleId: tab.console ? tab.id : null,
       },
@@ -4832,9 +4924,13 @@ async function runRedisCommand(tab, sqlText, connectionId, drafts = []) {
     trimResultMemory(tab);
     tab.message = `Redis 命令成功 · ${tab.result.rowCount} 行 · ${Number(tab.result.elapsedMs).toFixed(1)} ms${tab.result.truncated ? ' · 当前为部分输出，请分段读取完整数据' : ''}`;
     const selectMatch = tab.console && /^\s*SELECT\s+(\d+)\s*$/i.exec(sqlText);
-    if (selectMatch) {
+    const commandName = firstRedisCommand(sqlText);
+    if (tab.console && commandName === "MULTI" && payload.raw === "OK") tab.redisMulti = true;
+    if (tab.console && ["EXEC", "DISCARD", "RESET"].includes(commandName)) tab.redisMulti = false;
+    if (selectMatch && payload.raw === "OK") {
       tab.redisDb = Number(selectMatch[1]);
       tab.database = selectMatch[1];
+      if (state.tabs.includes(tab)) tab.title = `命令台 · DB ${tab.redisDb}`;
     }
     if (consoleEntry) {
       consoleEntry.output = redisConsoleOutput(payload);
@@ -4845,11 +4941,12 @@ async function runRedisCommand(tab, sqlText, connectionId, drafts = []) {
       tab.consoleRevision = (tab.consoleRevision || 0) + 1;
       persistTabs();
     }
-    if (!consoleEntry?.commandTruncated) recordHistory(sqlText, tab);
+    if (!consoleEntry?.commandTruncated) recordHistory(sqlText, { connectionId, database: String(database) });
     tab.outputTab = "result";
     if (isActive()) renderOutput();
   } catch (error) {
     if (tab.closed) return;
+    if (tab.console && /EXECABORT|without MULTI|事务状态已丢失/i.test(errorText(error))) tab.redisMulti = false;
     const cancelled = tab.cancelRequested || isQueryCancellation(error);
     tab.result = emptyResult();
     tab.error = !cancelled;
@@ -4947,7 +5044,7 @@ async function runQuery({ preserveResult = false, pagingRequest = null, preserve
     ? (redisEditor?.executionText() || tab.sql || "").trim()
     : selected || rawSql.trim();
   if (!sqlText) {
-    showToast("请先输入 SQL", "error");
+    showToast(tab.console ? "请先输入 Redis 命令" : "请先输入 SQL", "error");
     return;
   }
   const connectionId = tab.connectionId || state.activeConnectionId;
@@ -4963,7 +5060,7 @@ async function runQuery({ preserveResult = false, pagingRequest = null, preserve
   }
   if (tab.awaitingDatabase) { querySchemaSelect.open(); return; }
   if (profile?.driver === "redis") {
-    if (tab.console) return runRedisCommand(tab, sqlText, connectionId);
+    if (state.redisConsole === tab) return runRedisCommand(tab, sqlText, connectionId);
     const drafts = cellDraftsForTabs([tab]);
     if (hasSavingCellDrafts(drafts)) return;
     tab.confirming = true;
@@ -5795,8 +5892,7 @@ function shouldInspectJsonCell(cell) {
   return Boolean(jsonCellInfo(displayed, dataType, { allowJavaLong: driverForTab(tab) === 'redis' }));
 }
 
-function getCellEditState(cell) {
-  const tab = activeTab();
+function getCellEditState(cell, tab = activeTab()) {
   const capability = getCellEditCapability(tab, cell, driverForTab(tab));
   const table = tab?.browse || tab?.result?.editTable;
   if (capability.editable && driverForTab(tab) === "mysql" && state.transactionKeys.has(transactionKey(tab.connectionId, tabDatabase(tab))) && table?.engine && !/^innodb$/i.test(table.engine)) return { ...capability, editable: false, reason: "当前表引擎不能保证事务回滚，请先结束事务" };
@@ -5956,8 +6052,8 @@ async function commitTableCellEdits(drafts) {
 
 function openCellInspector({ column, columnIndex, value, rowIndex, context = null, draftValue, draftIsNull }) {
   const tab = context?.tab || activeTab();
-  const capability = getCellEditCapability(tab, { column, columnIndex, rowIndex }, driverForTab(tab));
-  if (!context && capability.editable) context = captureCellEdit(tab, { column, columnIndex, value, rowIndex }, capability);
+  const capability = getCellEditState({ column, columnIndex, value, rowIndex }, tab);
+  context ??= capability.context;
   const hasDraft = typeof draftValue === "string";
   const displayedValue = hasDraft ? draftValue : value?.$dbStudio === "mysql-binary" ? cellText(value) : value;
   const columnMetadata = tab?.browse?.columns?.find((item) => item.name === column);
@@ -5971,7 +6067,9 @@ function openCellInspector({ column, columnIndex, value, rowIndex, context = nul
   refs.expandCell.title = '放大详情窗口';
   cellReader.setWrap(true); refs.cellWrap.setAttribute('aria-pressed', 'true');
   refs.cellTitle.textContent = column;
-  refs.cellMeta.textContent = `第 ${rowIndex + 1} 行 · ${dataType || (value === null ? 'NULL' : typeof value)}`;
+  const position = resultGrid.visibleOrder.indexOf(rowIndex);
+  const location = position < 0 ? "此行已被筛选隐藏" : `第 ${position + 1} 行`;
+  refs.cellMeta.textContent = `${location} · ${dataType || (value === null ? 'NULL' : typeof value)}`;
   refs.cellValue.value = hasDraft ? draftValue : jsonInfo?.raw ?? (value === null ? "" : cellText(value));
   state.cellInspector.sourceText = hasDraft ? draftValue : jsonInfo?.raw ?? (value === null ? '' : cellText(value));
   state.cellInspector.textBaseline = refs.cellValue.value;
@@ -6307,13 +6405,15 @@ function updateConnectionFormForDriver() {
   if (refs.connectionModal) refs.connectionModal.classList.toggle("redis-driver", isRedis);
   const eyebrow = refs.connectionModal?.querySelector(".eyebrow");
   if (eyebrow) eyebrow.textContent = isRedis ? "REDIS" : isMysql ? "MYSQL" : "POSTGRESQL";
-  if (refs.connectionDatabaseLabel) refs.connectionDatabaseLabel.textContent = "数据库";
+  if (refs.connectionDatabaseLabel) refs.connectionDatabaseLabel.textContent = isRedis ? "默认逻辑库" : "数据库";
   if (refs.connectionUserLabel) refs.connectionUserLabel.textContent = isRedis ? "ACL 用户（可选）" : "用户名";
   if (refs.connectionDatabase) {
-    refs.connectionDatabase.removeAttribute("placeholder");
+    refs.connectionDatabase.inputMode = isRedis ? "numeric" : "text";
+    if (isRedis) refs.connectionDatabase.placeholder = "0";
+    else refs.connectionDatabase.removeAttribute("placeholder");
     refs.connectionDatabase.required = driver === "postgres";
   }
-  if (refs.connectionDatabaseField) refs.connectionDatabaseField.hidden = isRedis || isMysql;
+  if (refs.connectionDatabaseField) refs.connectionDatabaseField.hidden = isMysql;
   if (refs.connectionUser) {
     refs.connectionUser.removeAttribute("placeholder");
     refs.connectionUser.required = !isRedis;
@@ -6331,7 +6431,7 @@ function updateConnectionFormForDriver() {
     refs.connectionPort.value = defaultPort;
   const note = refs.connectionModal?.querySelector(".form-note");
   if (note) note.textContent = isRedis
-    ? "密码存入系统钥匙串。默认连接 DB 0，可在对象树中切换其他 DB。"
+    ? "新建命令台使用此逻辑库。留空使用 DB 0。"
     : isMysql
       ? "密码存入系统钥匙串。连接后从对象树中选择数据库。"
     : "密码存入系统钥匙串，连接配置保存在此设备。";
@@ -6381,6 +6481,12 @@ function validateConnectionForm() {
   for (const input of [refs.connectionName, refs.connectionHost, refs.connectionUser, refs.connectionDatabase]) {
     input.setCustomValidity(input.required && !input.value.trim() ? "请填写此项" : "");
   }
+  if (selectedConnectionDriver() === "redis") {
+    const database = refs.connectionDatabase.value.trim();
+    if (database && (!/^\d+$/.test(database) || Number(database) > 2147483647)) {
+      refs.connectionDatabase.setCustomValidity("请输入 0 至 2147483647 之间的整数");
+    }
+  }
   return refs.connectionForm.reportValidity();
 }
 function setConnectionBusy(busy, action = "save") {
@@ -6423,18 +6529,13 @@ async function saveConnection(event) {
     // The profile has been saved even if establishing the connection fails.
     await loadConnections({ restore: false });
     const tab = activeTab();
-    if (tab && !tab.connectionId && !tab.sql.trim() && !tab.browse && !tab.redisKey) {
-      tab.connectionId = saved.id;
-      const postgres = (saved.driver || "postgres") === "postgres";
-      tab.database = postgres ? null : saved.database || null;
-      tab.awaitingDatabase = postgres;
-      tab.chooseInitialDatabase = postgres;
-      tab.schema = null;
-    }
+    if (saved.driver === "redis" || !tab?.sql.trim()) bindUnboundQuery(saved);
     persistTabs();
     showFeedback("配置已保存，正在连接数据库…");
     const connected = await selectConnection(saved.id);
+    updateEditorSchema();
     renderTabs();
+    renderOutput();
     if (connected) {
       refs.connectionModal.close();
       showToast("已保存并连接");
@@ -6768,14 +6869,7 @@ function bindEvents() {
     const button = event.target.closest("[data-connection-id]");
     if (button) {
       const id = button.dataset.connectionId;
-      const tab = activeTab();
-      // A table/key tab belongs to the connection it was opened from. Picking
-      // another instance changes the browser context without silently sending
-      // that tab's later edits to the new server. A blank unbound query may
-      // still be conveniently attached to the selected instance.
-      if (tab && !tab.connectionId && !tab.redisKey && !tab.browse && !tab.running) {
-        tab.connectionId = id;
-      }
+      bindUnboundQuery(state.profiles.find(profile => profile.id === id));
       persistTabs();
       renderTabs();
       // Selecting an instance only changes the active context. Connection
@@ -6810,6 +6904,8 @@ function bindEvents() {
     renderTree();
   });
   refs.objectTree.addEventListener("keydown", (event) => {
+    navigateTreeRows(refs.objectTree, event);
+    if (event.defaultPrevented) return;
     const keyRow = event.target.closest('[data-redis-key]');
     if (keyRow && !event.isComposing && !event.altKey && !event.shiftKey) {
       const action = event.key === 'F2' ? 'rename' : ['Backspace', 'Delete'].includes(event.key) ? 'delete'
@@ -6891,7 +6987,10 @@ function bindEvents() {
     if (event.target.closest('summary')) event.preventDefault();
     if (event.target.closest('[data-tree-connect]')) {
       if (!state.profiles.length) refs.newConnection.click();
-      else commandPalette.open("连接");
+      else {
+        workspaceLayout.showPane("connections");
+        refs.connectionSearch.focus();
+      }
       return;
     }
     if (event.target.closest('[data-clear-object-search]')) {
@@ -7209,7 +7308,10 @@ function bindEvents() {
     ));
   });
   refs.redisSearchDatabase.addEventListener('change', () => changeRedisSearchScope(refs.redisSearchDatabase.value));
+  refs.newRedisKey.addEventListener("click", () => openRedisCreate(state.activeConnectionId, state.redisActiveDatabase));
   refs.addQueryTab.addEventListener("click", () => addTab());
+  refs.showWorkspaceTabs.addEventListener("click", () => workspaceTabPalette.open());
+  new ResizeObserver(updateTabOverflow).observe(refs.queryTabs.parentElement);
   refs.querySchemaBack.addEventListener("click", () => {
     const tab = activeTab();
     if (queryTargetLocked(tab)) return;
@@ -7393,9 +7495,16 @@ function bindEvents() {
       const tab = activeExecutionTab();
       if (!tab?.console) return;
       tab.sql = value;
-      refs.redisConsoleHint.textContent = redisCommandHint(value) || "输入命令查看参数说明";
-      persistTabs();
+      updateRedisInputActions(tab);
     }, onHint: value => { refs.redisConsoleHint.textContent = redisCommandHint(value) || "输入命令查看参数说明"; }, onRun: () => void runQuery() });
+  refs.redisConsoleDatabase.addEventListener("change", () => {
+    const tab = activeExecutionTab();
+    if (!tab?.console) return;
+    const database = Number(refs.redisConsoleDatabase.value);
+    renderRedisConsoleDatabase(tab);
+    if (refs.redisConsoleDatabase.disabled || database === redisTabDatabase(tab)) return;
+    void runRedisCommand(tab, `SELECT ${database}`, tab.connectionId);
+  });
   refs.redisConsoleRun.addEventListener("click", () => void runQuery());
   refs.redisClearEditor.addEventListener("click", () => { redisEditor.setValue(""); redisEditor.focus(); });
   refs.redisClearOutput.addEventListener("click", () => {
@@ -7486,7 +7595,10 @@ function bindEvents() {
       else refs.redisCreateFeedback.textContent = errorText(error);
     } finally { refs.applyRedisCreate.disabled = false; }
   });
-  refs.closeRedisConsole?.addEventListener("click", closeRedisConsole);
+  refs.closeRedisConsole?.addEventListener("click", () => {
+    if (state.redisConsole) closeRedisConsole();
+    else if (activeTab()?.console) void closeTab(activeTab().id);
+  });
   refs.stopQuery.addEventListener("click", async () => {
     const tab = activeTab();
     if (!tab?.queryId) return;
@@ -7980,22 +8092,34 @@ const desktopMenu = initDesktopMenu({
         { label: connected ? "断开连接" : "连接", disabled: state.connectionStatuses[id] === "connecting", run: () => connected ? disconnectConnection(id) : selectConnection(id) },
         { label: "编辑连接…", run: () => { fillConnection(profile); refs.connectionModal.showModal(); } },
         { label: "移动到分组…", run: () => connectionGroups.open(id) },
-        { label: "新建查询", run: () => addTab("", id, null, { newQuery: true }) },
+        { label: newWorkspaceLabel(id), run: () => addTab("", id, null, { newQuery: true }) },
         { label: "复制连接名称", run: () => copyText(profile.name) },
       ];
     }
     if (target.closest('input, textarea, .selectable-text, [contenteditable="true"], dialog[open]')) return null;
     return [
-      { label: "新建查询", run: () => addTab() },
+      { label: newWorkspaceLabel(), run: () => addTab() },
       { label: "新建连接…", run: () => refs.newConnection.click() },
       { label: "快速操作…", run: () => commandPalette.open() },
       { label: "重置工作区布局", run: () => refs.resetLayout.click() },
     ];
   },
 });
+function workspaceTabCommands() {
+  return state.tabs.map(tab => ({
+    id: `tab-${tab.id}`, title: tab.title,
+    description: `${queryTargetDescription(tab)}${activeExecutionTab() === tab ? " · 当前标签" : ""}`,
+    keywords: "标签 query tab", group: "切换标签", run: () => activateTab(tab.id),
+  }));
+}
+const workspaceTabPalette = createCommandPalette({
+  title: "切换标签", subtitle: "按标签名、连接或数据库查找", placeholder: "查找已打开的标签…",
+  emptyTitle: "没有匹配的标签", emptyDescription: "试试连接名或数据库名。", actionLabel: "切换",
+  getCommands: workspaceTabCommands, onError: error => showToast(errorText(error), "error"),
+});
 const commandPalette = createCommandPalette({
   getCommands: () => [
-    { id: "new-query", title: "新建查询", description: "打开一个 SQL 草稿", keywords: "sql query", shortcut: "⌘ T", group: "常用操作", run: () => addTab() },
+    { id: "new-query", title: newWorkspaceLabel(), description: newWorkspaceLabel() === "新建命令台" ? "打开 Redis 命令台" : "打开一个 SQL 草稿", keywords: "redis console sql query", shortcut: "⌘ T", group: "常用操作", run: () => addTab() },
     { id: "new-connection", title: "新建连接", description: "PostgreSQL、MySQL 或 Redis", keywords: "connect database", group: "常用操作", run: () => refs.newConnection.click() },
     { id: "search-objects", title: "快速打开对象", description: "搜索已加载的表、字段和 Redis key；Shift+Enter 看结构", shortcut: shortcut('⌘ K'), group: "常用操作", run: () => objectQuickOpen.open() },
     { id: 'locate-column', title: '定位结果列', description: '按列名、类型或序号定位宽表中的字段', shortcut: shortcut('⌘ J'), group: '当前查询', disabled: refs.locateColumn.disabled, run: () => columnNavigator.open(refs.locateColumn) },
@@ -8005,10 +8129,9 @@ const commandPalette = createCommandPalette({
     { id: "format-sql", title: "格式化 SQL", disabled: refs.formatQuery.disabled || refs.formatQuery.hidden || !activeTab(), group: "当前查询", run: () => refs.formatQuery.click() },
     { id: "open-sql", title: "打开 SQL 文件", disabled: Boolean(activeExecutionTab()?.console || driverForTab(activeExecutionTab()) === "redis"), group: "常用操作", run: () => refs.importSql.click() },
     { id: "save-sql", title: "保存 SQL 文件", shortcut: "⌘ S", disabled: !activeTab() || refs.saveSql.hidden, group: "当前查询", run: () => refs.saveSql.click() },
-    ...state.tabs.map(tab => ({ id: `tab-${tab.id}`, title: tab.title, description: queryTargetDescription(tab), keywords: "标签 query tab", group: "切换标签", run: () => activateTab(tab.id) })),
+    ...workspaceTabCommands(),
     ...state.profiles.map(profile => ({ id: `connection-${profile.id}`, title: profile.name, description: `${profile.driver || "postgres"} · ${profile.host}:${profile.port}`, keywords: "连接 connection", group: "数据库连接", run: async () => {
-      const tab = activeTab();
-      if (tab && !tab.connectionId && !tab.browse && !tab.redisKey && !tab.running) tab.connectionId = profile.id;
+      bindUnboundQuery(profile);
       await selectConnection(profile.id);
       updateEditorSchema(); renderTabs(); renderOutput(); persistTabs();
     } })),

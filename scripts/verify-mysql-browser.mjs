@@ -67,10 +67,20 @@ const select = async id => { await page.locator(`[data-connection-id="${id}"]`).
 const order = () => page.locator('[data-connection-card]').evaluateAll(cards => cards.map(card => card.dataset.connectionCard));
 try {
   await page.goto(`http://127.0.0.1:${server.address().port}`, { waitUntil: 'networkidle' });
+  await page.getByRole('button', { name: '选择连接', exact: true }).click();
+  assert.ok(await page.locator('#connectionSearch').evaluate(input => input === document.activeElement));
   await select('mysql-local');
   assert.equal(mysqlCalls('get_schema_objects').length, 0);
-  await page.locator('.mysql-database[data-database="warehouse"] > summary [data-tree-toggle]').click();
+  const warehouseRow = page.locator('.mysql-database[data-database="warehouse"] > summary');
+  await warehouseRow.focus();
+  await page.keyboard.press('ArrowRight');
   await page.locator('[data-object-id="warehouse.orders"]').waitFor({ state: "attached" });
+  assert.ok(await warehouseRow.evaluate(row => row === document.activeElement), 'catalog refresh lost keyboard focus');
+  await page.keyboard.press('ArrowDown');
+  assert.ok(await page.locator('.category-summary:focus').count(), 'down arrow did not enter visible categories');
+  await page.keyboard.press('Home');
+  assert.ok(await page.locator('.tree-root:focus').count(), 'Home did not return to the root');
+  assert.equal(await page.locator('.query-tab').count(), 0, 'moving focus opened a tab');
   assert.equal(await page.locator('.tree-schema').count(), 0);
   assert.equal(await page.locator('[data-display-schemas]').count(), 0);
   const tableGroup = page.locator('.mysql-database[data-database="warehouse"] .tree-category[data-kind="table"]');
@@ -100,17 +110,17 @@ try {
   await page.locator('.db-grid-edit-input').fill('9007199254740997'); await page.keyboard.press('Meta+s');
   await until(() => page.locator('#saveTableChanges').isDisabled());
   assert.ok(callsFor('execute_mutation').at(-1).args.request.sql.includes("SET `id` = CONVERT(X'39303037313939323534373430393937'"));
-  assert.ok(callsFor('execute_mutation').at(-1).args.request.sql.includes("WHERE `id` <=> CONVERT(X'39303037313939323534373430393933'"));
+  assert.ok(callsFor('execute_mutation').at(-1).args.request.sql.includes("WHERE `id` <=> 9007199254740993;"));
   await page.locator('#resultGrid [data-position="0"][data-column-index="1"]').dblclick();
   await page.locator('.db-grid-edit-input').fill('key-followup'); await page.keyboard.press('Control+s');
   await until(() => page.locator('#saveTableChanges').isDisabled());
-  assert.ok(callsFor('execute_mutation').at(-1).args.request.sql.includes("WHERE `id` <=> CONVERT(X'39303037313939323534373430393937'"));
+  assert.ok(callsFor('execute_mutation').at(-1).args.request.sql.includes("WHERE `id` <=> 9007199254740997;"));
   // Native metadata enables safe attribute edits rather than a rename-only form.
   await page.locator('#structureTab').click(); await page.locator('[data-edit-structure]').click();
   const editor = page.locator('.structure-editor-dialog'); await editor.waitFor();
   assert.deepEqual(await editor.getByRole('tab').allInnerTexts(), ['字段', '索引', '约束', '触发器', '定义']);
   assert.equal(await page.locator('#resultFooter').isVisible(), false);
-  const apply = editor.getByRole('button', { name: '下一步' });
+  const apply = editor.getByRole('button', { name: '保存', exact: true });
   assert.ok(await apply.isDisabled());
   await editor.getByRole('button', { name: 'status · 上移' }).click();
   assert.ok(await apply.isEnabled());
@@ -154,7 +164,6 @@ try {
   const run = async text => {
     const before = callsFor('execute_mutation').length;
     await sql.fill(text); await page.locator('#runQuery').click();
-    await page.locator('#confirmActionModal').waitFor({ state: 'visible' }); await page.locator('#confirmActionAccept').click();
     await until(() => callsFor('execute_mutation').length > before); await until(() => page.locator('#runQuery').isEnabled());
   };
   await run('ALTER TABLE `warehouse`.`orders` ADD note int;');
@@ -183,7 +192,7 @@ try {
   assert.equal(await page.locator('.mysql-database [data-kind="view"] .category-summary').getAttribute('aria-expanded'), 'true');
   assert.equal(mysqlCalls('get_schema_objects').length, beforeSwitch);
   failObjects = true;
-  await page.locator('.mysql-database > summary').click({ button: 'right' });
+  await page.locator('.mysql-database[data-database="warehouse"] > summary').click({ button: 'right' });
   await page.locator('[data-context-action="refresh-database"]').click();
   await page.locator('[data-retry-mysql-db="warehouse"]').waitFor();
   assert.ok(await page.locator('[data-object-id="warehouse.orders"]').isVisible());

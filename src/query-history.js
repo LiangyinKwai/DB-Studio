@@ -70,6 +70,7 @@ export function historyDatabase(entry, profiles = []) {
 export function historyContext(entry, profiles = []) {
   const connectionId = historyConnectionId(entry, profiles);
   const profile = profiles.find((item) => item.id === connectionId);
-  const parts = [profile?.name || profile?.driver, historyDatabase(entry, profiles), entry?.schema];
+  const database = historyDatabase(entry, profiles);
+  const parts = [profile?.name || profile?.driver, profile?.driver === "redis" && database != null ? `DB ${database}` : database, entry?.schema];
   return parts.filter((part) => part).join(" · ") || "本地历史";
 }

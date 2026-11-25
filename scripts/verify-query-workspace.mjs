@@ -136,6 +136,11 @@ try {
   assert.equal(await page.locator(".query-tab").count(), 35);
   assert.equal(await editor.innerText(), "SELECT 34;");
   assert.equal(await page.evaluate(() => JSON.parse(localStorage.getItem("db-studio.workspace-tabs.v2")).length), 35);
+  await page.getByRole("button", { name: "查看所有标签" }).click();
+  const switcher = page.getByRole("combobox", { name: "搜索切换标签" });
+  await switcher.fill("草稿 26");
+  await switcher.press("Enter");
+  assert.equal(await editor.innerText(), "SELECT 26;");
   // Eight executed tabs must release the oldest inactive results, keeping SQL.
   for (let index = 0; index < 8; index += 1) {
     await page.locator(`.tab-select[data-tab-id='restore-${index}']`).click();

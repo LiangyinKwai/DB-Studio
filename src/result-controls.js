@@ -32,7 +32,10 @@ export function initResultControls(refs) {
     panel.addEventListener('keydown', event => {
       if (event.isComposing) return;
       if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); close(true); }
-      else if (event.key === 'Tab') close(true);
+      else if (event.key === 'Tab') {
+        const controls = panel.querySelectorAll('input:not(:disabled), button:not(:disabled)');
+        if (menu || event.target === controls[event.shiftKey ? 0 : controls.length - 1]) close(true);
+      }
       else if (menu && ['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) {
         event.preventDefault();
         const buttons = [...panel.querySelectorAll('button:not(:disabled)')];

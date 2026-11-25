@@ -193,6 +193,18 @@ await check("new connections fill defaults and preserve custom values across dri
   await page.locator("#connectionDriverMenu [data-driver='redis']").click();
   expect(await page.locator("#connectionHost").inputValue() === "custom.host", "custom host replaced");
   expect(await page.locator("#connectionUser").inputValue() === "custom-user", "custom user replaced");
+  const db = page.getByRole("textbox", { name: "默认逻辑库" });
+  expect(await db.inputValue() === "0", "Redis default DB not shown");
+  await page.locator("#connectionName").fill("配置默认逻辑库");
+  await db.fill("-1");
+  const testsBefore = fixture.callsFor("test_connection").length;
+  await page.locator("#testConnection").click();
+  expect(await db.evaluate(input => !input.validity.valid), "invalid Redis DB accepted");
+  expect(fixture.callsFor("test_connection").length === testsBefore, "invalid Redis DB was sent to the backend");
+  await db.fill("4");
+  await page.locator("#testConnection").click();
+  await waitFor(() => fixture.callsFor("test_connection").length > testsBefore, "custom Redis DB");
+  expect(fixture.callsFor("test_connection").at(-1).args.request.profile.redisDb === 4, "configured DB not sent");
   await page.locator("#cancelConnection").click();
 });
 
@@ -317,39 +329,37 @@ await check("Redis console completes commands and shows argument hints without e
   await page.locator("#closeRedisConsole").click();
 });
 
-await check("Redis queries inherit DB 1 from consoles and keys and reopen history in DB 1", async () => {
+await check("Redis history preserves its command DB and blank consoles use the connection default", async () => {
   const run = async () => {
+    const runner = page.locator("#redisConsoleRun");
     const before = calls("execute_redis_command").length;
-    await page.locator("#runQuery").click();
+    await runner.click();
     await waitFor(() => calls("execute_redis_command").length > before, "DB 1 query");
-    await waitFor(() => page.locator("#runQuery").isEnabled(), "DB 1 query complete");
+    await waitFor(() => runner.isEnabled(), "DB 1 query complete");
     expect(calls("execute_redis_command").at(-1).args.request.database === 1, "query fell back to DB 0");
-    expect((await page.locator("#resultGrid").innerText()).includes("db1-only"), "DB 1 value missing");
+    expect((await page.locator("#redisConsoleOutput").innerText()).includes("db1-only"), "DB 1 value missing");
   };
   const fillQuery = async () => {
-    const editor = page.locator("#sqlEditor .cm-content");
+    const editor = page.locator("#redisCommandEditor .cm-content");
     await editor.click();
     await page.keyboard.press(process.platform === "darwin" ? "Meta+A" : "Control+A");
     await page.keyboard.type('GET "otherdb:key"');
   };
   await page.locator(".redis-database[data-redis-db='1'] > summary").click({ button: "right" });
   await page.locator("[data-redis-database-context-action='console']").click();
-  await page.locator("#addQueryTab").click();
-  expect(await page.locator("#queryTargetContext").innerText() === "DB 1", "console DB not inherited");
+  expect((await page.locator("#redisConsoleContext").innerText()).includes("DB 1"), "context console opened at the wrong DB");
   await fillQuery();
   await run();
   const historyToggle = page.locator("#toggleHistory");
   if (await historyToggle.getAttribute("aria-expanded") === "false") await historyToggle.click();
   await page.locator("#recentQueries .recent-query").filter({ hasText: 'GET "otherdb:key"' }).first().click();
-  expect(await page.locator("#queryTargetContext").innerText() === "DB 1", "history DB not restored");
+  expect(await page.locator("#redisConsoleDatabase").inputValue() === "1", "history DB not restored");
   await run();
   await expandRedisDatabase(1);
   await page.locator("[data-redis-db='1'][data-redis-key='otherdb:key']").click();
   await waitFor(() => page.locator("#tableToolbarTitle").innerText().then(value => value === "otherdb:key"), "DB 1 key tab");
   await page.locator("#addQueryTab").click();
-  expect(await page.locator("#queryTargetContext").innerText() === "DB 1", "key DB not inherited");
-  await fillQuery();
-  await run();
+  expect(await page.locator("#redisConsoleDatabase").inputValue() === "0", "key browser changed new-console default");
 });
 
 await check("Redis hash cell save uses CAS request and preserves connection scope", async () => {
@@ -459,7 +469,7 @@ await check("Redis SCAN empty pages retain a load-more control", async () => {
 
 await check("Redis MEMORY PURGE requires write confirmation", async () => {
   await page.locator("#addQueryTab").click();
-  const editor = page.locator("#sqlEditor .cm-content");
+  const editor = page.locator("#redisCommandEditor .cm-content");
   await editor.click();
   await page.keyboard.type("HG");
   await waitFor(() => page.locator(".cm-tooltip-autocomplete").isVisible(), `Redis editor completion: ${await editor.innerText()}`);
@@ -469,7 +479,7 @@ await check("Redis MEMORY PURGE requires write confirmation", async () => {
   await page.keyboard.type("MEMORY PURGE");
   const before = calls("execute_redis_command").length;
   let prompted = false;
-  await page.locator("#runQuery").click();
+  await page.locator("#redisConsoleRun").click();
   await page.locator("#confirmActionModal").waitFor();
   prompted = true;
   await page.locator("#confirmActionCancel").click();

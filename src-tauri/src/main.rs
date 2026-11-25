@@ -1489,7 +1489,9 @@ async fn execute_redis_command(
     let Some(_) = command.first() else {
         return Err("Redis 命令不能为空".into());
     };
-    if !request.console && request.read_only && !redis_adapter::is_read_command(&command) {
+    let selects_console_db = request.console && matches!(command.as_slice(), [name, db]
+        if name.eq_ignore_ascii_case("SELECT") && db.parse::<u32>().is_ok());
+    if request.read_only && !selects_console_db && !redis_adapter::is_read_command(&command) {
         return Err("当前连接已锁定为只读，不能执行该 Redis 命令".into());
     }
     let database = request

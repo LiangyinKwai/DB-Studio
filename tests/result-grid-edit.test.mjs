@@ -949,7 +949,20 @@ test('double-click opens JSON details but edits ordinary values', () => {
   grid.shouldInspectCell = ({ value }) => value === 'Alpha';
   grid.onInspect = ({ value }) => actions.push(['inspect', value]);
   grid.startCellEdit = cell => actions.push(['edit', grid.cellPayload(cell).value]);
-  grid.handleCellDoubleClick(cell(1));
-  grid.handleCellDoubleClick(cell(0));
+  grid.openCell(cell(1));
+  grid.openCell(cell(0));
   assert.deepEqual(actions, [['inspect', 'Alpha'], ['edit', 'Gamma']]);
+});
+
+test('double-click and Enter open the full value of a read-only scalar', () => {
+  const grid = editableGrid();
+  const focused = cell(1);
+  focused.closest = selector => selector === '[data-grid-cell]' ? focused : null;
+  grid.getCellEditState = () => ({ editable: false, reason: '查询结果只读' });
+  const inspected = [];
+  grid.onInspect = ({ value, reason }) => inspected.push([value, reason]);
+  grid.openCell(focused);
+  grid.handleKeydown({ key: 'Enter', target: focused, preventDefault() {} });
+  assert.deepEqual(inspected, [['Alpha', '查询结果只读'], ['Alpha', '查询结果只读']]);
+  assert.equal(grid.editSession, null);
 });

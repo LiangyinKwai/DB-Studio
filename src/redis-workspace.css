@@ -3,7 +3,9 @@ body .redis-console { display: flex; flex: 1; min-height: 0; flex-direction: col
 .redis-workspace-title, .redis-workspace-actions { display: flex; align-items: center; gap: 10px; min-width: 0; }
 .redis-workspace-title strong { font-size: 12px; font-weight: 600; white-space: nowrap; }
 .redis-workspace-mark { display: grid; place-items: center; width: 24px; height: 24px; border-radius: 6px; color: var(--driver-redis); background: color-mix(in srgb, var(--driver-redis) 12%, transparent); font: 600 12px/1 ui-monospace, monospace; }
-.redis-target-label { color: var(--app-muted); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 220px; padding-left: 10px; border-left: 1px solid var(--app-border); }
+.redis-target-label { display: inline-flex; align-items: center; gap: 8px; min-width: 0; color: var(--app-muted); font-size: 11px; white-space: nowrap; padding-left: 10px; border-left: 1px solid var(--app-border); }
+#redisConsoleConnection { min-width: 0; max-width: 180px; overflow: hidden; text-overflow: ellipsis; }
+.redis-target-label .app-select-trigger { flex: none; }
 .redis-workspace-actions .primary-btn { display: flex; align-items: center; gap: 14px; min-height: 30px; font-size: 12px; padding: 6px 12px; }
 .redis-workspace-actions kbd { color: inherit; font: 11px/1 ui-monospace, monospace; opacity: .75; }
 .redis-command-editor-shell { flex: none; height: 200px; min-height: 125px; max-height: 50%; overflow: auto; resize: vertical; background: var(--input-bg); }
@@ -42,7 +44,7 @@ body .redis-console-empty { display: flex; flex-direction: column; align-items: 
 .redis-command-kind { margin-left: 10px; padding: 2px 5px; border-radius: 4px; color: var(--driver-redis); background: color-mix(in srgb, var(--driver-redis) 12%, transparent); font-size: 10px; }
 .redis-completion-info code { display: block; margin-top: 10px; color: var(--syntax-keyword); white-space: normal; font: 11px/1.7 ui-monospace, monospace; }
 .redis-completion-info p { margin: 6px 0 0; color: var(--app-muted); }
-@media (max-width: 1200px) { .redis-editor-shortcuts { display: none; } .redis-workspace-toolbar { padding: 10px 12px; } .redis-target-label { max-width: 140px; } }
+@media (max-width: 1200px) { .redis-editor-shortcuts { display: none; } .redis-workspace-toolbar { padding: 10px 12px; } #redisConsoleConnection { max-width: 96px; } }
 
 .redis-type-field { display: grid; gap: 7px; }
 body .redis-type-picker .driver-picker-trigger { height: 54px; gap: 11px; }

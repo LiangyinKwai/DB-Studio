@@ -29,6 +29,7 @@ function fixture() {
   };
   vm.createContext(sandbox);
   vm.runInContext(section('function releaseRedisConsoleSession(', 'function tabDatabase(')
+    + section('function firstRedisCommand(', 'function isRedisReadCommand(')
     + section('async function runRedisCommand(', 'async function jumpBrowsePage('), sandbox);
   return { tab, state, calls, recorded, toasts, sandbox, execute: fn => { execute = fn; },
     run: text => sandbox.runRedisCommand(tab, text, 'redis'), close: () => sandbox.closeRedisConsole() };

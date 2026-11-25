@@ -3,7 +3,7 @@ import { createServer } from 'node:http';
 import { createReadStream, existsSync, mkdirSync, statSync } from 'node:fs';
 import { extname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { chromium, revealObject } from './playwright-import.mjs';
+import { chromium, revealObject, setTabReadOnly } from './playwright-import.mjs';
 import { createWorkspaceFixture } from './fixtures/workspace-fixture.mjs';
 
 const root = resolve(fileURLToPath(new URL('..', import.meta.url)));
@@ -77,6 +77,10 @@ try {
   assert.ok(await page.locator('#nextPage').isDisabled());
   await page.locator('#pageJumpToggle').click();
   await page.locator('#pageJumpInput').fill('1');
+  await page.locator('#pageJumpInput').press('Tab');
+  assert.equal(await page.evaluate(() => document.activeElement.id), 'pageJumpButton');
+  await page.locator('#pageJumpButton').press('Shift+Tab');
+  assert.equal(await page.evaluate(() => document.activeElement.id), 'pageJumpInput');
   await page.locator('#pageJumpInput').press('Enter');
   await label('第 1 页');
   assert.ok(await page.locator('#pageJumpPanel').isHidden());
@@ -100,6 +104,13 @@ try {
   await page.waitForFunction(() => !document.querySelector('#resultMeta').classList.contains('error'));
   await page.locator('#resultFilter').fill('value-12');
   await page.waitForFunction(() => document.querySelector('#resultCount').textContent === '11/500');
+  const firstMatch = page.locator('#resultGrid .db-grid-cell[data-position="0"][data-column-index="1"]');
+  await setTabReadOnly(page, true);
+  await firstMatch.dblclick();
+  assert.match(await page.locator('#cellMeta').innerText(), /^第 1 行/);
+  assert.ok(await page.locator('#saveCell').isHidden());
+  await page.locator('#closeCell').click();
+  await setTabReadOnly(page, false);
   await page.locator('#resultMore').click();
   await page.locator('#copyResults').click();
   const clipboard = await page.evaluate(() => navigator.clipboard.readText());

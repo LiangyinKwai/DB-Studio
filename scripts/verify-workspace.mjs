@@ -550,7 +550,7 @@ await check("connection driver choices switch fields and submit the selected dri
   await modal.screenshot({ path: join(evidenceDir, "connection-driver-menu.png") });
   await modal.locator("#connectionDriverMenu [data-driver='redis']").click();
   await modal.screenshot({ path: join(evidenceDir, "connection-redis.png") });
-  expect(!(await modal.locator("#connectionDatabaseField").isVisible()), "Redis DB input should be removed from the connection form");
+  expect(await modal.locator("#connectionDatabaseField").isVisible(), "Redis default DB field missing");
   expect(await modal.locator("#connectionPort").inputValue() === "6379", "Redis port did not update");
   expect(await modal.locator("#connectionTlsField").isVisible(), "Redis TLS field did not appear");
   const before = calls("test_connection").length;
